@@ -1,0 +1,26 @@
+[server]
+http_bind = "0.0.0.0:8200"
+resp3_bind = "0.0.0.0:8201"
+
+[storage]
+data_dir = "/data"
+
+# Cipher — message encryption
+[engines.cipher]
+enabled = true
+
+# Herald creates keyrings dynamically (herald-room-{id})
+# No pre-seeded keyrings needed
+
+# Veil — blind index search
+[engines.veil]
+enabled = true
+default_result_limit = 100
+
+# Sentry — authorization policies
+[engines.sentry]
+enabled = true
+
+# Chronicle — audit events
+[engines.chronicle]
+enabled = true

@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  herald:
+    build: .
+    ports:
+      - "6200:6200"
+      - "6201:6201"
+    volumes:
+      - ./herald.toml:/data/herald.toml:ro
+      - herald-data:/data/herald-data
+    restart: unless-stopped
+
+  # Optional: ShroudB Moat instance
+  # Uncomment and configure to enable encryption, search, authz, etc.
+  #
+  # shroudb-moat:
+  #   image: ghcr.io/nicklucas/shroudb-moat:latest
+  #   ports:
+  #     - "8200:8200"
+  #     - "8201:8201"
+  #   volumes:
+  #     - ./moat.toml:/data/moat.toml:ro
+  #     - moat-data:/data/moat-data
+  #   environment:
+  #     SHROUDB_MASTER_KEY: "your-64-char-hex-master-key"
+
+volumes:
+  herald-data:

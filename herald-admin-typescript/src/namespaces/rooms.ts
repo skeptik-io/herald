@@ -1,0 +1,31 @@
+import type { HttpTransport } from "../transport.js";
+import type { Room } from "../types.js";
+
+export class RoomNamespace {
+  constructor(private transport: HttpTransport) {}
+
+  async create(
+    id: string,
+    name: string,
+    options?: { encryption_mode?: string; meta?: unknown },
+  ): Promise<Room> {
+    return this.transport.request<Room>("POST", "/rooms", {
+      id,
+      name,
+      encryption_mode: options?.encryption_mode,
+      meta: options?.meta,
+    });
+  }
+
+  async get(id: string): Promise<Room> {
+    return this.transport.request<Room>("GET", `/rooms/${encodeURIComponent(id)}`);
+  }
+
+  async update(id: string, options: { name?: string; meta?: unknown }): Promise<void> {
+    return this.transport.request("PATCH", `/rooms/${encodeURIComponent(id)}`, options);
+  }
+
+  async delete(id: string): Promise<void> {
+    return this.transport.request("DELETE", `/rooms/${encodeURIComponent(id)}`);
+  }
+}

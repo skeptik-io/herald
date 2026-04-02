@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: Check + Lint + Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Configure ShroudB registry
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [source.crates-io]
+          replace-with = "shroudb-cratesio"
+
+          [source.shroudb-cratesio]
+          registry = "sparse+https://crates.shroudb.dev/api/v1/cratesio/"
+
+          [registries.shroudb-cratesio]
+          index = "sparse+https://crates.shroudb.dev/api/v1/cratesio/"
+
+          [registries.shroudb]
+          index = "sparse+https://crates.shroudb.dev/api/v1/crates/"
+          EOF
+
+      - name: Configure ShroudB registry token
+        run: |
+          echo "[registries.shroudb-cratesio]" >> ~/.cargo/credentials.toml
+          echo "token = \"${{ secrets.SHROUDB_REGISTRY_TOKEN }}\"" >> ~/.cargo/credentials.toml
+          echo "[registries.shroudb]" >> ~/.cargo/credentials.toml
+          echo "token = \"${{ secrets.SHROUDB_REGISTRY_TOKEN }}\"" >> ~/.cargo/credentials.toml
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --test integration --test bench_latency -- --test-threads=1
+        env:
+          SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  sdk-check:
+    name: SDK Type Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: TypeScript Browser SDK
+        working-directory: herald-sdk-typescript
+        run: npm install && npx tsc --noEmit
+
+      - name: TypeScript Admin SDK
+        working-directory: herald-admin-typescript
+        run: npm install && npx tsc --noEmit
+
+      - name: Go Admin SDK
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+      - run: cd herald-admin-go && go build ./...
+
+      - name: Python Admin SDK
+        working-directory: herald-admin-python
+        run: python3 -c "from herald_admin import HeraldAdmin"
+
+      - name: Ruby Admin SDK
+        working-directory: herald-admin-ruby
+        run: ruby -e "require_relative 'lib/herald_admin'"

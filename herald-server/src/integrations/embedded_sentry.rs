@@ -1,0 +1,64 @@
+//! Embedded SentryOps — runs SentryEngine in-process, no TCP.
+
+use std::sync::Arc;
+
+use shroudb_acl::{PolicyEffect, PolicyPrincipal, PolicyRequest, PolicyResource};
+use shroudb_sentry_engine::engine::{SentryConfig, SentryEngine};
+use shroudb_storage::EmbeddedStore;
+
+use super::{SentryError, SentryOps};
+
+pub struct EmbeddedSentryOps {
+    engine: Arc<SentryEngine<EmbeddedStore>>,
+}
+
+impl EmbeddedSentryOps {
+    pub async fn new(store: Arc<EmbeddedStore>) -> Result<Self, SentryError> {
+        let config = SentryConfig::default();
+        let engine = SentryEngine::new(store, config, None)
+            .await
+            .map_err(|e| SentryError::Operation(format!("engine init: {e}")))?;
+        Ok(Self {
+            engine: Arc::new(engine),
+        })
+    }
+
+    pub fn engine(&self) -> &Arc<SentryEngine<EmbeddedStore>> {
+        &self.engine
+    }
+}
+
+#[async_trait::async_trait]
+impl SentryOps for EmbeddedSentryOps {
+    async fn evaluate(
+        &self,
+        subject: &str,
+        action: &str,
+        resource: &str,
+    ) -> Result<(), SentryError> {
+        let request = PolicyRequest {
+            principal: PolicyPrincipal {
+                id: subject.to_string(),
+                roles: vec![],
+                claims: Default::default(),
+            },
+            action: action.to_string(),
+            resource: PolicyResource {
+                id: resource.to_string(),
+                resource_type: "herald".to_string(),
+                attributes: Default::default(),
+            },
+        };
+
+        match self.engine.evaluate_request(&request) {
+            Ok(signed) => match signed.decision {
+                PolicyEffect::Permit => Ok(()),
+                PolicyEffect::Deny => Err(SentryError::Denied(format!(
+                    "policy={} denied",
+                    signed.matched_policy.as_deref().unwrap_or("default-deny"),
+                ))),
+            },
+            Err(e) => Err(SentryError::Operation(e.to_string())),
+        }
+    }
+}

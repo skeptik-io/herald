@@ -1,0 +1,54 @@
+# Herald
+
+Multi-tenant WebSocket chat server. Standalone Rust project using ShroudB for storage, encryption, search, and authorization.
+
+## Read Order
+
+1. `AGENTS.md` — workspace layout, message pipeline, integration architecture
+2. `ARCHITECTURE.md` — full protocol specification
+3. `DOCS.md` — configuration reference, API reference
+
+## Commands
+
+```bash
+cargo build --release
+cargo test --workspace
+cargo test --test bench_latency -- --nocapture --test-threads=1
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+All must pass before any push.
+
+## Rules
+
+- **Herald is not a ShroudB engine.** Standalone project. Uses ShroudB crates (storage, store, engine crates) as dependencies.
+- **No external database.** Storage is ShroudB WAL (`shroudb-storage`). Encrypted at rest. Master key from `SHROUDB_MASTER_KEY` env var.
+- **Multi-tenant by default.** Every store key is `{tenant_id}/...`. Every registry uses `(tenant_id, room_id)` composite keys. JWT must include `tenant` claim.
+- **Three engine modes.** Embedded (in-process, ~0.02ms), Remote (TCP with circuit breaker, ~0.3ms), or Disabled (plaintext). Trait boundary (`CipherOps`, `VeilOps`, `SentryOps`) makes mode transparent to handlers.
+- **Single-tenant DX.** `--single-tenant` (default) auto-creates a `default` tenant from config-level `jwt_secret` and `api.tokens`. No admin API needed.
+- **No unwrap on fallible ops in production.** Use `?`, `if let`, or `match`. Mocks in `integrations/mod.rs` may use `lock().unwrap()`.
+- **Decrypt failures skip messages.** Never send ciphertext to clients.
+- **Circuit breakers on all remote calls.** 5 failures → open, 30s cooldown. Sentry fail-open (permit when circuit trips).
+- **Latency instrumented.** Every message pipeline stage has a Prometheus histogram. Check `/metrics`.
+
+## Test Structure
+
+- `tests/integration.rs` — 6 multi-tenant tests (WAL storage, no Postgres)
+- `tests/bench_latency.rs` — 3 benchmarks: plaintext WAL, encrypted remote, encrypted embedded
+
+Tests use `EphemeralKey` (random master key per test) and `tempfile` directories for isolation.
+
+## SDK Structure
+
+- `herald-sdk-typescript/` — Browser WebSocket client (event-driven, reconnect, dedup)
+- `herald-admin-typescript/` — Node.js HTTP admin (namespaced: rooms, members, messages, presence)
+- `herald-admin-go/` — Go HTTP admin (context-based)
+- `herald-admin-python/` — Python HTTP admin (zero external deps)
+- `herald-admin-ruby/` — Ruby HTTP admin (net/http)
+
+## Ecosystem
+
+- **ShroudB Sigil** — tenant user auth (signup, login, JWT sessions)
+- **ShroudB Sentry** — ABAC authorization (embedded or remote)
+- **Meterd** (`/Users/nlucas/dev/skeptik/meterd/`) — MAU tracking, quota enforcement, Stripe billing

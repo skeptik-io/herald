@@ -1,0 +1,19 @@
+services:
+  shroudb:
+    image: shroudb/moat:latest
+    environment:
+      SHROUDB_MASTER_KEY: "6a8a9e425b936a319de0727adec085ecde70eb6d8cdf70a4022dcc64dc56afd2"
+    volumes:
+      - ./config/moat.toml:/data/moat.toml:ro
+    ports:
+      - "8201:8201"
+
+  herald:
+    build: .
+    ports:
+      - "6200:6200"
+      - "6201:6201"
+    volumes:
+      - ./config/herald-test.toml:/data/herald.toml:ro
+    depends_on:
+      - shroudb

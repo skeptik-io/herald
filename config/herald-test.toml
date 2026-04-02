@@ -1,0 +1,26 @@
+[server]
+ws_bind = "0.0.0.0:6200"
+http_bind = "0.0.0.0:6201"
+log_level = "info"
+max_messages_per_sec = 1000
+
+[store]
+path = "/data/herald.db"
+message_ttl_days = 7
+
+[auth]
+jwt_secret = "stress-test-jwt-secret-for-herald"
+jwt_issuer = "stress-test"
+
+[auth.api]
+tokens = ["stress-test-api-token"]
+
+[presence]
+linger_secs = 5
+manual_override_ttl_secs = 3600
+
+[shroudb]
+cipher_addr = "shroudb:8201"
+veil_addr = "shroudb:8201"
+sentry_addr = "shroudb:8201"
+chronicle_addr = "shroudb:8201"

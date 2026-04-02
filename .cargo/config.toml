@@ -1,0 +1,13 @@
+[source.crates-io]
+replace-with = "shroudb-cratesio"
+
+[source.shroudb-cratesio]
+registry = "sparse+https://crates.shroudb.dev/api/v1/cratesio/"
+
+[registries.shroudb-cratesio]
+index = "sparse+https://crates.shroudb.dev/api/v1/cratesio/"
+credential-provider = ["cargo:token"]
+
+[registries.shroudb]
+index = "sparse+https://crates.shroudb.dev/api/v1/crates/"
+credential-provider = ["cargo:token"]

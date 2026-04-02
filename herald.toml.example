@@ -1,0 +1,83 @@
+# Herald — Multi-Tenant WebSocket Chat Server
+# Copy to herald.toml and edit for your environment.
+# Set SHROUDB_MASTER_KEY env var (64 hex chars) before running.
+
+# ----------------------------------------------------------------------
+# Server
+# ----------------------------------------------------------------------
+
+[server]
+ws_bind = "0.0.0.0:6200"       # WebSocket — browsers connect here
+http_bind = "0.0.0.0:6201"     # HTTP API — backends + admin
+log_level = "info"              # trace | debug | info | warn | error
+max_messages_per_sec = 10       # Per-connection WS rate limit
+api_rate_limit = 100            # HTTP API requests per minute
+shutdown_timeout_secs = 30      # Graceful drain timeout
+
+# ----------------------------------------------------------------------
+# Storage (ShroudB WAL engine)
+# ----------------------------------------------------------------------
+
+[store]
+path = "./herald-data"          # Data directory (WAL + snapshots)
+message_ttl_days = 7            # Messages older than this are pruned hourly
+
+# ----------------------------------------------------------------------
+# Authentication
+# ----------------------------------------------------------------------
+
+[auth]
+# Single-tenant mode: set jwt_secret here.
+# Multi-tenant mode: each tenant has its own jwt_secret in the DB.
+jwt_secret = "your-hmac-secret"
+jwt_issuer = "app-backend"
+
+# Super admin token for /admin/* endpoints (multi-tenant mode)
+super_admin_token = "your-super-admin-token"
+
+# API tokens for the default tenant (single-tenant mode)
+[auth.api]
+tokens = ["your-api-token"]
+
+# ----------------------------------------------------------------------
+# Presence
+# ----------------------------------------------------------------------
+
+[presence]
+linger_secs = 10                    # Delay before broadcasting offline
+manual_override_ttl_secs = 14400    # 4 hours — DND/away expiry
+
+# ----------------------------------------------------------------------
+# Webhook (optional — app sync)
+# ----------------------------------------------------------------------
+
+# [webhook]
+# url = "https://app.example.com/webhooks/herald"
+# secret = "webhook-signing-secret"
+# retries = 3
+
+# ----------------------------------------------------------------------
+# TLS (optional)
+# ----------------------------------------------------------------------
+
+# [tls]
+# cert_path = "/path/to/cert.pem"
+# key_path = "/path/to/key.pem"
+
+# ----------------------------------------------------------------------
+# ShroudB Remote Engines (optional)
+# ----------------------------------------------------------------------
+# By default, Cipher/Veil/Sentry run embedded (in-process).
+# Set these to use remote TCP engines instead.
+
+# [shroudb]
+# cipher_addr = "127.0.0.1:6599"
+# cipher_token = "herald-cipher-token"
+# veil_addr = "127.0.0.1:6799"
+# veil_token = "herald-veil-token"
+# sentry_addr = "127.0.0.1:6899"
+# sentry_token = "herald-sentry-token"
+# courier_addr = "127.0.0.1:6999"
+# courier_token = "herald-courier-token"
+# chronicle_addr = "127.0.0.1:7099"
+# chronicle_token = "herald-chronicle-token"

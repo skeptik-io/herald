@@ -220,20 +220,38 @@ Herald uses ShroudB's WAL-based storage engine. All data is encrypted at rest us
 - `herald.messages` — messages (key: `{tenant_id}/{room_id}/{seq:020}`)
 - `herald.cursors` — read positions (key: `{tenant_id}/{room_id}/{user_id}`)
 
-**Encryption modes** (per-room):
-- `plaintext` — no encryption beyond storage-level. Default.
-- `server_encrypted` — Cipher encrypts message bodies before storage. Veil indexes for search.
+**Encryption modes** (per-room, set at creation time via `encryption_mode` field):
+
+| Mode | Message Bodies | Search | Cost |
+|---|---|---|---|
+| `plaintext` (default) | Stored as-is in WAL | Veil indexes if available | ~0.10ms per message |
+| `server_encrypted` | Cipher-encrypted before WAL write | Veil blind indexes | ~0.25ms per message (embedded) |
+
+Both modes benefit from storage-level encryption (the WAL is always AES-256-GCM encrypted via the master key). `server_encrypted` adds an additional per-message Cipher keyring encryption on top, so message bodies are double-encrypted and only readable with both the master key and the room's Cipher keyring.
+
+To create an encrypted room:
+```bash
+curl -X POST http://localhost:6201/rooms \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"id": "secure", "name": "Secure Room", "encryption_mode": "server_encrypted"}'
+```
+
+Each `server_encrypted` room automatically gets:
+- A Cipher keyring: `herald-{tenant_id}-room-{room_id}` (AES-256-GCM)
+- A Veil blind index: `herald-{tenant_id}-room-{room_id}`
 
 ---
 
 ## ShroudB Engine Modes
 
-| Engine | Embedded | Remote | Purpose |
-|---|---|---|---|
-| **Cipher** | `EmbeddedCipherOps` | `RemoteCipherOps` → `ResilientCipher` | Message encryption |
-| **Veil** | `EmbeddedVeilOps` | `RemoteVeilOps` → `ResilientVeil` | Blind index search |
-| **Sentry** | `EmbeddedSentryOps` | `RemoteSentryOps` → `ResilientSentry` | Authorization |
-| **Courier** | — (remote only) | `RemoteCourierOps` → `ResilientCourier` | Offline notifications |
-| **Chronicle** | — (remote only) | `RemoteChronicleOps` → `ResilientChronicle` | Audit trail |
+Cipher, Veil, and Sentry initialize **embedded by default** — no configuration needed. They share Herald's storage engine with separate namespaces. Remote mode is available as an override via `[shroudb]` config.
 
-Resilient wrappers add circuit breaker (5 failures → open, 30s cooldown) + 10s request timeout. Sentry is fail-open when circuit trips.
+| Engine | Default | Remote Override | Purpose |
+|---|---|---|---|
+| **Cipher** | Embedded (automatic) | `cipher_addr` in `[shroudb]` | Message encryption |
+| **Veil** | Embedded (automatic) | `veil_addr` in `[shroudb]` | Blind index search |
+| **Sentry** | Embedded (automatic) | `sentry_addr` in `[shroudb]` | Authorization |
+| **Courier** | Disabled | `courier_addr` in `[shroudb]` | Offline notifications |
+| **Chronicle** | Disabled | `chronicle_addr` in `[shroudb]` | Audit trail |
+
+Remote wrappers add circuit breaker (5 failures → open, 30s cooldown) + 10s request timeout. Sentry is fail-open when circuit trips.

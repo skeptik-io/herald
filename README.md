@@ -44,7 +44,7 @@ curl -X POST http://localhost:6201/rooms/general/members \
 
 - **Storage**: ShroudB WAL engine — encrypted at rest, ~80µs writes (vs ~580µs Postgres). No external database.
 - **Multi-tenant**: Each tenant has isolated rooms, members, and JWT secrets. `--single-tenant` mode for self-hosted.
-- **ShroudB engines**: Cipher, Veil, and Sentry run embedded (in-process) or remote (TCP). Embedded: 0.25ms encrypted messages. Remote: 1ms.
+- **ShroudB engines**: Cipher, Veil, and Sentry run **embedded by default** — no config needed. Encryption, search, and authorization work out of the box. Remote mode available via `[shroudb]` config.
 - **Circuit breakers**: All remote engine connections have timeout + circuit breaker + graceful degradation.
 - **Latency histograms**: Per-stage Prometheus metrics (encrypt, store, index, fanout).
 

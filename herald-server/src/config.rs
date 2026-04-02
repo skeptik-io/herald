@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -297,40 +298,59 @@ impl HeraldConfig {
                 .map_err(|e| anyhow::anyhow!("keep auth failed: {e}"))?;
         }
 
-        // Pull secrets — log warnings for missing keys, don't fail
+        // Pull secrets — Keep stores values as base64, decode them.
+        // Master key is hex (not base64) — handled separately below.
+        let decode_keep = |val: &str| -> Result<String, anyhow::Error> {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(val)
+                .map_err(|e| anyhow::anyhow!("base64 decode: {e}"))?;
+            Ok(String::from_utf8(bytes)?)
+        };
+
         match client.get("herald/jwt-secret", None).await {
-            Ok(result) => {
-                self.auth.jwt_secret = Some(result.value);
-                tracing::info!("loaded herald/jwt-secret from Keep");
-            }
+            Ok(result) => match decode_keep(&result.value) {
+                Ok(secret) => {
+                    self.auth.jwt_secret = Some(secret);
+                    tracing::info!("loaded herald/jwt-secret from Keep");
+                }
+                Err(e) => tracing::warn!("herald/jwt-secret decode failed: {e}"),
+            },
             Err(e) => tracing::warn!("herald/jwt-secret not in Keep: {e}"),
         }
         match client.get("herald/super-admin-token", None).await {
-            Ok(result) => {
-                self.auth.super_admin_token = Some(result.value);
-                tracing::info!("loaded herald/super-admin-token from Keep");
-            }
+            Ok(result) => match decode_keep(&result.value) {
+                Ok(token) => {
+                    self.auth.super_admin_token = Some(token);
+                    tracing::info!("loaded herald/super-admin-token from Keep");
+                }
+                Err(e) => tracing::warn!("herald/super-admin-token decode failed: {e}"),
+            },
             Err(e) => tracing::warn!("herald/super-admin-token not in Keep: {e}"),
         }
         match client.get("herald/api-tokens", None).await {
-            Ok(result) => {
-                self.auth.api.tokens = result
-                    .value
-                    .split(',')
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-                    .collect();
-                tracing::info!("loaded herald/api-tokens from Keep");
-            }
+            Ok(result) => match decode_keep(&result.value) {
+                Ok(tokens) => {
+                    self.auth.api.tokens = tokens
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect();
+                    tracing::info!("loaded herald/api-tokens from Keep");
+                }
+                Err(e) => tracing::warn!("herald/api-tokens decode failed: {e}"),
+            },
             Err(e) => tracing::warn!("herald/api-tokens not in Keep: {e}"),
         }
         match client.get("herald/webhook-secret", None).await {
-            Ok(result) => {
-                if let Some(ref mut wh) = self.webhook {
-                    wh.secret = result.value;
-                    tracing::info!("loaded herald/webhook-secret from Keep");
+            Ok(result) => match decode_keep(&result.value) {
+                Ok(secret) => {
+                    if let Some(ref mut wh) = self.webhook {
+                        wh.secret = secret;
+                        tracing::info!("loaded herald/webhook-secret from Keep");
+                    }
                 }
-            }
+                Err(e) => tracing::warn!("herald/webhook-secret decode failed: {e}"),
+            },
             Err(e) => tracing::debug!("herald/webhook-secret not in Keep: {e}"),
         }
 

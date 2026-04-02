@@ -322,6 +322,15 @@ impl HeraldConfig {
             }
         }
 
+        // Master key for Herald's own storage engine.
+        // Set as env var so ChainedMasterKeySource picks it up when storage opens.
+        if std::env::var("SHROUDB_MASTER_KEY").is_err() {
+            if let Ok(result) = client.get("herald/master-key", None).await {
+                std::env::set_var("SHROUDB_MASTER_KEY", &result.value);
+                tracing::info!("loaded master-key from Keep");
+            }
+        }
+
         Ok(())
     }
 }

@@ -70,13 +70,55 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_timeout = config.server.shutdown_timeout_secs;
     let tls_config = config.tls.clone();
 
-    // Initialize ShroudB integrations
-    let mut cipher: Option<Arc<dyn integrations::CipherOps>> = None;
-    let mut veil: Option<Arc<dyn integrations::VeilOps>> = None;
-    let mut sentry: Option<Arc<dyn integrations::SentryOps>> = None;
+    // Initialize ShroudB integrations — embedded by default, remote if configured.
+    // Cipher, Veil, and Sentry share Herald's storage engine (separate namespaces).
+    let cipher_store = Arc::new(shroudb_storage::EmbeddedStore::new(
+        storage.clone(),
+        "cipher",
+    ));
+    let veil_store = Arc::new(shroudb_storage::EmbeddedStore::new(storage.clone(), "veil"));
+    let sentry_store = Arc::new(shroudb_storage::EmbeddedStore::new(
+        storage.clone(),
+        "sentry",
+    ));
+
+    let mut cipher: Option<Arc<dyn integrations::CipherOps>> =
+        match integrations::embedded_cipher::EmbeddedCipherOps::new(cipher_store).await {
+            Ok(c) => {
+                info!("Cipher engine initialized (embedded)");
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                warn!("embedded Cipher init failed: {e}");
+                None
+            }
+        };
+    let mut veil: Option<Arc<dyn integrations::VeilOps>> =
+        match integrations::embedded_veil::EmbeddedVeilOps::new(veil_store).await {
+            Ok(v) => {
+                info!("Veil engine initialized (embedded)");
+                Some(Arc::new(v))
+            }
+            Err(e) => {
+                warn!("embedded Veil init failed: {e}");
+                None
+            }
+        };
+    let mut sentry: Option<Arc<dyn integrations::SentryOps>> =
+        match integrations::embedded_sentry::EmbeddedSentryOps::new(sentry_store).await {
+            Ok(s) => {
+                info!("Sentry engine initialized (embedded)");
+                Some(Arc::new(s))
+            }
+            Err(e) => {
+                warn!("embedded Sentry init failed: {e}");
+                None
+            }
+        };
     let mut courier: Option<Arc<dyn integrations::CourierOps>> = None;
     let mut chronicle: Option<Arc<dyn integrations::ChronicleOps>> = None;
 
+    // Remote overrides — if [shroudb] config has addresses, use remote instead of embedded.
     if let Some(ref shroudb) = config.shroudb {
         use integrations::resilient::*;
 

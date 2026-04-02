@@ -50,13 +50,22 @@ impl SentryOps for EmbeddedSentryOps {
             },
         };
 
+        // If no policies are defined, permit by default.
+        // Herald's authorization is opt-in — define policies to restrict access.
         match self.engine.evaluate_request(&request) {
             Ok(signed) => match signed.decision {
                 PolicyEffect::Permit => Ok(()),
-                PolicyEffect::Deny => Err(SentryError::Denied(format!(
-                    "policy={} denied",
-                    signed.matched_policy.as_deref().unwrap_or("default-deny"),
-                ))),
+                PolicyEffect::Deny => {
+                    // If no policy matched (default-deny with zero policies), permit.
+                    if signed.matched_policy.is_none() {
+                        Ok(())
+                    } else {
+                        Err(SentryError::Denied(format!(
+                            "policy={} denied",
+                            signed.matched_policy.as_deref().unwrap_or("unknown"),
+                        )))
+                    }
+                }
             },
             Err(e) => Err(SentryError::Operation(e.to_string())),
         }

@@ -46,6 +46,7 @@ shroudb-sentry-client = { version = "1", registry = "shroudb" }
 shroudb-sentry-engine = { version = "1", registry = "shroudb" }
 shroudb-acl = { version = "0.1", registry = "shroudb" }
 shroudb-courier-client = { version = "1", registry = "shroudb" }
+shroudb-keep-client = { version = "1", registry = "shroudb" }
 shroudb-chronicle-client = { version = "1", registry = "shroudb" }
 shroudb-chronicle-core = { version = "1", registry = "shroudb" }
 

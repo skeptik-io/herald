@@ -274,4 +274,54 @@ impl HeraldConfig {
             Self::from_env()
         }
     }
+
+    /// Pull secrets from ShroudB Keep and merge into config.
+    /// Called after initial config load if HERALD_KEEP_ADDR is set.
+    pub async fn load_secrets_from_keep(&mut self) -> anyhow::Result<()> {
+        let addr = match std::env::var("HERALD_KEEP_ADDR") {
+            Ok(a) if !a.is_empty() => a,
+            _ => return Ok(()), // No Keep configured — skip
+        };
+        let token = std::env::var("HERALD_KEEP_TOKEN").ok();
+
+        tracing::info!(addr = %addr, "loading secrets from Keep");
+
+        let mut client = shroudb_keep_client::KeepClient::connect(&addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("keep connect failed: {e}"))?;
+
+        if let Some(ref t) = token {
+            client
+                .auth(t)
+                .await
+                .map_err(|e| anyhow::anyhow!("keep auth failed: {e}"))?;
+        }
+
+        // Pull secrets — each is optional, only overrides if present in Keep
+        if let Ok(result) = client.get("herald/jwt-secret", None).await {
+            self.auth.jwt_secret = Some(result.value);
+            tracing::info!("loaded jwt-secret from Keep");
+        }
+        if let Ok(result) = client.get("herald/super-admin-token", None).await {
+            self.auth.super_admin_token = Some(result.value);
+            tracing::info!("loaded super-admin-token from Keep");
+        }
+        if let Ok(result) = client.get("herald/api-tokens", None).await {
+            self.auth.api.tokens = result
+                .value
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            tracing::info!("loaded api-tokens from Keep");
+        }
+        if let Ok(result) = client.get("herald/webhook-secret", None).await {
+            if let Some(ref mut wh) = self.webhook {
+                wh.secret = result.value;
+                tracing::info!("loaded webhook-secret from Keep");
+            }
+        }
+
+        Ok(())
+    }
 }

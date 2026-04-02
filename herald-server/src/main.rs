@@ -24,11 +24,14 @@ async fn main() -> anyhow::Result<()> {
         .cloned()
         .unwrap_or_else(|| "herald.toml".to_string());
 
-    let config = HeraldConfig::load_or_env(&config_path)?;
+    let mut config = HeraldConfig::load_or_env(&config_path)?;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.server.log_level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // Pull secrets from Keep if HERALD_KEEP_ADDR is set
+    config.load_secrets_from_keep().await?;
 
     if multi_tenant && config.auth.super_admin_token.is_none() {
         anyhow::bail!("auth.super_admin_token is required in multi-tenant mode");

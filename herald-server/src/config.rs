@@ -177,4 +177,101 @@ impl HeraldConfig {
             toml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
         Ok(config)
     }
+
+    /// Build config entirely from environment variables.
+    /// Prefix: HERALD_ for server settings, AUTH_ for auth, etc.
+    /// This is the Railway-native deployment path — no config file needed.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let env = |key: &str| std::env::var(key).ok();
+        let env_or =
+            |key: &str, default: &str| std::env::var(key).unwrap_or_else(|_| default.to_string());
+
+        let port = env_or("PORT", "6200"); // Railway sets PORT
+        let ws_bind = format!("0.0.0.0:{port}");
+        let http_port: u16 = port.parse::<u16>().unwrap_or(6200) + 1;
+        let http_bind = format!("0.0.0.0:{http_port}");
+
+        Ok(Self {
+            server: ServerConfig {
+                ws_bind: env("HERALD_WS_BIND").unwrap_or(ws_bind),
+                http_bind: env("HERALD_HTTP_BIND").unwrap_or(http_bind),
+                log_level: env_or("HERALD_LOG_LEVEL", "info"),
+                max_messages_per_sec: env("HERALD_MAX_MSG_PER_SEC")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10),
+                api_rate_limit: env("HERALD_API_RATE_LIMIT")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(100),
+                shutdown_timeout_secs: env("HERALD_SHUTDOWN_TIMEOUT")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30),
+            },
+            store: StoreConfig {
+                path: env_or("HERALD_DATA_DIR", "./herald-data").into(),
+                message_ttl_days: env("HERALD_MESSAGE_TTL_DAYS")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(7),
+            },
+            auth: AuthConfig {
+                jwt_secret: env("HERALD_JWT_SECRET"),
+                jwt_issuer: env("HERALD_JWT_ISSUER"),
+                super_admin_token: env("HERALD_SUPER_ADMIN_TOKEN"),
+                api: ApiAuthConfig {
+                    tokens: env("HERALD_API_TOKENS")
+                        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+                        .unwrap_or_default(),
+                },
+            },
+            presence: PresenceConfig {
+                linger_secs: env("HERALD_LINGER_SECS")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10),
+                manual_override_ttl_secs: env("HERALD_PRESENCE_TTL")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(14400),
+            },
+            webhook: env("HERALD_WEBHOOK_URL").map(|url| WebhookConfig {
+                url,
+                secret: env_or("HERALD_WEBHOOK_SECRET", ""),
+                retries: env("HERALD_WEBHOOK_RETRIES")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3),
+            }),
+            shroudb: if env("HERALD_CIPHER_ADDR").is_some()
+                || env("HERALD_VEIL_ADDR").is_some()
+                || env("HERALD_SENTRY_ADDR").is_some()
+            {
+                Some(ShroudbConfig {
+                    cipher_addr: env("HERALD_CIPHER_ADDR"),
+                    cipher_token: env("HERALD_CIPHER_TOKEN"),
+                    veil_addr: env("HERALD_VEIL_ADDR"),
+                    veil_token: env("HERALD_VEIL_TOKEN"),
+                    sentry_addr: env("HERALD_SENTRY_ADDR"),
+                    sentry_token: env("HERALD_SENTRY_TOKEN"),
+                    courier_addr: env("HERALD_COURIER_ADDR"),
+                    courier_token: env("HERALD_COURIER_TOKEN"),
+                    chronicle_addr: env("HERALD_CHRONICLE_ADDR"),
+                    chronicle_token: env("HERALD_CHRONICLE_TOKEN"),
+                    moat_addr: env("HERALD_MOAT_ADDR"),
+                    auth_token: env("HERALD_MOAT_TOKEN"),
+                })
+            } else {
+                None
+            },
+            tls: env("HERALD_TLS_CERT").map(|cert| TlsConfig {
+                cert_path: cert,
+                key_path: env_or("HERALD_TLS_KEY", ""),
+            }),
+        })
+    }
+
+    /// Load from file if it exists, otherwise from env vars.
+    pub fn load_or_env(path: &str) -> anyhow::Result<Self> {
+        if std::path::Path::new(path).exists() {
+            Self::load(path)
+        } else {
+            tracing::info!("no config file at {path}, loading from environment variables");
+            Self::from_env()
+        }
+    }
 }

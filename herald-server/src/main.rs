@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .cloned()
         .unwrap_or_else(|| "herald.toml".to_string());
 
-    let config = HeraldConfig::load(&config_path)?;
+    let config = HeraldConfig::load_or_env(&config_path)?;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.server.log_level));

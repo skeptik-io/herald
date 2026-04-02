@@ -18,6 +18,32 @@ pub struct HeraldConfig {
     pub shroudb: Option<ShroudbConfig>,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    #[serde(default)]
+    pub tenant_limits: TenantLimitsConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TenantLimitsConfig {
+    #[serde(default = "default_max_connections_per_tenant")]
+    pub max_connections_per_tenant: u32,
+    #[serde(default = "default_max_rooms_per_tenant")]
+    pub max_rooms_per_tenant: u32,
+}
+
+impl Default for TenantLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections_per_tenant: default_max_connections_per_tenant(),
+            max_rooms_per_tenant: default_max_rooms_per_tenant(),
+        }
+    }
+}
+
+fn default_max_connections_per_tenant() -> u32 {
+    10000
+}
+fn default_max_rooms_per_tenant() -> u32 {
+    10000
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +291,14 @@ impl HeraldConfig {
                 cert_path: cert,
                 key_path: env_or("HERALD_TLS_KEY", ""),
             }),
+            tenant_limits: TenantLimitsConfig {
+                max_connections_per_tenant: env("HERALD_MAX_CONNS_PER_TENANT")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10000),
+                max_rooms_per_tenant: env("HERALD_MAX_ROOMS_PER_TENANT")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10000),
+            },
         })
     }
 

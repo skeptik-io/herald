@@ -96,6 +96,22 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     let user_id = claims.sub.clone();
     let rooms_claim = claims.rooms.clone();
 
+    // Enforce per-tenant connection limit
+    let tenant_conns = state.connections.tenant_connection_count(&tenant_id);
+    let max_conns = state.config.tenant_limits.max_connections_per_tenant as usize;
+    if tenant_conns >= max_conns {
+        let _ = msg_tx
+            .send(ServerMessage::error(
+                auth_ref,
+                ErrorCode::RateLimited,
+                format!("tenant connection limit reached ({max_conns})"),
+            ))
+            .await;
+        drop(msg_tx);
+        let _ = writer.await;
+        return;
+    }
+
     state
         .connections
         .register(conn_id, tenant_id.clone(), user_id.clone(), msg_tx.clone());

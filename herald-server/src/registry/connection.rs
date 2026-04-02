@@ -109,6 +109,14 @@ impl ConnectionRegistry {
         self.by_user.get(&key).map(|c| c.len()).unwrap_or(0)
     }
 
+    pub fn tenant_connection_count(&self, tenant_id: &str) -> usize {
+        self.by_user
+            .iter()
+            .filter(|entry| entry.key().0 == tenant_id)
+            .map(|entry| entry.value().len())
+            .sum()
+    }
+
     pub fn total_connections(&self) -> usize {
         self.by_conn.len()
     }

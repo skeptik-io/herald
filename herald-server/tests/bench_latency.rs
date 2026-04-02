@@ -82,6 +82,7 @@ impl BenchServer {
             webhook: None,
             shroudb: None,
             tls: None,
+            tenant_limits: Default::default(),
         };
 
         let state = AppState::build(AppStateBuilder {

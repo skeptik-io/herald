@@ -40,7 +40,7 @@ Herald is a standalone Rust project. It optionally integrates with [ShroudB](htt
   │   Room Registry                       │
   │   Presence Tracker                    │
   │   Message Pipeline                    │
-  │   SQLite catch-up buffer              │
+  │   ShroudB WAL storage              │
   └──────────┬────────────────────────────┘
              │
        (optional, TCP)
@@ -68,7 +68,7 @@ Herald and ShroudB are separate services. Herald connects to Moat (or individual
 ### What Herald Is Not
 
 - Not a ShroudB engine (no RESP3, no Moat embedding, no engine conventions)
-- Not a database (SQLite is a 7-day catch-up buffer, not the system of record)
+- Storage is ShroudB WAL engine — encrypted at rest, ~80µs writes
 - Not an application server (no business logic, no domain awareness)
 
 ---
@@ -118,7 +118,7 @@ Default mode is `plaintext`. The app sets the mode when creating a room via the 
 
 | Threat | Mitigated? | Mechanism |
 |--------|-----------|-----------|
-| Database/disk breach | Yes | Messages encrypted via Cipher before writing to SQLite |
+| Database/disk breach | Yes | Messages encrypted via Cipher (embedded) before WAL write |
 | Network sniffing (client ↔ Herald) | Yes | TLS on WebSocket |
 | Network sniffing (Herald ↔ ShroudB) | Yes | TLS on engine connections |
 | Herald memory dump | Partially | Plaintext transient, zeroized after pipeline completes |
@@ -897,7 +897,7 @@ ConnectionHandle {
 1. Message arrives (from WebSocket `message.send` or HTTP `POST /rooms/:id/messages`)
 2. Sequence number assigned: `room.sequence.fetch_add(1, SeqCst)`
 3. Encryption pipeline runs (if `server-encrypted` mode)
-4. Message stored in SQLite catch-up buffer
+4. Message stored in ShroudB WAL storage
 5. For each user in `room.subscribers`:
    - Look up all `ConnId`s for that user
    - Send the message JSON frame via each connection's `mpsc::Sender`
@@ -929,9 +929,9 @@ Each connection has a bounded `mpsc` channel (capacity: 256 frames). If the chan
 
 ## 9. Storage Model
 
-### Herald: SQLite Catch-Up Buffer
+### Herald: WAL Catch-Up Buffer
 
-Herald uses SQLite (WAL mode) as an ephemeral message store for reconnect catch-up and short-term history queries. This is NOT the system of record — the app's database is.
+Herald uses ShroudB WAL engine as the primary persistence layer for reconnect catch-up and short-term history queries. 
 
 ```sql
 CREATE TABLE rooms (
@@ -1043,7 +1043,7 @@ The webhook delivers plaintext message bodies (decrypted if `server-encrypted` m
 ### Creation
 
 1. App backend calls `POST /rooms` on Herald's HTTP API
-2. Herald inserts room record into SQLite
+2. Herald inserts room record into WAL
 3. If `encryption_mode` is `server-encrypted` and ShroudB is configured:
    - Create Cipher keyring: `KEYRING CREATE herald.room.{id} aes-256-gcm`
    - Create Veil index: `INDEX CREATE herald.room.{id}`
@@ -1065,7 +1065,7 @@ The webhook delivers plaintext message bodies (decrypted if `server-encrypted` m
 4. Herald deletes all messages from catch-up buffer
 5. Herald deletes Veil index entries (if applicable)
 6. Herald does NOT delete the Cipher keyring (legal hold / audit trail)
-7. Herald removes room from SQLite and in-memory state
+7. Herald removes room from WAL and in-memory state
 
 ---
 
@@ -1122,7 +1122,7 @@ herald/
 │       │   ├── courier.rs          # Offline delivery via shroudb-courier-client
 │       │   └── chronicle.rs        # Audit via shroudb-chronicle-client
 │       │
-│       ├── store/                  # SQLite catch-up buffer
+│       ├── store/                  # ShroudB WAL storage
 │       │   ├── mod.rs
 │       │   ├── messages.rs
 │       │   ├── rooms.rs
@@ -1197,7 +1197,7 @@ All ShroudB integration is optional. Herald operates in degraded mode when engin
 
 | Feature | Without ShroudB | With ShroudB |
 |---------|----------------|--------------|
-| Message storage | Plaintext in SQLite | Cipher-encrypted in SQLite |
+| Message storage | Plaintext in WAL | Cipher-encrypted in WAL |
 | Search | Unavailable (`SEARCH_UNAVAILABLE`) | Veil blind index search |
 | Room authorization | JWT `rooms` claim only | JWT + Sentry policy eval |
 | Offline notifications | Skipped | Courier delivery |
@@ -1247,7 +1247,7 @@ auth_token = "herald-service-token"
 
 | Phase | Scope | ShroudB? |
 |-------|-------|----------|
-| **1. Skeleton** | `herald-core` types. `herald-server` with axum + WebSocket. Auth, subscribe, send/receive with in-memory state. SQLite store. Plaintext only. | No |
+| **1. Skeleton** | `herald-core` types. `herald-server` with axum + WebSocket. Auth, subscribe, send/receive with in-memory state. WAL store. Plaintext only. | No |
 | **2. Fan-out + Presence** | ConnectionRegistry, RoomRegistry, PresenceTracker. Multi-connection fan-out. Cursors. Reconnect catch-up via `last_seen_at`. | No |
 | **3. HTTP API + Webhook** | Room CRUD, member management, message query/inject. Signed webhook delivery with retries. | No |
 | **4. Cipher Integration** | Per-room keyrings. Encrypt/decrypt message pipeline. Zeroization. `server-encrypted` room mode. | Yes |

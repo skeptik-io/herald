@@ -297,37 +297,61 @@ impl HeraldConfig {
                 .map_err(|e| anyhow::anyhow!("keep auth failed: {e}"))?;
         }
 
-        // Pull secrets — each is optional, only overrides if present in Keep
-        if let Ok(result) = client.get("herald/jwt-secret", None).await {
-            self.auth.jwt_secret = Some(result.value);
-            tracing::info!("loaded jwt-secret from Keep");
-        }
-        if let Ok(result) = client.get("herald/super-admin-token", None).await {
-            self.auth.super_admin_token = Some(result.value);
-            tracing::info!("loaded super-admin-token from Keep");
-        }
-        if let Ok(result) = client.get("herald/api-tokens", None).await {
-            self.auth.api.tokens = result
-                .value
-                .split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect();
-            tracing::info!("loaded api-tokens from Keep");
-        }
-        if let Ok(result) = client.get("herald/webhook-secret", None).await {
-            if let Some(ref mut wh) = self.webhook {
-                wh.secret = result.value;
-                tracing::info!("loaded webhook-secret from Keep");
+        // Pull secrets — log warnings for missing keys, don't fail
+        match client.get("herald/jwt-secret", None).await {
+            Ok(result) => {
+                self.auth.jwt_secret = Some(result.value);
+                tracing::info!("loaded herald/jwt-secret from Keep");
             }
+            Err(e) => tracing::warn!("herald/jwt-secret not in Keep: {e}"),
+        }
+        match client.get("herald/super-admin-token", None).await {
+            Ok(result) => {
+                self.auth.super_admin_token = Some(result.value);
+                tracing::info!("loaded herald/super-admin-token from Keep");
+            }
+            Err(e) => tracing::warn!("herald/super-admin-token not in Keep: {e}"),
+        }
+        match client.get("herald/api-tokens", None).await {
+            Ok(result) => {
+                self.auth.api.tokens = result
+                    .value
+                    .split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                tracing::info!("loaded herald/api-tokens from Keep");
+            }
+            Err(e) => tracing::warn!("herald/api-tokens not in Keep: {e}"),
+        }
+        match client.get("herald/webhook-secret", None).await {
+            Ok(result) => {
+                if let Some(ref mut wh) = self.webhook {
+                    wh.secret = result.value;
+                    tracing::info!("loaded herald/webhook-secret from Keep");
+                }
+            }
+            Err(e) => tracing::debug!("herald/webhook-secret not in Keep: {e}"),
         }
 
         // Master key for Herald's own storage engine.
         // Set as env var so ChainedMasterKeySource picks it up when storage opens.
         if std::env::var("SHROUDB_MASTER_KEY").is_err() {
-            if let Ok(result) = client.get("herald/master-key", None).await {
-                std::env::set_var("SHROUDB_MASTER_KEY", &result.value);
-                tracing::info!("loaded master-key from Keep");
+            match client.get("herald/master-key", None).await {
+                Ok(result) => {
+                    std::env::set_var("SHROUDB_MASTER_KEY", &result.value);
+                    tracing::info!("loaded master-key from Keep");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "failed to load herald/master-key from Keep: {e}. \
+                         Either store the key in Keep at 'herald/master-key' or \
+                         set SHROUDB_MASTER_KEY env var directly."
+                    );
+                    return Err(anyhow::anyhow!(
+                        "master key not available: not in env and Keep returned: {e}"
+                    ));
+                }
             }
         }
 

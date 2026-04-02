@@ -140,7 +140,7 @@ jobs:
     name: Publish Python SDK → GitHub Packages
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:

@@ -187,10 +187,12 @@ impl HeraldConfig {
         let env_or =
             |key: &str, default: &str| std::env::var(key).unwrap_or_else(|_| default.to_string());
 
-        let port = env_or("PORT", "6200"); // Railway sets PORT
-        let ws_bind = format!("0.0.0.0:{port}");
-        let http_port: u16 = port.parse::<u16>().unwrap_or(6200) + 1;
-        let http_bind = format!("0.0.0.0:{http_port}");
+        // Railway sets PORT — use it for HTTP (the public domain routes here).
+        // WS gets a separate port (PORT+1, or HERALD_WS_BIND override).
+        let port = env_or("PORT", "6201");
+        let http_bind = format!("0.0.0.0:{port}");
+        let ws_port: u16 = port.parse::<u16>().unwrap_or(6201) + 1;
+        let ws_bind = format!("0.0.0.0:{ws_port}");
 
         Ok(Self {
             server: ServerConfig {

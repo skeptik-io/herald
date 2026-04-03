@@ -249,6 +249,7 @@ async fn handle_send(
     state.metrics.message_store.observe_since(store_start);
 
     state.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
+    state.increment_tenant_messages(tid);
 
     state.event_bus.push_event(
         crate::admin_events::EventKind::Message,
@@ -293,18 +294,21 @@ async fn handle_send(
     fanout_to_room(state, tid, &room, &new_msg, None);
     state.metrics.message_fanout.observe_since(fanout_start);
 
-    state.fire_webhook(crate::webhook::WebhookEvent {
-        event: "message.new".to_string(),
-        room: room.clone(),
-        id: Some(msg_id),
-        seq: Some(seq),
-        sender: Some(ctx.user_id.clone()),
-        body: Some(body.clone()),
-        meta,
-        sent_at: Some(now),
-        user_id: None,
-        role: None,
-    });
+    state.fire_webhook(
+        tid,
+        crate::webhook::WebhookEvent {
+            event: "message.new".to_string(),
+            room: room.clone(),
+            id: Some(msg_id),
+            seq: Some(seq),
+            sender: Some(ctx.user_id.clone()),
+            body: Some(body.clone()),
+            meta,
+            sent_at: Some(now),
+            user_id: None,
+            role: None,
+        },
+    );
 
     state.audit(tid, "message.send", &room, &ctx.user_id, "success");
     state.notify_offline_members(tid, &room, &ctx.user_id, &body);

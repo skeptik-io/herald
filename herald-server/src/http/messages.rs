@@ -89,6 +89,7 @@ pub async fn inject_message(
     }
 
     state.index_message(tid, &room_id, &msg_id, &req.body).await;
+    state.increment_tenant_messages(tid);
 
     let new_msg = ServerMessage::MessageNew {
         payload: MessageNewPayload {
@@ -103,18 +104,21 @@ pub async fn inject_message(
     };
     fanout_to_room(&state, tid, &room_id, &new_msg, None);
 
-    state.fire_webhook(crate::webhook::WebhookEvent {
-        event: "message.new".to_string(),
-        room: room_id.clone(),
-        id: Some(msg_id.clone()),
-        seq: Some(seq),
-        sender: Some(req.sender),
-        body: Some(req.body),
-        meta: req.meta,
-        sent_at: Some(now),
-        user_id: None,
-        role: None,
-    });
+    state.fire_webhook(
+        tid,
+        crate::webhook::WebhookEvent {
+            event: "message.new".to_string(),
+            room: room_id.clone(),
+            id: Some(msg_id.clone()),
+            seq: Some(seq),
+            sender: Some(req.sender),
+            body: Some(req.body),
+            meta: req.meta,
+            sent_at: Some(now),
+            user_id: None,
+            role: None,
+        },
+    );
 
     (
         StatusCode::CREATED,

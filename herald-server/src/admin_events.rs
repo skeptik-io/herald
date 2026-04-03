@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -81,13 +82,30 @@ pub struct StatsSnapshot {
     pub auth_failures: u64,
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct TenantSnapshot {
+    pub timestamp: i64,
+    pub connections: u64,
+    pub messages_sent: u64,
+    pub messages_delta: u64,
+    pub webhooks_sent: u64,
+    pub webhooks_delta: u64,
+    pub rooms: u64,
+}
+
+struct TenantStatsState {
+    snapshots: VecDeque<TenantSnapshot>,
+    last_messages: u64,
+    last_webhooks: u64,
+}
+
 pub struct EventBus {
     events: RwLock<VecDeque<AdminEvent>>,
     errors: RwLock<VecDeque<ErrorEntry>>,
     next_id: AtomicU64,
     broadcast_tx: broadcast::Sender<AdminEvent>,
 
-    // Stats tracking
+    // Global stats tracking
     stats_snapshots: RwLock<VecDeque<StatsSnapshot>>,
     peak_connections_today: AtomicU64,
     webhooks_sent: AtomicU64,
@@ -96,6 +114,9 @@ pub struct EventBus {
     day_start_messages: AtomicU64,
     day_start_webhooks: AtomicU64,
     current_day: RwLock<u32>,
+
+    // Per-tenant stats
+    tenant_stats: DashMap<String, parking_lot::RwLock<TenantStatsState>>,
 }
 
 impl EventBus {
@@ -114,6 +135,7 @@ impl EventBus {
             day_start_messages: AtomicU64::new(0),
             day_start_webhooks: AtomicU64::new(0),
             current_day: RwLock::new(0),
+            tenant_stats: DashMap::new(),
         })
     }
 
@@ -262,6 +284,65 @@ impl EventBus {
             messages_today: current_messages.saturating_sub(day_start_messages),
             webhooks_today: webhooks_total.saturating_sub(day_start_webhooks),
         }
+    }
+
+    /// Record a per-tenant stats snapshot.
+    pub fn record_tenant_snapshot(
+        &self,
+        tenant_id: &str,
+        connections: u64,
+        messages_sent: u64,
+        webhooks_sent: u64,
+        rooms: u64,
+    ) {
+        let now = now_millis();
+        let entry = self
+            .tenant_stats
+            .entry(tenant_id.to_string())
+            .or_insert_with(|| {
+                parking_lot::RwLock::new(TenantStatsState {
+                    snapshots: VecDeque::with_capacity(1440),
+                    last_messages: messages_sent,
+                    last_webhooks: webhooks_sent,
+                })
+            });
+
+        let mut state = entry.write();
+        let messages_delta = messages_sent.saturating_sub(state.last_messages);
+        let webhooks_delta = webhooks_sent.saturating_sub(state.last_webhooks);
+        state.last_messages = messages_sent;
+        state.last_webhooks = webhooks_sent;
+
+        let snapshot = TenantSnapshot {
+            timestamp: now,
+            connections,
+            messages_sent,
+            messages_delta,
+            webhooks_sent,
+            webhooks_delta,
+            rooms,
+        };
+
+        if state.snapshots.len() >= 1440 {
+            state.snapshots.pop_front();
+        }
+        state.snapshots.push_back(snapshot);
+    }
+
+    /// Get per-tenant snapshots within a time range.
+    pub fn get_tenant_snapshots(&self, tenant_id: &str, from: i64, to: i64) -> Vec<TenantSnapshot> {
+        self.tenant_stats
+            .get(tenant_id)
+            .map(|entry| {
+                let state = entry.read();
+                state
+                    .snapshots
+                    .iter()
+                    .filter(|s| s.timestamp >= from && s.timestamp <= to)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

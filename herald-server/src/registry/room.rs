@@ -166,6 +166,13 @@ impl RoomRegistry {
         self.rooms.len()
     }
 
+    pub fn tenant_room_count(&self, tenant_id: &str) -> usize {
+        self.rooms
+            .iter()
+            .filter(|entry| entry.key().0 == tenant_id)
+            .count()
+    }
+
     pub fn get_member_rooms(&self, tenant_id: &str, user_id: &str) -> Vec<String> {
         self.rooms
             .iter()

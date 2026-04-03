@@ -98,6 +98,23 @@ export interface TodaySummary {
   webhooks_today: number;
 }
 
+export interface TenantCurrent {
+  connections: number;
+  messages_sent: number;
+  webhooks_sent: number;
+  rooms: number;
+}
+
+export interface TenantSnapshot {
+  timestamp: number;
+  connections: number;
+  messages_sent: number;
+  messages_delta: number;
+  webhooks_sent: number;
+  webhooks_delta: number;
+  rooms: number;
+}
+
 export interface ConnectionInfo {
   total: number;
   by_tenant: { tenant_id: string; connections: number }[];
@@ -203,7 +220,7 @@ export class HeraldClient {
       (r) => r.errors,
     );
   }
-  getStats(from?: number, to?: number) {
+  getAdminStats(from?: number, to?: number) {
     const params = new URLSearchParams();
     if (from) params.set("from", String(from));
     if (to) params.set("to", String(to));
@@ -214,6 +231,17 @@ export class HeraldClient {
   }
   listConnections() {
     return this.request<ConnectionInfo>("GET", "/admin/connections");
+  }
+
+  // Tenant-scoped stats
+  getTenantStats(from?: number, to?: number) {
+    const params = new URLSearchParams();
+    if (from) params.set("from", String(from));
+    if (to) params.set("to", String(to));
+    return this.request<{ current: TenantCurrent; snapshots: TenantSnapshot[] }>(
+      "GET",
+      `/stats?${params}`,
+    );
   }
 
   // Tenant-scoped - Rooms

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext";
-import type { StatsSnapshot } from "../api/client";
+import type { TenantSnapshot } from "../api/client";
 import { PageHeader, Card } from "../components/shared";
 import MiniChart from "../components/MiniChart";
 
@@ -15,7 +15,7 @@ const PERIOD_MS: Record<Period, number> = {
 export default function Stats() {
   const { client } = useAuth();
   const [period, setPeriod] = useState<Period>("day");
-  const [snapshots, setSnapshots] = useState<StatsSnapshot[]>([]);
+  const [snapshots, setSnapshots] = useState<TenantSnapshot[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -23,7 +23,7 @@ export default function Stats() {
     setLoading(true);
     const now = Date.now();
     client
-      .getStats(now - PERIOD_MS[period], now)
+      .getTenantStats(now - PERIOD_MS[period], now)
       .then((r) => setSnapshots(r.snapshots))
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -60,23 +60,13 @@ export default function Stats() {
       ) : (
         <div className="space-y-4">
           <Card>
-            <p className="text-xs text-zinc-500 mb-3">
-              Average connections / Peak connections
-            </p>
+            <p className="text-xs text-zinc-500 mb-3">Connections</p>
             <div style={{ height: 200 }}>
               <MiniChart
-                data={snapshots.map((s) => ({ t: s.timestamp, v: s.peak_connections }))}
+                data={snapshots.map((s) => ({ t: s.timestamp, v: s.connections }))}
                 color="#38bdf8"
                 height={200}
               />
-            </div>
-            <div className="flex gap-4 mt-2 text-xs text-zinc-500">
-              <span className="flex items-center gap-1">
-                <span className="w-3 h-0.5 bg-teal-400 inline-block rounded" /> Average connections
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="w-3 h-0.5 bg-sky-400 inline-block rounded" /> Peak connections
-              </span>
             </div>
           </Card>
 

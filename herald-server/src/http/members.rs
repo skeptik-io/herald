@@ -65,18 +65,21 @@ pub async fn add_member(
     };
     fanout_to_room(&state, tid, &room_id, &msg, None);
 
-    state.fire_webhook(crate::webhook::WebhookEvent {
-        event: "member.joined".to_string(),
-        room: room_id,
-        id: None,
-        seq: None,
-        sender: None,
-        body: None,
-        meta: None,
-        sent_at: None,
-        user_id: Some(req.user_id),
-        role: Some(role.as_str().to_string()),
-    });
+    state.fire_webhook(
+        tid,
+        crate::webhook::WebhookEvent {
+            event: "member.joined".to_string(),
+            room: room_id,
+            id: None,
+            seq: None,
+            sender: None,
+            body: None,
+            meta: None,
+            sent_at: None,
+            user_id: Some(req.user_id),
+            role: Some(role.as_str().to_string()),
+        },
+    );
 
     (StatusCode::CREATED, Json(member)).into_response()
 }
@@ -115,18 +118,21 @@ pub async fn remove_member(
             };
             fanout_to_room(&state, tid, &room_id, &msg, None);
 
-            state.fire_webhook(crate::webhook::WebhookEvent {
-                event: "member.left".to_string(),
-                room: room_id,
-                id: None,
-                seq: None,
-                sender: None,
-                body: None,
-                meta: None,
-                sent_at: None,
-                user_id: Some(user_id),
-                role: None,
-            });
+            state.fire_webhook(
+                tid,
+                crate::webhook::WebhookEvent {
+                    event: "member.left".to_string(),
+                    room: room_id,
+                    id: None,
+                    seq: None,
+                    sender: None,
+                    body: None,
+                    meta: None,
+                    sent_at: None,
+                    user_id: Some(user_id),
+                    role: None,
+                },
+            );
 
             StatusCode::NO_CONTENT.into_response()
         }

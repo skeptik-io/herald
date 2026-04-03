@@ -118,6 +118,22 @@ pub struct TenantConfig {
     pub plan: String,
 }
 
+/// Per-tenant counters.
+#[derive(Default)]
+pub struct TenantMetrics {
+    pub messages_sent: AtomicU64,
+    pub webhooks_sent: AtomicU64,
+}
+
+impl TenantMetrics {
+    pub fn new() -> Self {
+        Self {
+            messages_sent: AtomicU64::new(0),
+            webhooks_sent: AtomicU64::new(0),
+        }
+    }
+}
+
 pub struct AppState {
     pub config: HeraldConfig,
     pub db: Arc<shroudb_storage::EmbeddedStore>,
@@ -125,6 +141,7 @@ pub struct AppState {
     pub rooms: RoomRegistry,
     pub presence: PresenceTracker,
     pub tenant_cache: DashMap<String, TenantConfig>,
+    pub tenant_metrics: DashMap<String, TenantMetrics>,
     pub start_time: std::time::Instant,
     pub cipher: Option<Arc<dyn CipherOps>>,
     pub veil: Option<Arc<dyn VeilOps>>,
@@ -164,6 +181,7 @@ impl AppState {
             rooms: RoomRegistry::new(),
             presence: PresenceTracker::new(),
             tenant_cache: DashMap::new(),
+            tenant_metrics: DashMap::new(),
             start_time: std::time::Instant::now(),
             cipher: b.cipher,
             veil: b.veil,
@@ -285,9 +303,40 @@ impl AppState {
         Ok((tenant_id.clone(), data.claims))
     }
 
-    pub fn fire_webhook(&self, event: WebhookEvent) {
+    pub fn increment_tenant_messages(&self, tenant_id: &str) {
+        self.tenant_metrics
+            .entry(tenant_id.to_string())
+            .or_default()
+            .messages_sent
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_tenant_webhooks(&self, tenant_id: &str) {
+        self.tenant_metrics
+            .entry(tenant_id.to_string())
+            .or_default()
+            .webhooks_sent
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn tenant_messages_sent(&self, tenant_id: &str) -> u64 {
+        self.tenant_metrics
+            .get(tenant_id)
+            .map(|m| m.messages_sent.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub fn tenant_webhooks_sent(&self, tenant_id: &str) -> u64 {
+        self.tenant_metrics
+            .get(tenant_id)
+            .map(|m| m.webhooks_sent.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub fn fire_webhook(&self, tenant_id: &str, event: WebhookEvent) {
         if let Some(ref config) = self.webhook_config {
             self.event_bus.increment_webhooks();
+            self.increment_tenant_webhooks(tenant_id);
             crate::webhook::deliver(
                 config.clone(),
                 self.webhook_client.clone(),

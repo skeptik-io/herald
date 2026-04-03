@@ -255,6 +255,22 @@ async fn main() -> anyhow::Result<()> {
             stats_state
                 .event_bus
                 .record_snapshot(connections, messages, rooms, auth_failures);
+
+            // Per-tenant snapshots
+            for entry in stats_state.tenant_cache.iter() {
+                let tid = entry.key();
+                let t_connections = stats_state.connections.tenant_connection_count(tid) as u64;
+                let t_messages = stats_state.tenant_messages_sent(tid);
+                let t_webhooks = stats_state.tenant_webhooks_sent(tid);
+                let t_rooms = stats_state.rooms.tenant_room_count(tid) as u64;
+                stats_state.event_bus.record_tenant_snapshot(
+                    tid,
+                    t_connections,
+                    t_messages,
+                    t_webhooks,
+                    t_rooms,
+                );
+            }
         }
     });
 

@@ -1646,3 +1646,108 @@ async fn test_admin_endpoints_require_auth() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_tenant_stats_endpoint() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_ts", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Send some messages via HTTP inject to generate tenant metrics
+    for i in 0..3 {
+        let resp = server
+            .http_client()
+            .post(server.http_url("/rooms/chat/messages"))
+            .bearer_auth(&token)
+            .json(&json!({"sender": "alice", "body": format!("msg {i}")}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // Get tenant stats
+    let resp = server
+        .http_client()
+        .get(server.http_url("/stats"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+
+    // Current should reflect tenant-specific data
+    assert!(body["current"].is_object(), "missing current summary");
+    assert_eq!(
+        body["current"]["messages_sent"].as_u64().unwrap(),
+        3,
+        "expected 3 tenant messages"
+    );
+    assert_eq!(
+        body["current"]["rooms"].as_u64().unwrap(),
+        1,
+        "expected 1 room"
+    );
+
+    // Snapshots array should exist (may be empty if no snapshot cycle yet)
+    assert!(body["snapshots"].is_array(), "missing snapshots");
+}
+
+#[tokio::test]
+async fn test_tenant_stats_isolated() {
+    let server = TestServer::start().await;
+    let token_a = server.create_tenant("tenant_sa", TENANT_A_SECRET).await;
+    let token_b = server.create_tenant("tenant_sb", TENANT_B_SECRET).await;
+    server.create_room(&token_a, "room_a").await;
+    server.create_room(&token_b, "room_b").await;
+
+    // Send 5 messages on tenant A
+    for i in 0..5 {
+        server
+            .http_client()
+            .post(server.http_url("/rooms/room_a/messages"))
+            .bearer_auth(&token_a)
+            .json(&json!({"sender": "sys", "body": format!("a{i}")}))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Send 2 messages on tenant B
+    for i in 0..2 {
+        server
+            .http_client()
+            .post(server.http_url("/rooms/room_b/messages"))
+            .bearer_auth(&token_b)
+            .json(&json!({"sender": "sys", "body": format!("b{i}")}))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Tenant A should see 5 messages
+    let resp = server
+        .http_client()
+        .get(server.http_url("/stats"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["current"]["messages_sent"].as_u64().unwrap(), 5);
+    assert_eq!(body["current"]["rooms"].as_u64().unwrap(), 1);
+
+    // Tenant B should see 2 messages
+    let resp = server
+        .http_client()
+        .get(server.http_url("/stats"))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["current"]["messages_sent"].as_u64().unwrap(), 2);
+    assert_eq!(body["current"]["rooms"].as_u64().unwrap(), 1);
+}

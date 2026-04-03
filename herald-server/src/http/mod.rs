@@ -45,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/rooms/{id}/cursors", get(messages::list_cursors))
         .route("/rooms/{id}/presence", get(presence::room_presence))
         .route("/presence/{user_id}", get(presence::user_presence))
+        .route("/stats", get(health::tenant_stats))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             tenant_auth_middleware,

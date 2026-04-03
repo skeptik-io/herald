@@ -18,20 +18,11 @@ interface AuthContextValue {
   client: HeraldClient | null;
   login: (token: string, mode: "admin" | "tenant") => void;
   logout: () => void;
-  baseUrl: string;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-declare global {
-  interface Window {
-    __HERALD_URL__?: string;
-  }
-}
-
 const STORAGE_KEY = "herald_admin_auth";
-const BASE_URL =
-  window.__HERALD_URL__ || import.meta.env.VITE_HERALD_URL || "http://localhost:6201";
 
 function loadAuth(): Auth | null {
   try {
@@ -47,7 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [auth, setAuth] = useState<Auth | null>(loadAuth);
 
   const client = useMemo(
-    () => (auth ? new HeraldClient(BASE_URL, auth.token) : null),
+    () => (auth ? new HeraldClient("/api", auth.token) : null),
     [auth],
   );
 
@@ -63,7 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ auth, client, login, logout, baseUrl: BASE_URL }}>
+    <AuthContext.Provider value={{ auth, client, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

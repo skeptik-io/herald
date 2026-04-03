@@ -195,12 +195,6 @@ export class HeraldClient {
       (r) => r.events,
     );
   }
-  eventsStreamUrl() {
-    return `${this.baseUrl}/admin/events/stream`;
-  }
-  eventsStreamHeaders() {
-    return { Authorization: `Bearer ${this.token}` };
-  }
   listErrors(category?: string, limit?: number) {
     const params = new URLSearchParams();
     if (category) params.set("category", category);

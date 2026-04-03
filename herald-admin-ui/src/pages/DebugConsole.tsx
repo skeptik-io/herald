@@ -16,7 +16,7 @@ const KIND_COLORS: Record<string, string> = {
 };
 
 export default function DebugConsole() {
-  const { client, auth, baseUrl } = useAuth();
+  const { client, auth } = useAuth();
   const [events, setEvents] = useState<AdminEvent[]>([]);
   const [paused, setPaused] = useState(false);
   const [filter, setFilter] = useState("");
@@ -48,9 +48,8 @@ export default function DebugConsole() {
       eventsRef.current = initial;
     });
 
-    // SSE connection
-    const url = `${baseUrl}/admin/events/stream`;
-    const es = new EventSource(url);
+    // SSE connection via server-side proxy (token as query param since EventSource can't set headers)
+    const es = new EventSource(`/api/admin/events/stream?token=${encodeURIComponent(auth.token)}`);
     eventSourceRef.current = es;
 
     es.onmessage = (e) => {
@@ -66,7 +65,7 @@ export default function DebugConsole() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [client, auth, baseUrl, addEvent]);
+  }, [client, auth, addEvent]);
 
   const filtered = filter
     ? events.filter(

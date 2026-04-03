@@ -25,6 +25,7 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
 ENV HERALD_URL=http://localhost:6201
+ENV PORT=8080
 
 EXPOSE 8080
 

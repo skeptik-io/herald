@@ -68,6 +68,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(admin_api)
         .route("/health", get(health::health))
         .route("/metrics", get(health::metrics))
+        // WebSocket upgrade on the same port — browsers connect to wss://domain/ws
+        .route("/ws", get(crate::ws::upgrade::ws_handler))
         .with_state(state)
 }
 

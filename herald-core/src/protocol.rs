@@ -48,6 +48,13 @@ pub enum ClientMessage {
         room: String,
         body: String,
         meta: Option<Value>,
+        parent_id: Option<String>,
+    },
+    MessageEdit {
+        ref_: Option<String>,
+        room: String,
+        id: String,
+        body: String,
     },
     CursorUpdate {
         room: String,
@@ -83,6 +90,18 @@ pub enum ClientMessage {
         event: String,
         data: Option<Value>,
     },
+    ReactionAdd {
+        ref_: Option<String>,
+        room: String,
+        message_id: String,
+        emoji: String,
+    },
+    ReactionRemove {
+        ref_: Option<String>,
+        room: String,
+        message_id: String,
+        emoji: String,
+    },
 }
 
 impl ClientMessage {
@@ -111,6 +130,16 @@ impl ClientMessage {
                 room: str_field(p, "room")?,
                 body: str_field(p, "body")?,
                 meta: p.get("meta").cloned(),
+                parent_id: p
+                    .get("parent_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            }),
+            "message.edit" => Ok(Self::MessageEdit {
+                ref_: raw.ref_,
+                room: str_field(p, "room")?,
+                id: str_field(p, "id")?,
+                body: str_field(p, "body")?,
             }),
             "cursor.update" => Ok(Self::CursorUpdate {
                 room: str_field(p, "room")?,
@@ -151,6 +180,18 @@ impl ClientMessage {
                 room: str_field(p, "room")?,
                 event: str_field(p, "event")?,
                 data: p.get("data").cloned(),
+            }),
+            "reaction.add" => Ok(Self::ReactionAdd {
+                ref_: raw.ref_,
+                room: str_field(p, "room")?,
+                message_id: str_field(p, "message_id")?,
+                emoji: str_field(p, "emoji")?,
+            }),
+            "reaction.remove" => Ok(Self::ReactionRemove {
+                ref_: raw.ref_,
+                room: str_field(p, "room")?,
+                message_id: str_field(p, "message_id")?,
+                emoji: str_field(p, "emoji")?,
             }),
             other => Err(format!("unknown message type: {other}")),
         }
@@ -196,6 +237,8 @@ pub enum ServerMessage {
         ref_: Option<String>,
         payload: MessagesBatchPayload,
     },
+    #[serde(rename = "message.edited")]
+    MessageEdited { payload: MessageEditedPayload },
     #[serde(rename = "message.deleted")]
     MessageDeleted { payload: MessageDeletedPayload },
     #[serde(rename = "presence.changed")]
@@ -222,6 +265,8 @@ pub enum ServerMessage {
     WatchlistOffline { payload: WatchlistPayload },
     #[serde(rename = "room.subscriber_count")]
     RoomSubscriberCount { payload: RoomSubscriberCountPayload },
+    #[serde(rename = "reaction.changed")]
+    ReactionChanged { payload: ReactionChangedPayload },
     #[serde(rename = "error")]
     Error {
         #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -295,6 +340,8 @@ pub struct MessageNewPayload {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub sent_at: i64,
 }
 
@@ -310,6 +357,15 @@ pub struct MessagesBatchPayload {
     pub room: String,
     pub messages: Vec<MessageNewPayload>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageEditedPayload {
+    pub room: String,
+    pub id: String,
+    pub seq: Sequence,
+    pub body: String,
+    pub edited_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,6 +430,15 @@ pub struct WatchlistPayload {
 pub struct RoomSubscriberCountPayload {
     pub room: String,
     pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionChangedPayload {
+    pub room: String,
+    pub message_id: String,
+    pub emoji: String,
+    pub user_id: String,
+    pub action: String,
 }
 
 // ---------------------------------------------------------------------------

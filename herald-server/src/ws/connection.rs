@@ -462,6 +462,7 @@ async fn reconnect_catchup(
                     sender: m.sender,
                     body: m.body,
                     meta: m.meta,
+                    parent_id: m.parent_id,
                     sent_at: m.sent_at,
                 })
                 .collect();

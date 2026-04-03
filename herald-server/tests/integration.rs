@@ -5207,3 +5207,431 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
     // Keep connections alive to prevent drop
     let _ = (&ws1, &ws2, &ws3, &ws_unauth);
 }
+
+// ---------------------------------------------------------------------------
+// Message editing & thread/reply tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_message_edit_ws() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Drain
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(300), ws_bob.next()).await
+    {}
+
+    // Alice sends
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "original"}}),
+    )
+    .await;
+    let ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+    let msg_id = ack["payload"]["id"].as_str().unwrap().to_string();
+    let _new = ws_recv_type(&mut ws_bob, "message.new").await;
+
+    // Alice edits
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "message.edit", "payload": {"room": "chat", "id": &msg_id, "body": "edited"}}),
+    )
+    .await;
+    let _edit_ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+
+    // Bob receives edit
+    let edited = ws_recv_type(&mut ws_bob, "message.edited").await;
+    assert_eq!(edited["payload"]["id"], msg_id);
+    assert_eq!(edited["payload"]["body"], "edited");
+    assert!(edited["payload"]["edited_at"].is_number());
+
+    // Verify in history
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let msg = &body["messages"].as_array().unwrap()[0];
+    assert_eq!(msg["body"], "edited");
+    assert!(msg["edited_at"].is_number());
+}
+
+#[tokio::test]
+async fn test_message_edit_http() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "original"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let msg_id = body["id"].as_str().unwrap();
+
+    let resp = server
+        .http_client()
+        .patch(server.http_url(&format!("/rooms/chat/messages/{msg_id}")))
+        .bearer_auth(&token)
+        .json(&json!({"body": "updated via http"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["messages"][0]["body"], "updated via http");
+}
+
+#[tokio::test]
+async fn test_thread_reply() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Send parent message
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "parent message"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let parent_id = body["id"].as_str().unwrap().to_string();
+
+    // Send reply with parent_id
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "bob", "body": "reply to parent", "parent_id": &parent_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Send another non-threaded message
+    server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "unrelated message"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Fetch thread - should only return the reply
+    let resp = server
+        .http_client()
+        .get(server.http_url(&format!("/rooms/chat/messages?thread={parent_id}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["body"], "reply to parent");
+    assert_eq!(messages[0]["parent_id"], parent_id);
+}
+
+#[tokio::test]
+async fn test_thread_reply_ws() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Drain
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(300), ws_bob.next()).await
+    {}
+
+    // Alice sends parent via HTTP
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "parent"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let parent_id = body["id"].as_str().unwrap().to_string();
+
+    // Bob receives parent
+    let parent_msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    assert!(parent_msg["payload"]["parent_id"].is_null());
+
+    // Alice sends reply via HTTP
+    server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "reply", "parent_id": &parent_id}))
+        .send()
+        .await
+        .unwrap();
+
+    // Bob receives reply with parent_id
+    let reply_msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    assert_eq!(reply_msg["payload"]["parent_id"], parent_id);
+    assert_eq!(reply_msg["payload"]["body"], "reply");
+}
+
+// ---------------------------------------------------------------------------
+// Reactions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_reaction_add_remove_ws() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Send a message
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "react to this"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let msg_id = body["id"].as_str().unwrap().to_string();
+
+    // Bob subscribes
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+    // Drain any backfill
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(300), ws_bob.next()).await
+    {}
+
+    // Alice subscribes and adds reaction
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "reaction.add", "payload": {"room": "chat", "message_id": &msg_id, "emoji": "thumbsup"}}),
+    )
+    .await;
+
+    // Bob receives reaction.changed
+    let msg = ws_recv_type(&mut ws_bob, "reaction.changed").await;
+    assert_eq!(msg["payload"]["emoji"], "thumbsup");
+    assert_eq!(msg["payload"]["user_id"], "alice");
+    assert_eq!(msg["payload"]["action"], "add");
+
+    // Get reactions via HTTP
+    let resp = server
+        .http_client()
+        .get(server.http_url(&format!("/rooms/chat/messages/{msg_id}/reactions")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    let reactions = body["reactions"].as_array().unwrap();
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0]["emoji"], "thumbsup");
+    assert_eq!(reactions[0]["count"], 1);
+
+    // Alice removes reaction
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "reaction.remove", "payload": {"room": "chat", "message_id": &msg_id, "emoji": "thumbsup"}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws_bob, "reaction.changed").await;
+    assert_eq!(msg["payload"]["action"], "remove");
+}
+
+// ---------------------------------------------------------------------------
+// Attachment validation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_attachment_validation() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Valid attachment
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "sender": "alice",
+            "body": "check this file",
+            "meta": {
+                "attachments": [{"url": "https://example.com/file.pdf", "content_type": "application/pdf", "size": 1024, "name": "file.pdf"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Invalid attachment (missing url)
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "sender": "alice",
+            "body": "bad attachment",
+            "meta": {
+                "attachments": [{"name": "file.pdf"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Too many attachments
+    let attachments: Vec<_> = (0..15)
+        .map(|i| json!({"url": format!("https://example.com/{i}.pdf")}))
+        .collect();
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "too many", "meta": {"attachments": attachments}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// User blocking
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_user_block_unblock() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Block
+    let resp = server
+        .http_client()
+        .post(server.http_url("/blocks"))
+        .bearer_auth(&token)
+        .json(&json!({"user_id": "alice", "blocked_id": "bob"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // List blocked
+    let resp = server
+        .http_client()
+        .get(server.http_url("/blocks/alice"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let blocked = body["blocked"].as_array().unwrap();
+    assert!(blocked.iter().any(|b| b == "bob"));
+
+    // Unblock
+    let resp = server
+        .http_client()
+        .delete(server.http_url("/blocks"))
+        .bearer_auth(&token)
+        .json(&json!({"user_id": "alice", "blocked_id": "bob"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Verify unblocked
+    let resp = server
+        .http_client()
+        .get(server.http_url("/blocks/alice"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let blocked = body["blocked"].as_array().unwrap();
+    assert!(blocked.is_empty());
+}

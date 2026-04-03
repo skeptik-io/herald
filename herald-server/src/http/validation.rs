@@ -84,6 +84,31 @@ impl PaginationQuery {
     }
 }
 
+const MAX_ATTACHMENTS: usize = 10;
+
+/// Validate attachment metadata in the meta field.
+pub fn validate_attachments(meta: &Option<serde_json::Value>) -> Result<(), ValidationError> {
+    if let Some(m) = meta {
+        if let Some(attachments) = m.get("attachments") {
+            if let Some(arr) = attachments.as_array() {
+                if arr.len() > MAX_ATTACHMENTS {
+                    return Err(bad_request(&format!(
+                        "maximum {MAX_ATTACHMENTS} attachments per message"
+                    )));
+                }
+                for (i, att) in arr.iter().enumerate() {
+                    if att.get("url").and_then(|v| v.as_str()).is_none() {
+                        return Err(bad_request(&format!(
+                            "attachment[{i}] missing required 'url' field"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn bad_request(msg: &str) -> ValidationError {
     Box::new((
         StatusCode::BAD_REQUEST,

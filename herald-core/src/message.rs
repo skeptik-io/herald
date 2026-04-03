@@ -26,5 +26,9 @@ pub struct Message {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<i64>,
     pub sent_at: i64,
 }

@@ -34,8 +34,17 @@ pub async fn handle_message(
             room,
             body,
             meta,
+            parent_id,
         } => {
-            handle_send(state, ctx, tx, ref_, room, body, meta).await;
+            handle_send(state, ctx, tx, ref_, room, body, meta, parent_id).await;
+        }
+        ClientMessage::MessageEdit {
+            ref_,
+            room,
+            id,
+            body,
+        } => {
+            handle_edit(state, ctx, tx, ref_, room, id, body).await;
         }
         ClientMessage::CursorUpdate { room, seq } => {
             handle_cursor_update(state, ctx, room, seq).await;
@@ -67,6 +76,22 @@ pub async fn handle_message(
             data,
         } => {
             handle_event_trigger(state, ctx, tx, ref_, room, event, data).await;
+        }
+        ClientMessage::ReactionAdd {
+            ref_,
+            room,
+            message_id,
+            emoji,
+        } => {
+            handle_reaction(state, ctx, tx, ref_, room, message_id, emoji, true).await;
+        }
+        ClientMessage::ReactionRemove {
+            ref_,
+            room,
+            message_id,
+            emoji,
+        } => {
+            handle_reaction(state, ctx, tx, ref_, room, message_id, emoji, false).await;
         }
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
@@ -212,6 +237,7 @@ fn handle_unsubscribe(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_send(
     state: &Arc<AppState>,
     ctx: &ConnContext,
@@ -220,6 +246,7 @@ async fn handle_send(
     room: String,
     body: String,
     meta: Option<serde_json::Value>,
+    parent_id: Option<String>,
 ) {
     let tid = &ctx.tenant_id;
 
@@ -232,6 +259,36 @@ async fn handle_send(
             ))
             .await;
         return;
+    }
+
+    // Validate attachments in meta
+    if let Some(ref m) = meta {
+        if let Some(attachments) = m.get("attachments") {
+            if let Some(arr) = attachments.as_array() {
+                if arr.len() > 10 {
+                    let _ = tx
+                        .send(ServerMessage::error(
+                            ref_,
+                            ErrorCode::BadRequest,
+                            "maximum 10 attachments per message",
+                        ))
+                        .await;
+                    return;
+                }
+                for (i, att) in arr.iter().enumerate() {
+                    if att.get("url").and_then(|v| v.as_str()).is_none() {
+                        let _ = tx
+                            .send(ServerMessage::error(
+                                ref_,
+                                ErrorCode::BadRequest,
+                                format!("attachment[{i}] missing required 'url' field"),
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     if !state.rooms.is_member(tid, &room, &ctx.user_id) {
@@ -279,6 +336,8 @@ async fn handle_send(
         sender: ctx.user_id.clone(),
         body: body.clone(),
         meta: meta.clone(),
+        parent_id: parent_id.clone(),
+        edited_at: None,
         sent_at: now,
     };
 
@@ -332,6 +391,7 @@ async fn handle_send(
             sender: ctx.user_id.clone(),
             body: body.clone(),
             meta: meta.clone(),
+            parent_id: parent_id.clone(),
             sent_at: now,
         },
     };
@@ -453,6 +513,7 @@ async fn handle_fetch(
             sender: m.sender,
             body: m.body,
             meta: m.meta,
+            parent_id: m.parent_id,
             sent_at: m.sent_at,
         })
         .collect();
@@ -574,6 +635,125 @@ async fn handle_delete(
     }
 }
 
+async fn handle_edit(
+    state: &Arc<AppState>,
+    ctx: &ConnContext,
+    tx: &mpsc::Sender<ServerMessage>,
+    ref_: Option<String>,
+    room: String,
+    id: String,
+    body: String,
+) {
+    let tid = &ctx.tenant_id;
+
+    if body.len() > 65_536 {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::BadRequest,
+                "message body exceeds maximum length",
+            ))
+            .await;
+        return;
+    }
+
+    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::NotSubscribed,
+                "not a member of this room",
+            ))
+            .await;
+        return;
+    }
+
+    // Look up original to check sender
+    let msg = match store::messages::get_by_id(&*state.db, tid, &id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::BadRequest,
+                    "message not found",
+                ))
+                .await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!("failed to look up message {id}: {e}");
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::Internal,
+                    "internal error",
+                ))
+                .await;
+            return;
+        }
+    };
+
+    // Only sender can edit (or Sentry authorize)
+    if msg.sender != ctx.user_id {
+        if let Err(e) = state
+            .authorize(tid, &ctx.user_id, "message.edit", &room)
+            .await
+        {
+            let _ = tx
+                .send(ServerMessage::error(ref_, ErrorCode::Unauthorized, e))
+                .await;
+            return;
+        }
+    }
+
+    let now = now_millis();
+    match store::messages::edit_message(&*state.db, tid, &id, &body, now).await {
+        Ok(Some(updated)) => {
+            let edited_msg = ServerMessage::MessageEdited {
+                payload: MessageEditedPayload {
+                    room: room.clone(),
+                    id: id.clone(),
+                    seq: updated.seq,
+                    body: body.clone(),
+                    edited_at: now,
+                },
+            };
+            fanout_to_room(state, tid, &room, &edited_msg, None);
+
+            let _ = tx
+                .send(ServerMessage::MessageAck {
+                    ref_,
+                    payload: MessageAckPayload {
+                        id,
+                        seq: updated.seq,
+                        sent_at: now,
+                    },
+                })
+                .await;
+        }
+        Ok(None) => {
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::BadRequest,
+                    "message not found",
+                ))
+                .await;
+        }
+        Err(e) => {
+            tracing::error!("failed to edit message {id}: {e}");
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::Internal,
+                    "internal error",
+                ))
+                .await;
+        }
+    }
+}
+
 async fn handle_event_trigger(
     state: &Arc<AppState>,
     ctx: &ConnContext,
@@ -622,5 +802,79 @@ async fn handle_event_trigger(
     // Ack to sender (lightweight — no seq/id since ephemeral)
     if let Some(r) = ref_ {
         let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_reaction(
+    state: &Arc<AppState>,
+    ctx: &ConnContext,
+    tx: &mpsc::Sender<ServerMessage>,
+    ref_: Option<String>,
+    room: String,
+    message_id: String,
+    emoji: String,
+    add: bool,
+) {
+    let tid = &ctx.tenant_id;
+    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::NotSubscribed,
+                "not a member of this room",
+            ))
+            .await;
+        return;
+    }
+    if emoji.len() > 32 {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::BadRequest,
+                "emoji too long",
+            ))
+            .await;
+        return;
+    }
+
+    let result = if add {
+        store::reactions::add(&*state.db, tid, &room, &message_id, &emoji, &ctx.user_id).await
+    } else {
+        store::reactions::remove(&*state.db, tid, &room, &message_id, &emoji, &ctx.user_id)
+            .await
+            .map(|_| ())
+    };
+
+    match result {
+        Ok(()) => {
+            let msg = ServerMessage::ReactionChanged {
+                payload: ReactionChangedPayload {
+                    room: room.clone(),
+                    message_id,
+                    emoji,
+                    user_id: ctx.user_id.clone(),
+                    action: if add {
+                        "add".to_string()
+                    } else {
+                        "remove".to_string()
+                    },
+                },
+            };
+            fanout_to_room(state, tid, &room, &msg, None);
+            if let Some(r) = ref_ {
+                let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;
+            }
+        }
+        Err(e) => {
+            tracing::error!("reaction error: {e}");
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::Internal,
+                    "internal error",
+                ))
+                .await;
+        }
     }
 }

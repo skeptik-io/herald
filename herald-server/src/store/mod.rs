@@ -1,6 +1,8 @@
+pub mod blocks;
 pub mod cursors;
 pub mod members;
 pub mod messages;
+pub mod reactions;
 pub mod rooms;
 pub mod tenants;
 
@@ -12,6 +14,8 @@ pub const NS_ROOMS: &str = "herald.rooms";
 pub const NS_MEMBERS: &str = "herald.members";
 pub const NS_MESSAGES: &str = "herald.messages";
 pub const NS_CURSORS: &str = "herald.cursors";
+pub const NS_REACTIONS: &str = "herald.reactions";
+pub const NS_BLOCKS: &str = "herald.blocks";
 
 /// Initialize all namespaces on startup.
 #[cfg(test)]
@@ -40,6 +44,8 @@ pub async fn init_namespaces<S: Store>(store: &S) -> Result<(), shroudb_store::S
         NS_MEMBERS,
         NS_MESSAGES,
         NS_CURSORS,
+        NS_REACTIONS,
+        NS_BLOCKS,
     ] {
         match store.namespace_create(ns, config.clone()).await {
             Ok(()) => {}

@@ -162,6 +162,32 @@ pub async fn get_by_id<S: Store>(
     }
 }
 
+pub async fn edit_message<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    msg_id: &str,
+    new_body: &str,
+    edited_at: i64,
+) -> Result<Option<Message>, anyhow::Error> {
+    let id_key = msg_id_key(tenant_id, msg_id);
+    let seq_key = match store.get(NS_MESSAGES, &id_key, None).await {
+        Ok(entry) => entry.value,
+        Err(shroudb_store::StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let entry = match store.get(NS_MESSAGES, &seq_key, None).await {
+        Ok(e) => e,
+        Err(shroudb_store::StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut stored: StoredMessage = serde_json::from_slice(&entry.value)?;
+    stored.msg.body = new_body.to_string();
+    stored.msg.edited_at = Some(edited_at);
+    let value = serde_json::to_vec(&stored)?;
+    store.put(NS_MESSAGES, &seq_key, &value, None).await?;
+    Ok(Some(stored.msg))
+}
+
 pub async fn delete_message<S: Store>(
     store: &S,
     tenant_id: &str,
@@ -268,6 +294,8 @@ mod tests {
             sender: "user1".into(),
             body: "hello".into(),
             meta: None,
+            parent_id: None,
+            edited_at: None,
             sent_at,
         }
     }

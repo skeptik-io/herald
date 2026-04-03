@@ -24,6 +24,8 @@ pub struct InjectMessageRequest {
     pub meta: Option<serde_json::Value>,
     #[serde(default)]
     pub exclude_connection: Option<u64>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -31,6 +33,7 @@ pub struct ListMessagesQuery {
     pub before: Option<u64>,
     pub after: Option<u64>,
     pub limit: Option<u32>,
+    pub thread: Option<String>,
 }
 
 const MESSAGE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -51,6 +54,9 @@ pub async fn inject_message(
         return (*e).into_response();
     }
     if let Err(e) = validation::validate_meta(&req.meta) {
+        return (*e).into_response();
+    }
+    if let Err(e) = validation::validate_attachments(&req.meta) {
         return (*e).into_response();
     }
 
@@ -81,6 +87,8 @@ pub async fn inject_message(
         sender: req.sender.clone(),
         body: req.body.clone(),
         meta: req.meta.clone(),
+        parent_id: req.parent_id.clone(),
+        edited_at: None,
         sent_at: now,
     };
 
@@ -103,6 +111,7 @@ pub async fn inject_message(
             sender: req.sender.clone(),
             body: req.body.clone(),
             meta: req.meta.clone(),
+            parent_id: req.parent_id.clone(),
             sent_at: now,
         },
     };
@@ -157,12 +166,21 @@ pub async fn list_messages(
             .unwrap_or_default()
     };
 
+    let messages = if let Some(ref thread_id) = q.thread {
+        messages
+            .into_iter()
+            .filter(|m| m.parent_id.as_deref() == Some(thread_id.as_str()))
+            .collect()
+    } else {
+        messages
+    };
+
     let has_more = messages.len() > limit as usize;
     let result: Vec<serde_json::Value> = messages
         .into_iter()
         .take(limit as usize)
         .map(|m| {
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "id": m.id.0,
                 "room": m.room_id,
                 "seq": m.seq,
@@ -170,7 +188,14 @@ pub async fn list_messages(
                 "body": m.body,
                 "meta": m.meta,
                 "sent_at": m.sent_at,
-            })
+            });
+            if let Some(ref parent_id) = m.parent_id {
+                obj["parent_id"] = serde_json::json!(parent_id);
+            }
+            if let Some(edited_at) = m.edited_at {
+                obj["edited_at"] = serde_json::json!(edited_at);
+            }
+            obj
         })
         .collect();
 
@@ -201,6 +226,73 @@ pub async fn list_cursors(
         }
         Err(e) => {
             tracing::error!(tenant = %tenant.0, room = %room_id, "failed to list cursors: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EditMessageRequest {
+    pub body: String,
+}
+
+pub async fn edit_message(
+    State(state): State<Arc<AppState>>,
+    Extension(tenant): Extension<TenantId>,
+    Path((room_id, msg_id)): Path<(String, String)>,
+    Json(req): Json<EditMessageRequest>,
+) -> impl IntoResponse {
+    let tid = &tenant.0;
+
+    if let Err(e) = validation::validate_body(&req.body) {
+        return (*e).into_response();
+    }
+
+    let now = now_millis();
+    match store::messages::edit_message(&*state.db, tid, &msg_id, &req.body, now).await {
+        Ok(Some(updated)) => {
+            let edited_msg = ServerMessage::MessageEdited {
+                payload: herald_core::protocol::MessageEditedPayload {
+                    room: room_id.clone(),
+                    id: msg_id.clone(),
+                    seq: updated.seq,
+                    body: req.body,
+                    edited_at: now,
+                },
+            };
+            fanout_to_room(&state, tid, &room_id, &edited_msg, None);
+            StatusCode::OK.into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "message not found"})),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = tid, msg = %msg_id, "failed to edit message: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn get_reactions(
+    State(state): State<Arc<AppState>>,
+    Extension(tenant): Extension<TenantId>,
+    Path((room_id, msg_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let tid = &tenant.0;
+    match store::reactions::list_for_message(&*state.db, tid, &room_id, &msg_id).await {
+        Ok(reactions) => Json(serde_json::json!({"reactions": reactions})).into_response(),
+        Err(e) => {
+            tracing::error!(tenant = tid, msg = %msg_id, "failed to list reactions: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),

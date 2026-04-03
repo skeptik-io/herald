@@ -120,12 +120,14 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `auth.refresh` | `{token}` | Refresh JWT without reconnecting |
 | `subscribe` | `{rooms: []}` | Subscribe to rooms |
 | `unsubscribe` | `{rooms: []}` | Unsubscribe |
-| `message.send` | `{room, body, meta?}` | Send a message |
+| `message.send` | `{room, body, meta?, parent_id?}` | Send a message |
 | `cursor.update` | `{room, seq}` | Update read position |
 | `presence.set` | `{status}` | `online`, `away`, `dnd` |
 | `typing.start` / `typing.stop` | `{room}` | Ephemeral |
 | `messages.fetch` | `{room, before?, limit?}` | History |
 | `event.trigger` | `{room, event, data?}` | Trigger ephemeral event (not persisted) |
+| `reaction.add` | `{room, message_id, emoji}` | Add a reaction to a message |
+| `reaction.remove` | `{room, message_id, emoji}` | Remove a reaction from a message |
 | `ping` | — | Keepalive |
 
 ### Server → Client
@@ -145,6 +147,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `event.received` | `{room, event, sender, data?}` | Ephemeral event from another client |
 | `watchlist.online` | `{user_ids: []}` | Watched users came online |
 | `watchlist.offline` | `{user_ids: []}` | Watched users went offline |
+| `reaction.changed` | `{room, message_id, emoji, user_id, action}` | Reaction added/removed (`action`: `"add"` or `"remove"`) |
 | `room.subscriber_count` | `{room, count}` | Room subscriber count changed |
 | `system.token_expiring` | `{expires_at}` | JWT expiring in 60s |
 | `error` | `{code, message}` | Error |
@@ -186,7 +189,12 @@ Ephemeral events do not trigger webhooks and do not affect message history or se
 | `POST /rooms/:id/messages` | Inject message | `{sender, body, meta?, exclude_connection?}` |
 | `GET /rooms/:id/messages` | List messages | `?before=&after=&limit=` |
 | `DELETE /rooms/:id/messages/:msg_id` | Delete/redact message | Soft-deletes: clears body, sets `meta.deleted=true` |
+| `PATCH /rooms/:id/messages/:msg_id` | Edit message | `{body}` |
+| `GET /rooms/:id/messages/:msg_id/reactions` | List reactions | Returns `{reactions: [{emoji, count, users}]}` |
 | `GET /rooms/:id/cursors` | Read cursors | |
+| `POST /blocks` | Block a user | `{user_id, blocked_id}` |
+| `DELETE /blocks` | Unblock a user | `{user_id, blocked_id}` |
+| `GET /blocks/:user_id` | List blocked users | Returns `{blocked: [...]}` |
 | `GET /rooms/:id/presence` | Room presence | |
 | `GET /presence/:uid` | User presence | |
 | `GET /stats` | Tenant-scoped stats | Connection count, room count, message rate for this tenant |
@@ -381,3 +389,72 @@ This means:
 - Unauthenticated connections cannot exhaust tenant quota
 - The 5-second auth timeout prevents resource exhaustion from idle connections
 - Auth failures are tracked via the `herald_ws_auth_failures_total` Prometheus metric
+
+---
+
+## Reactions
+
+Reactions are per-message emoji/string markers. Any room member can add or remove their own reaction via WebSocket.
+
+**WebSocket flow:**
+
+```json
+// Add reaction
+{"type": "reaction.add", "ref": "r1", "payload": {"room": "chat", "message_id": "abc-123", "emoji": "thumbsup"}}
+
+// All room subscribers receive:
+{"type": "reaction.changed", "payload": {"room": "chat", "message_id": "abc-123", "emoji": "thumbsup", "user_id": "alice", "action": "add"}}
+
+// Remove reaction
+{"type": "reaction.remove", "ref": "r2", "payload": {"room": "chat", "message_id": "abc-123", "emoji": "thumbsup"}}
+```
+
+**HTTP API:** `GET /rooms/:id/messages/:msg_id/reactions` returns all reactions for a message grouped by emoji, including counts and user lists.
+
+Emoji strings are limited to 32 bytes. Each user can have at most one reaction per emoji per message (idempotent add).
+
+---
+
+## File/Media Attachments
+
+Attachments are stored in the message `meta` field with a standardized schema. Herald validates the structure but does not store files -- it validates and passes through attachment metadata. File storage and URL generation is the responsibility of the application server.
+
+**Schema:**
+
+```json
+{
+  "sender": "alice",
+  "body": "check this file",
+  "meta": {
+    "attachments": [
+      {
+        "url": "https://cdn.example.com/file.pdf",
+        "content_type": "application/pdf",
+        "size": 102400,
+        "name": "report.pdf"
+      }
+    ]
+  }
+}
+```
+
+**Validation rules:**
+- Maximum 10 attachments per message
+- Each attachment must have a `url` field (string)
+- Applied on both HTTP inject and WebSocket `message.send`
+
+---
+
+## User Blocking
+
+Per-tenant block list managed via HTTP API. When user A blocks user B, the block is stored server-side. Client SDKs should use the block list to filter messages locally.
+
+**HTTP API:**
+
+| Method | Path | Body | Description |
+|---|---|---|---|
+| `POST /blocks` | | `{user_id, blocked_id}` | Block a user |
+| `DELETE /blocks` | | `{user_id, blocked_id}` | Unblock a user |
+| `GET /blocks/:user_id` | | | List blocked users |
+
+The block list is per-tenant and directional (A blocking B does not mean B blocks A). Blocking does not remove the user from rooms or prevent message delivery at the server level -- it provides the data for client-side filtering, which is the standard approach used by major chat platforms.

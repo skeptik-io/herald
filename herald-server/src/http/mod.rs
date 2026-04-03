@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod blocks;
 pub mod health;
 pub mod members;
 pub mod messages;
@@ -52,11 +53,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/rooms/{id}/messages", get(messages::list_messages))
         .route(
             "/rooms/{id}/messages/{msg_id}",
-            delete(messages::delete_message),
+            delete(messages::delete_message).patch(messages::edit_message),
+        )
+        .route(
+            "/rooms/{id}/messages/{msg_id}/reactions",
+            get(messages::get_reactions),
         )
         .route("/rooms/{id}/cursors", get(messages::list_cursors))
         .route("/rooms/{id}/presence", get(presence::room_presence))
         .route("/presence/{user_id}", get(presence::user_presence))
+        .route("/blocks", post(blocks::block_user))
+        .route("/blocks", delete(blocks::unblock_user))
+        .route("/blocks/{user_id}", get(blocks::list_blocked))
         .route("/stats", get(health::tenant_stats))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1MB
         .layer(middleware::from_fn(scope_check_middleware))

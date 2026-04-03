@@ -1,8 +1,12 @@
 #!/bin/sh
 set -e
 
-# Substitute HERALD_URL into nginx config
-export PORT="${PORT:-8080}"
-envsubst '${HERALD_URL} ${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+PORT="${PORT:-8080}"
+HERALD_URL="${HERALD_URL:-http://localhost:6201}"
+
+sed \
+  -e "s|__PORT__|${PORT}|g" \
+  -e "s|__HERALD_URL__|${HERALD_URL}|g" \
+  /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
 
 exec nginx -g 'daemon off;'

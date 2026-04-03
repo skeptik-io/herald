@@ -75,7 +75,7 @@ export default function Overview() {
       </p>
 
       {health && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <Stat label="Status" value={health.status} />
           <Stat label="Connections" value={current?.connections ?? health.connections} />
           <Stat label="Rooms" value={current?.rooms ?? health.rooms} />

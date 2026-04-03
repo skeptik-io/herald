@@ -1,3 +1,15 @@
+import {
+  ResponsiveContainer,
+  LineChart,
+  BarChart,
+  Line,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+} from "recharts";
+
 interface DataPoint {
   t: number;
   v: number;
@@ -10,63 +22,100 @@ interface Props {
   type?: "line" | "bar";
 }
 
-export default function MiniChart({ data, color = "#2dd4bf", height = 100, type = "line" }: Props) {
+function formatTime(ms: number) {
+  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+export default function MiniChart({
+  data,
+  color = "#2dd4bf",
+  height = 150,
+  type = "line",
+}: Props) {
   if (data.length === 0) {
     return (
-      <div className="flex items-center justify-center text-zinc-600 text-sm" style={{ height }}>
+      <div
+        className="flex items-center justify-center text-zinc-600 text-sm"
+        style={{ height }}
+      >
         No data
       </div>
     );
   }
 
-  const w = 400;
-  const h = height;
-  const pad = 4;
-  const maxV = Math.max(...data.map((d) => d.v), 1);
+  const chartData = data.map((d) => ({ time: d.t, value: d.v }));
+
+  const common = {
+    data: chartData,
+    margin: { top: 5, right: 5, bottom: 5, left: 0 },
+  };
+
+  const xAxis = (
+    <XAxis
+      dataKey="time"
+      tickFormatter={formatTime}
+      stroke="#52525b"
+      fontSize={11}
+      tickLine={false}
+      axisLine={false}
+    />
+  );
+
+  const yAxis = (
+    <YAxis
+      stroke="#52525b"
+      fontSize={11}
+      tickLine={false}
+      axisLine={false}
+      width={35}
+    />
+  );
+
+  const grid = <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />;
+
+  const tooltip = (
+    <Tooltip
+      contentStyle={{
+        background: "#18181b",
+        border: "1px solid #3f3f46",
+        borderRadius: 6,
+        fontSize: 12,
+      }}
+      labelFormatter={(label) => formatTime(Number(label))}
+      formatter={(value) => [Number(value).toLocaleString(), ""]}
+    />
+  );
 
   if (type === "bar") {
-    const barW = Math.max(2, (w - pad * 2) / data.length - 2);
     return (
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none">
-        {data.map((d, i) => {
-          const barH = (d.v / maxV) * (h - pad * 2);
-          const x = pad + (i / data.length) * (w - pad * 2);
-          return (
-            <rect
-              key={i}
-              x={x}
-              y={h - pad - barH}
-              width={barW}
-              height={barH}
-              fill={color}
-              opacity={0.8}
-            />
-          );
-        })}
-      </svg>
+      <ResponsiveContainer width="100%" height={height}>
+        <BarChart {...common}>
+          {grid}
+          {xAxis}
+          {yAxis}
+          {tooltip}
+          <Bar dataKey="value" fill={color} opacity={0.8} radius={[2, 2, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
     );
   }
 
-  const points = data.map((d, i) => {
-    const x = pad + (i / (data.length - 1 || 1)) * (w - pad * 2);
-    const y = h - pad - (d.v / maxV) * (h - pad * 2);
-    return `${x},${y}`;
-  });
-
-  const areaPoints = [...points, `${w - pad},${h - pad}`, `${pad},${h - pad}`];
-
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none">
-      <polygon points={areaPoints.join(" ")} fill={color} opacity={0.1} />
-      <polyline points={points.join(" ")} fill="none" stroke={color} strokeWidth={2} />
-      {data.length > 0 && (
-        <circle
-          cx={pad + ((data.length - 1) / (data.length - 1 || 1)) * (w - pad * 2)}
-          cy={h - pad - (data[data.length - 1]!.v / maxV) * (h - pad * 2)}
-          r={3}
-          fill={color}
+    <ResponsiveContainer width="100%" height={height}>
+      <LineChart {...common}>
+        {grid}
+        {xAxis}
+        {yAxis}
+        {tooltip}
+        <Line
+          type="monotone"
+          dataKey="value"
+          stroke={color}
+          strokeWidth={2}
+          dot={{ r: 3, fill: color }}
+          activeDot={{ r: 5 }}
         />
-      )}
-    </svg>
+      </LineChart>
+    </ResponsiveContainer>
   );
 }

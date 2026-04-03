@@ -7,7 +7,6 @@ import {
   Table,
   Btn,
   Input,
-  Badge,
   EmptyState,
   formatTime,
 } from "../components/shared";

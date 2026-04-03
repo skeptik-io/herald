@@ -5,6 +5,7 @@ export { MemberNamespace } from "./namespaces/members.js";
 export { MessageNamespace } from "./namespaces/messages.js";
 export { PresenceNamespace } from "./namespaces/presence.js";
 export { TenantNamespace, type Tenant, type CreateTenantOptions, type ApiToken } from "./namespaces/tenants.js";
+export { BlockNamespace } from "./namespaces/blocks.js";
 export type {
   Room,
   Member,
@@ -15,4 +16,6 @@ export type {
   Cursor,
   HealthResponse,
   MessageSendResult,
+  ReactionSummary,
+  BlockList,
 } from "./types.js";

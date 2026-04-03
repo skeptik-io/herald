@@ -4,7 +4,7 @@ require "erb"
 
 module HeraldAdmin
   class Client
-    attr_reader :rooms, :members, :messages, :presence, :tenants
+    attr_reader :rooms, :members, :messages, :presence, :tenants, :blocks
 
     def initialize(url:, token:)
       transport = HttpTransport.new(url, token)
@@ -13,6 +13,7 @@ module HeraldAdmin
       @messages = MessageNamespace.new(transport)
       @presence = PresenceNamespace.new(transport)
       @tenants = TenantNamespace.new(transport)
+      @blocks = BlockNamespace.new(transport)
       @transport = transport
     end
 

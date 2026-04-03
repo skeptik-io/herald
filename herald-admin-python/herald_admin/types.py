@@ -8,6 +8,8 @@ class Room:
     id: str
     name: str
     meta: Any = None
+    public: bool = False
+    archived: bool = False
     created_at: int = 0
 
 
@@ -28,6 +30,8 @@ class Message:
     body: str
     sent_at: int
     meta: Any = None
+    parent_id: str | None = None
+    edited_at: int | None = None
 
 
 @dataclass(frozen=True)

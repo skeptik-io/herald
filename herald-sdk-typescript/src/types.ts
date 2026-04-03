@@ -41,6 +41,24 @@ export interface MessageNew {
   body: string;
   meta?: unknown;
   sent_at: number;
+  parent_id?: string;
+  edited_at?: number;
+}
+
+export interface MessageEdited {
+  room: string;
+  id: string;
+  seq: number;
+  body: string;
+  edited_at: number;
+}
+
+export interface ReactionChanged {
+  room: string;
+  message_id: string;
+  emoji: string;
+  user_id: string;
+  action: "add" | "remove";
 }
 
 export interface MessageAck {
@@ -122,6 +140,8 @@ export interface ServerFrame {
 export type HeraldEventMap = {
   message: MessageNew;
   "message.deleted": MessageDeleted;
+  "message.edited": MessageEdited;
+  "reaction.changed": ReactionChanged;
   "event.received": EventReceived;
   presence: PresenceChanged;
   cursor: CursorMoved;

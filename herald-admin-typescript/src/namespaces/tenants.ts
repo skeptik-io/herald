@@ -1,4 +1,5 @@
 import type { HttpTransport } from "../transport.js";
+import type { Room } from "../types.js";
 
 export interface Tenant {
   id: string;
@@ -56,5 +57,10 @@ export class TenantNamespace {
 
   async deleteToken(tenantId: string, token: string): Promise<void> {
     await this.transport.request("DELETE", `/admin/tenants/${encodeURIComponent(tenantId)}/tokens/${encodeURIComponent(token)}`);
+  }
+
+  async listTenantRooms(tenantId: string): Promise<Room[]> {
+    const res = await this.transport.request<{ rooms: Room[] }>("GET", `/admin/tenants/${encodeURIComponent(tenantId)}/rooms`);
+    return res.rooms;
   }
 }

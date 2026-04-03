@@ -42,5 +42,15 @@ module HeraldAdmin
     def delete_token(tenant_id, token)
       @t.request("DELETE", "/admin/tenants/#{ERB::Util.url_encode(tenant_id)}/tokens/#{ERB::Util.url_encode(token)}")
     end
+
+    def list_tokens(tenant_id)
+      data = @t.request("GET", "/admin/tenants/#{ERB::Util.url_encode(tenant_id)}/tokens")
+      data["tokens"]
+    end
+
+    def list_rooms(tenant_id)
+      data = @t.request("GET", "/admin/tenants/#{ERB::Util.url_encode(tenant_id)}/rooms")
+      data["rooms"]
+    end
   end
 end

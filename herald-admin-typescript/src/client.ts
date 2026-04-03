@@ -4,6 +4,7 @@ import { MessageNamespace } from "./namespaces/messages.js";
 import { PresenceNamespace } from "./namespaces/presence.js";
 import { RoomNamespace } from "./namespaces/rooms.js";
 import { TenantNamespace } from "./namespaces/tenants.js";
+import { BlockNamespace } from "./namespaces/blocks.js";
 import type { HealthResponse } from "./types.js";
 
 export interface HeraldAdminOptions {
@@ -34,6 +35,7 @@ export class HeraldAdmin {
   public readonly messages: MessageNamespace;
   public readonly presence: PresenceNamespace;
   public readonly tenants: TenantNamespace;
+  public readonly blocks: BlockNamespace;
 
   private transport: HttpTransport;
 
@@ -44,6 +46,7 @@ export class HeraldAdmin {
     this.messages = new MessageNamespace(this.transport);
     this.presence = new PresenceNamespace(this.transport);
     this.tenants = new TenantNamespace(this.transport);
+    this.blocks = new BlockNamespace(this.transport);
   }
 
   async health(): Promise<HealthResponse> {

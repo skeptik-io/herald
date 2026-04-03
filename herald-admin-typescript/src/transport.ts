@@ -9,12 +9,15 @@ export class HttpTransport {
     this.token = token;
   }
 
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async request<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.token}`,
     };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
+    }
+    if (extraHeaders) {
+      Object.assign(headers, extraHeaders);
     }
 
     const resp = await fetch(`${this.baseUrl}${path}`, {

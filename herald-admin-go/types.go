@@ -2,10 +2,12 @@ package herald
 
 // Room represents a Herald chat room.
 type Room struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	Meta           any    `json:"meta,omitempty"`
-	CreatedAt      int64  `json:"created_at"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Meta      any    `json:"meta,omitempty"`
+	Public    bool   `json:"public"`
+	Archived  bool   `json:"archived"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 // Member represents a user's membership in a room.
@@ -18,13 +20,22 @@ type Member struct {
 
 // Message represents a chat message.
 type Message struct {
-	ID     string `json:"id"`
-	Room   string `json:"room"`
-	Seq    uint64 `json:"seq"`
-	Sender string `json:"sender"`
-	Body   string `json:"body"`
-	Meta   any    `json:"meta,omitempty"`
-	SentAt int64  `json:"sent_at"`
+	ID       string `json:"id"`
+	Room     string `json:"room"`
+	Seq      uint64 `json:"seq"`
+	Sender   string `json:"sender"`
+	Body     string `json:"body"`
+	Meta     any    `json:"meta,omitempty"`
+	ParentID string `json:"parent_id,omitempty"`
+	EditedAt *int64 `json:"edited_at,omitempty"`
+	SentAt   int64  `json:"sent_at"`
+}
+
+// ReactionSummary represents aggregated reactions on a message.
+type ReactionSummary struct {
+	Emoji string   `json:"emoji"`
+	Count int      `json:"count"`
+	Users []string `json:"users"`
 }
 
 // MessageList is a paginated list of messages.

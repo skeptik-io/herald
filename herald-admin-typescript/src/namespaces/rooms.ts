@@ -12,12 +12,13 @@ export class RoomNamespace {
   async create(
     id: string,
     name: string,
-    options?: { meta?: unknown },
+    options?: { meta?: unknown; public?: boolean },
   ): Promise<Room> {
     return this.transport.request<Room>("POST", "/rooms", {
       id,
       name,
       meta: options?.meta,
+      public: options?.public,
     });
   }
 
@@ -25,7 +26,7 @@ export class RoomNamespace {
     return this.transport.request<Room>("GET", `/rooms/${encodeURIComponent(id)}`);
   }
 
-  async update(id: string, options: { name?: string; meta?: unknown }): Promise<void> {
+  async update(id: string, options: { name?: string; meta?: unknown; archived?: boolean }): Promise<void> {
     return this.transport.request("PATCH", `/rooms/${encodeURIComponent(id)}`, options);
   }
 

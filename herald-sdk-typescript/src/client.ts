@@ -9,9 +9,11 @@ import type {
   MemberEvent,
   MessageAck,
   MessageDeleted,
+  MessageEdited,
   MessageNew,
   MessagesBatch,
   PresenceChanged,
+  ReactionChanged,
   RoomEvent,
   RoomSubscriberCount,
   ServerFrame,
@@ -118,13 +120,36 @@ export class HeraldClient {
 
   // ── Messages ───────────────────────────────────────────────────────
 
-  async send(room: string, body: string, meta?: unknown): Promise<MessageAck> {
+  async send(room: string, body: string, options?: { meta?: unknown; parentId?: string }): Promise<MessageAck> {
     const ref = nextRef();
     return this.request(ref, {
       type: "message.send",
       ref,
-      payload: { room, body, meta },
+      payload: { room, body, meta: options?.meta, parent_id: options?.parentId },
     }) as Promise<MessageAck>;
+  }
+
+  async editMessage(room: string, id: string, body: string): Promise<MessageAck> {
+    const ref = nextRef();
+    return this.request(ref, {
+      type: "message.edit",
+      ref,
+      payload: { room, id, body },
+    }) as Promise<MessageAck>;
+  }
+
+  addReaction(room: string, messageId: string, emoji: string): void {
+    this.connection.send({
+      type: "reaction.add",
+      payload: { room, message_id: messageId, emoji },
+    });
+  }
+
+  removeReaction(room: string, messageId: string, emoji: string): void {
+    this.connection.send({
+      type: "reaction.remove",
+      payload: { room, message_id: messageId, emoji },
+    });
   }
 
   async fetch(
@@ -367,6 +392,14 @@ export class HeraldClient {
 
       case "message.deleted":
         this.emit("message.deleted", p as unknown as MessageDeleted);
+        break;
+
+      case "message.edited":
+        this.emit("message.edited", p as unknown as MessageEdited);
+        break;
+
+      case "reaction.changed":
+        this.emit("reaction.changed", p as unknown as ReactionChanged);
         break;
 
       case "event.received":

@@ -22,6 +22,7 @@ type HeraldAdmin struct {
 	Messages *MessageNamespace
 	Presence *PresenceNamespace
 	Tenants  *TenantNamespace
+	Blocks   *BlockNamespace
 
 	transport *httpTransport
 }
@@ -35,6 +36,7 @@ func New(opts Options) *HeraldAdmin {
 		Messages:  &MessageNamespace{t: t},
 		Presence:  &PresenceNamespace{t: t},
 		Tenants:   &TenantNamespace{t: t},
+		Blocks:    &BlockNamespace{t: t},
 		transport: t,
 	}
 }
@@ -57,7 +59,8 @@ type RoomNamespace struct{ t *httpTransport }
 
 // RoomCreateOptions are optional parameters for room creation.
 type RoomCreateOptions struct {
-	Meta any `json:"meta,omitempty"`
+	Meta   any  `json:"meta,omitempty"`
+	Public bool `json:"public,omitempty"`
 }
 
 func (ns *RoomNamespace) Create(ctx context.Context, id, name string, opts *RoomCreateOptions) (*Room, error) {
@@ -65,6 +68,9 @@ func (ns *RoomNamespace) Create(ctx context.Context, id, name string, opts *Room
 	if opts != nil {
 		if opts.Meta != nil {
 			body["meta"] = opts.Meta
+		}
+		if opts.Public {
+			body["public"] = true
 		}
 	}
 	data, err := ns.t.request(ctx, "POST", "/rooms", body)
@@ -90,13 +96,16 @@ func (ns *RoomNamespace) Get(ctx context.Context, id string) (*Room, error) {
 	return &room, nil
 }
 
-func (ns *RoomNamespace) Update(ctx context.Context, id string, name *string, meta any) error {
+func (ns *RoomNamespace) Update(ctx context.Context, id string, name *string, meta any, archived *bool) error {
 	body := map[string]any{}
 	if name != nil {
 		body["name"] = *name
 	}
 	if meta != nil {
 		body["meta"] = meta
+	}
+	if archived != nil {
+		body["archived"] = *archived
 	}
 	_, err := ns.t.request(ctx, "PATCH", "/rooms/"+url.PathEscape(id), body)
 	return err
@@ -167,10 +176,25 @@ func (ns *MemberNamespace) Update(ctx context.Context, roomID, userID, role stri
 // MessageNamespace provides message operations.
 type MessageNamespace struct{ t *httpTransport }
 
-func (ns *MessageNamespace) Send(ctx context.Context, roomID, sender, body string, meta any) (*MessageSendResult, error) {
+// MessageSendOptions are optional parameters for sending a message.
+type MessageSendOptions struct {
+	Meta              any    `json:"meta,omitempty"`
+	ParentID          string `json:"parent_id,omitempty"`
+	ExcludeConnection string `json:"exclude_connection,omitempty"`
+}
+
+func (ns *MessageNamespace) Send(ctx context.Context, roomID, sender, body string, opts *MessageSendOptions) (*MessageSendResult, error) {
 	req := map[string]any{"sender": sender, "body": body}
-	if meta != nil {
-		req["meta"] = meta
+	if opts != nil {
+		if opts.Meta != nil {
+			req["meta"] = opts.Meta
+		}
+		if opts.ParentID != "" {
+			req["parent_id"] = opts.ParentID
+		}
+		if opts.ExcludeConnection != "" {
+			req["exclude_connection"] = opts.ExcludeConnection
+		}
 	}
 	data, err := ns.t.request(ctx, "POST", "/rooms/"+url.PathEscape(roomID)+"/messages", req)
 	if err != nil {
@@ -183,11 +207,36 @@ func (ns *MessageNamespace) Send(ctx context.Context, roomID, sender, body strin
 	return &result, nil
 }
 
+func (ns *MessageNamespace) Delete(ctx context.Context, roomID, messageID string) error {
+	_, err := ns.t.request(ctx, "DELETE", "/rooms/"+url.PathEscape(roomID)+"/messages/"+url.PathEscape(messageID), nil)
+	return err
+}
+
+func (ns *MessageNamespace) Edit(ctx context.Context, roomID, messageID, body string) error {
+	_, err := ns.t.request(ctx, "PATCH", "/rooms/"+url.PathEscape(roomID)+"/messages/"+url.PathEscape(messageID), map[string]string{"body": body})
+	return err
+}
+
+func (ns *MessageNamespace) GetReactions(ctx context.Context, roomID, messageID string) ([]ReactionSummary, error) {
+	data, err := ns.t.request(ctx, "GET", "/rooms/"+url.PathEscape(roomID)+"/messages/"+url.PathEscape(messageID)+"/reactions", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Reactions []ReactionSummary `json:"reactions"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Reactions, nil
+}
+
 // MessageListOptions are optional parameters for listing messages.
 type MessageListOptions struct {
 	Before *uint64
 	After  *uint64
 	Limit  *int
+	Thread *string
 }
 
 func (ns *MessageNamespace) List(ctx context.Context, roomID string, opts *MessageListOptions) (*MessageList, error) {
@@ -202,6 +251,9 @@ func (ns *MessageNamespace) List(ctx context.Context, roomID string, opts *Messa
 		}
 		if opts.Limit != nil {
 			params.Set("limit", fmt.Sprint(*opts.Limit))
+		}
+		if opts.Thread != nil {
+			params.Set("thread", *opts.Thread)
 		}
 	}
 	if len(params) > 0 {
@@ -427,4 +479,59 @@ func (ns *TenantNamespace) CreateToken(ctx context.Context, tenantID string, sco
 func (ns *TenantNamespace) DeleteToken(ctx context.Context, tenantID, token string) error {
 	_, err := ns.t.request(ctx, "DELETE", "/admin/tenants/"+url.PathEscape(tenantID)+"/tokens/"+url.PathEscape(token), nil)
 	return err
+}
+
+func (ns *TenantNamespace) ListTokens(ctx context.Context, tenantID string) ([]string, error) {
+	data, err := ns.t.request(ctx, "GET", "/admin/tenants/"+url.PathEscape(tenantID)+"/tokens", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Tokens []string `json:"tokens"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tokens, nil
+}
+
+func (ns *TenantNamespace) ListRooms(ctx context.Context, tenantID string) ([]Room, error) {
+	data, err := ns.t.request(ctx, "GET", "/admin/tenants/"+url.PathEscape(tenantID)+"/rooms", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Rooms []Room `json:"rooms"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Rooms, nil
+}
+
+// BlockNamespace provides user blocking operations.
+type BlockNamespace struct{ t *httpTransport }
+
+func (ns *BlockNamespace) Block(ctx context.Context, userID, blockedID string) error {
+	_, err := ns.t.request(ctx, "POST", "/blocks", map[string]string{"user_id": userID, "blocked_id": blockedID})
+	return err
+}
+
+func (ns *BlockNamespace) Unblock(ctx context.Context, userID, blockedID string) error {
+	_, err := ns.t.request(ctx, "DELETE", "/blocks", map[string]string{"user_id": userID, "blocked_id": blockedID})
+	return err
+}
+
+func (ns *BlockNamespace) List(ctx context.Context, userID string) ([]string, error) {
+	data, err := ns.t.request(ctx, "GET", "/blocks/"+url.PathEscape(userID), nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Blocked []string `json:"blocked"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Blocked, nil
 }

@@ -6,9 +6,10 @@ module HeraldAdmin
       @t = transport
     end
 
-    def create(id, name, meta: nil)
+    def create(id, name, meta: nil, public: false)
       body = { id: id, name: name }
       body[:meta] = meta if meta
+      body[:public] = true if public
       data = @t.request("POST", "/rooms", body)
       Room.new(**data.transform_keys(&:to_sym))
     end
@@ -18,10 +19,11 @@ module HeraldAdmin
       Room.new(**data.transform_keys(&:to_sym))
     end
 
-    def update(id, name: nil, meta: nil)
+    def update(id, name: nil, meta: nil, archived: nil)
       body = {}
       body[:name] = name if name
       body[:meta] = meta if meta
+      body[:archived] = archived unless archived.nil?
       @t.request("PATCH", "/rooms/#{ERB::Util.url_encode(id)}", body)
     end
 

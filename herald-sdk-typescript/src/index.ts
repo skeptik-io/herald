@@ -8,6 +8,8 @@ export type {
   MessageAck,
   MessagesBatch,
   MessageDeleted,
+  MessageEdited,
+  ReactionChanged,
   PresenceChanged,
   CursorMoved,
   MemberEvent,

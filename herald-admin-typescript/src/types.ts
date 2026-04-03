@@ -3,6 +3,8 @@ export interface Room {
   name: string;
   meta?: unknown;
   created_at: number;
+  public?: boolean;
+  archived?: boolean;
 }
 
 export interface Member {
@@ -20,6 +22,18 @@ export interface Message {
   body: string;
   meta?: unknown;
   sent_at: number;
+  parent_id?: string;
+  edited_at?: number;
+}
+
+export interface ReactionSummary {
+  emoji: string;
+  count: number;
+  users: string[];
+}
+
+export interface BlockList {
+  blocked: string[];
 }
 
 export interface MessageList {

@@ -22,10 +22,12 @@ class RoomNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def create(self, id: str, name: str, *, meta: Any = None) -> Room:
+    def create(self, id: str, name: str, *, meta: Any = None, public: bool = False) -> Room:
         body: dict[str, Any] = {"id": id, "name": name}
         if meta is not None:
             body["meta"] = meta
+        if public:
+            body["public"] = True
         data = self._t.request("POST", "/rooms", body)
         return Room(**{k: data[k] for k in Room.__dataclass_fields__ if k in data})
 
@@ -33,12 +35,14 @@ class RoomNamespace:
         data = self._t.request("GET", f"/rooms/{quote(id, safe='')}")
         return Room(**{k: data[k] for k in Room.__dataclass_fields__ if k in data})
 
-    def update(self, id: str, *, name: str | None = None, meta: Any = None) -> None:
+    def update(self, id: str, *, name: str | None = None, meta: Any = None, archived: bool | None = None) -> None:
         body: dict[str, Any] = {}
         if name is not None:
             body["name"] = name
         if meta is not None:
             body["meta"] = meta
+        if archived is not None:
+            body["archived"] = archived
         self._t.request("PATCH", f"/rooms/{quote(id, safe='')}", body)
 
     def list(self) -> list[Room]:
@@ -72,14 +76,18 @@ class MessageNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def send(self, room_id: str, sender: str, body: str, meta: Any = None) -> MessageSendResult:
+    def send(self, room_id: str, sender: str, body: str, meta: Any = None, *, parent_id: str | None = None, exclude_connection: str | None = None) -> MessageSendResult:
         req: dict[str, Any] = {"sender": sender, "body": body}
         if meta is not None:
             req["meta"] = meta
+        if parent_id is not None:
+            req["parent_id"] = parent_id
+        if exclude_connection is not None:
+            req["exclude_connection"] = exclude_connection
         data = self._t.request("POST", f"/rooms/{quote(room_id, safe='')}/messages", req)
         return MessageSendResult(id=data["id"], seq=data["seq"], sent_at=data["sent_at"])
 
-    def list(self, room_id: str, *, before: int | None = None, after: int | None = None, limit: int | None = None) -> MessageList:
+    def list(self, room_id: str, *, before: int | None = None, after: int | None = None, limit: int | None = None, thread: str | None = None) -> MessageList:
         params: list[str] = []
         if before is not None:
             params.append(f"before={before}")
@@ -87,13 +95,25 @@ class MessageNamespace:
             params.append(f"after={after}")
         if limit is not None:
             params.append(f"limit={limit}")
+        if thread is not None:
+            params.append(f"thread={quote(thread, safe='')}")
         qs = "&".join(params)
         path = f"/rooms/{quote(room_id, safe='')}/messages"
         if qs:
             path += f"?{qs}"
         data = self._t.request("GET", path)
-        messages = [Message(id=m["id"], room=m.get("room", room_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta")) for m in data["messages"]]
+        messages = [Message(id=m["id"], room=m.get("room", room_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["messages"]]
         return MessageList(messages=messages, has_more=data.get("has_more", False))
+
+    def delete(self, room_id: str, message_id: str) -> None:
+        self._t.request("DELETE", f"/rooms/{quote(room_id, safe='')}/messages/{quote(message_id, safe='')}")
+
+    def edit(self, room_id: str, message_id: str, body: str) -> None:
+        self._t.request("PATCH", f"/rooms/{quote(room_id, safe='')}/messages/{quote(message_id, safe='')}", {"body": body})
+
+    def get_reactions(self, room_id: str, message_id: str) -> list[dict]:
+        data = self._t.request("GET", f"/rooms/{quote(room_id, safe='')}/messages/{quote(message_id, safe='')}/reactions")
+        return data["reactions"]
 
     def search(self, room_id: str, query: str, *, limit: int | None = None) -> MessageList:
         params = [f"q={quote(query, safe='')}"]
@@ -102,7 +122,7 @@ class MessageNamespace:
         qs = "&".join(params)
         path = f"/rooms/{quote(room_id, safe='')}/messages/search?{qs}"
         data = self._t.request("GET", path)
-        messages = [Message(id=m["id"], room=m.get("room", room_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta")) for m in data["messages"]]
+        messages = [Message(id=m["id"], room=m.get("room", room_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["messages"]]
         return MessageList(messages=messages, has_more=data.get("has_more", False))
 
 
@@ -161,6 +181,29 @@ class TenantNamespace:
     def delete_token(self, tenant_id: str, token: str) -> None:
         self._t.request("DELETE", f"/admin/tenants/{quote(tenant_id, safe='')}/tokens/{quote(token, safe='')}")
 
+    def list_tokens(self, tenant_id: str) -> list[str]:
+        data = self._t.request("GET", f"/admin/tenants/{quote(tenant_id, safe='')}/tokens")
+        return data["tokens"]
+
+    def list_rooms(self, tenant_id: str) -> list[dict[str, Any]]:
+        data = self._t.request("GET", f"/admin/tenants/{quote(tenant_id, safe='')}/rooms")
+        return data["rooms"]
+
+
+class BlockNamespace:
+    def __init__(self, t: HttpTransport) -> None:
+        self._t = t
+
+    def block(self, user_id: str, blocked_id: str) -> None:
+        self._t.request("POST", "/blocks", {"user_id": user_id, "blocked_id": blocked_id})
+
+    def unblock(self, user_id: str, blocked_id: str) -> None:
+        self._t.request("DELETE", "/blocks", {"user_id": user_id, "blocked_id": blocked_id})
+
+    def list(self, user_id: str) -> list[str]:
+        data = self._t.request("GET", f"/blocks/{quote(user_id, safe='')}")
+        return data["blocked"]
+
 
 class HeraldAdmin:
     """Herald HTTP admin client for Python backends."""
@@ -172,6 +215,7 @@ class HeraldAdmin:
         self.messages = MessageNamespace(t)
         self.presence = PresenceNamespace(t)
         self.tenants = TenantNamespace(t)
+        self.blocks = BlockNamespace(t)
         self._transport = t
 
     @classmethod

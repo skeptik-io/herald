@@ -306,7 +306,18 @@ async fn reconnect_catchup(
     since_ms: i64,
 ) {
     for room_id in rooms_claim {
-        if !state.rooms.is_member(tenant_id, room_id, user_id) {
+        if state.rooms.is_public(tenant_id, room_id) {
+            if !state.rooms.is_member(tenant_id, room_id, user_id) {
+                state.rooms.add_member(tenant_id, room_id, user_id);
+                let member = herald_core::member::Member {
+                    room_id: room_id.clone(),
+                    user_id: user_id.to_string(),
+                    role: herald_core::member::Role::Member,
+                    joined_at: now_millis(),
+                };
+                let _ = store::members::insert(&*state.db, tenant_id, &member).await;
+            }
+        } else if !state.rooms.is_member(tenant_id, room_id, user_id) {
             continue;
         }
 

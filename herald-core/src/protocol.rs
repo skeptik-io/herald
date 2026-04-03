@@ -77,6 +77,12 @@ pub enum ClientMessage {
     Ping {
         ref_: Option<String>,
     },
+    EventTrigger {
+        ref_: Option<String>,
+        room: String,
+        event: String,
+        data: Option<Value>,
+    },
 }
 
 impl ClientMessage {
@@ -140,6 +146,12 @@ impl ClientMessage {
                 id: str_field(p, "id")?,
             }),
             "ping" => Ok(Self::Ping { ref_: raw.ref_ }),
+            "event.trigger" => Ok(Self::EventTrigger {
+                ref_: raw.ref_,
+                room: str_field(p, "room")?,
+                event: str_field(p, "event")?,
+                data: p.get("data").cloned(),
+            }),
             other => Err(format!("unknown message type: {other}")),
         }
     }
@@ -202,6 +214,8 @@ pub enum ServerMessage {
     TokenExpiring { payload: TokenExpiringPayload },
     #[serde(rename = "typing")]
     Typing { payload: TypingPayload },
+    #[serde(rename = "event.received")]
+    EventReceived { payload: EventReceivedPayload },
     #[serde(rename = "error")]
     Error {
         #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -334,6 +348,15 @@ pub struct TypingPayload {
     pub room: String,
     pub user_id: String,
     pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventReceivedPayload {
+    pub room: String,
+    pub event: String,
+    pub sender: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------

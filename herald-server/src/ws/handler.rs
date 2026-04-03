@@ -60,6 +60,14 @@ pub async fn handle_message(
         ClientMessage::MessageDelete { ref_, room, id } => {
             handle_delete(state, ctx, tx, ref_, room, id).await;
         }
+        ClientMessage::EventTrigger {
+            ref_,
+            room,
+            event,
+            data,
+        } => {
+            handle_event_trigger(state, ctx, tx, ref_, room, event, data).await;
+        }
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
         }
@@ -95,7 +103,19 @@ async fn handle_subscribe(
             continue;
         }
 
-        if !state.rooms.is_member(tid, &room_id, &ctx.user_id) {
+        // For public rooms, auto-add as member on first subscribe
+        if state.rooms.is_public(tid, &room_id) {
+            if !state.rooms.is_member(tid, &room_id, &ctx.user_id) {
+                state.rooms.add_member(tid, &room_id, &ctx.user_id);
+                let member = herald_core::member::Member {
+                    room_id: room_id.clone(),
+                    user_id: ctx.user_id.clone(),
+                    role: herald_core::member::Role::Member,
+                    joined_at: now_millis(),
+                };
+                let _ = store::members::insert(&*state.db, tid, &member).await;
+            }
+        } else if !state.rooms.is_member(tid, &room_id, &ctx.user_id) {
             let _ = tx
                 .send(ServerMessage::error(
                     ref_.clone(),
@@ -136,6 +156,7 @@ async fn handle_subscribe(
             .unwrap_or(0);
         let latest_seq = state.rooms.current_seq(tid, &room_id);
 
+        let room_id_ref = room_id.clone();
         let _ = tx
             .send(ServerMessage::Subscribed {
                 ref_: ref_.clone(),
@@ -147,6 +168,11 @@ async fn handle_subscribe(
                 },
             })
             .await;
+
+        // Cache channel: deliver last event to new subscriber
+        if let Some(cached) = state.rooms.get_last_event(tid, &room_id_ref) {
+            let _ = tx.send(cached).await;
+        }
     }
 }
 
@@ -291,6 +317,9 @@ async fn handle_send(
     };
     fanout_to_room(state, tid, &room, &new_msg, None);
     state.metrics.message_fanout.observe_since(fanout_start);
+
+    // Cache channel: update last event for new subscribers
+    state.rooms.set_last_event(tid, &room, new_msg);
 
     state.fire_webhook(
         tid,
@@ -522,5 +551,56 @@ async fn handle_delete(
                 ))
                 .await;
         }
+    }
+}
+
+async fn handle_event_trigger(
+    state: &Arc<AppState>,
+    ctx: &ConnContext,
+    tx: &mpsc::Sender<ServerMessage>,
+    ref_: Option<String>,
+    room: String,
+    event: String,
+    data: Option<serde_json::Value>,
+) {
+    let tid = &ctx.tenant_id;
+
+    // Must be subscribed (member) to trigger events
+    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::NotSubscribed,
+                "not a member of this room",
+            ))
+            .await;
+        return;
+    }
+
+    if state.rooms.is_archived(tid, &room) {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::BadRequest,
+                "room is archived",
+            ))
+            .await;
+        return;
+    }
+
+    // Fan-out to all subscribers except sender
+    let msg = ServerMessage::EventReceived {
+        payload: EventReceivedPayload {
+            room: room.clone(),
+            event: event.clone(),
+            sender: ctx.user_id.clone(),
+            data,
+        },
+    };
+    fanout_to_room(state, tid, &room, &msg, Some(ctx.conn_id));
+
+    // Ack to sender (lightweight — no seq/id since ephemeral)
+    if let Some(r) = ref_ {
+        let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;
     }
 }

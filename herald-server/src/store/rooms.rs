@@ -138,6 +138,7 @@ mod tests {
             name: "Room 1".into(),
             meta: None,
             archived: false,
+            public: false,
             created_at: 1000,
         };
         insert(&*store, "t1", &room).await.unwrap();
@@ -158,6 +159,7 @@ mod tests {
                 name: format!("R{i}"),
                 meta: None,
                 archived: false,
+                public: false,
                 created_at: 1000,
             };
             insert(&*store, "t1", &r).await.unwrap();
@@ -167,6 +169,7 @@ mod tests {
             name: "Other".into(),
             meta: None,
             archived: false,
+            public: false,
             created_at: 1000,
         };
         insert(&*store, "t2", &r).await.unwrap();
@@ -186,6 +189,7 @@ mod tests {
             name: "Old".into(),
             meta: None,
             archived: false,
+            public: false,
             created_at: 1000,
         };
         insert(&*store, "t1", &r).await.unwrap();
@@ -206,6 +210,7 @@ mod tests {
             name: "R".into(),
             meta: None,
             archived: false,
+            public: false,
             created_at: 1000,
         };
         insert(&*store, "t1", &r).await.unwrap();
@@ -222,6 +227,7 @@ mod tests {
             name: "R1".into(),
             meta: None,
             archived: false,
+            public: false,
             created_at: 1000,
         };
         let r2 = Room {
@@ -229,6 +235,7 @@ mod tests {
             name: "R2".into(),
             meta: None,
             archived: false,
+            public: false,
             created_at: 1000,
         };
         insert(&*store, "t1", &r1).await.unwrap();

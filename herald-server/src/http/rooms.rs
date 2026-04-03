@@ -20,6 +20,8 @@ pub struct CreateRoomRequest {
     pub name: String,
     #[serde(default)]
     pub meta: Option<serde_json::Value>,
+    #[serde(default)]
+    pub public: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +62,7 @@ pub async fn create_room(
         name: req.name,
         meta: req.meta,
         archived: false,
+        public: req.public.unwrap_or(false),
         created_at: now_millis(),
     };
 
@@ -72,7 +75,9 @@ pub async fn create_room(
             .into_response();
     }
 
-    state.rooms.create_room(tid, room.id.as_str(), 0);
+    state
+        .rooms
+        .create_room(tid, room.id.as_str(), 0, room.public);
 
     state.audit(tid, "room.create", room.id.as_str(), "api", "success");
 

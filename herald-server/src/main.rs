@@ -177,7 +177,9 @@ async fn main() -> anyhow::Result<()> {
         let latest_seq = store::messages::latest_seq(&*state.db, tid, room.id.as_str())
             .await
             .unwrap_or(0);
-        state.rooms.create_room(tid, room.id.as_str(), latest_seq);
+        state
+            .rooms
+            .create_room(tid, room.id.as_str(), latest_seq, room.public);
         if room.archived {
             state.rooms.set_archived(tid, room.id.as_str(), true);
         }

@@ -29,5 +29,7 @@ pub struct Room {
     pub meta: Option<serde_json::Value>,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default)]
+    pub public: bool,
     pub created_at: i64,
 }

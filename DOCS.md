@@ -124,6 +124,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `presence.set` | `{status}` | `online`, `away`, `dnd` |
 | `typing.start` / `typing.stop` | `{room}` | Ephemeral |
 | `messages.fetch` | `{room, before?, limit?}` | History |
+| `event.trigger` | `{room, event, data?}` | Trigger ephemeral event (not persisted) |
 | `ping` | — | Keepalive |
 
 ### Server → Client
@@ -140,8 +141,22 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `cursor.moved` | `{room, user_id, seq}` | Read position change |
 | `member.joined` / `member.left` | `{room, user_id, role}` | Membership |
 | `typing` | `{room, user_id, active}` | Typing indicator |
+| `event.received` | `{room, event, sender, data?}` | Ephemeral event from another client |
 | `system.token_expiring` | `{expires_at}` | JWT expiring in 60s |
 | `error` | `{code, message}` | Error |
+
+### Ephemeral Events
+
+Ephemeral events are lightweight events that fan out to room subscribers but are NOT persisted to storage. They are ideal for:
+- Custom application events
+- Live cursors, selections
+- Game state updates
+- Collaborative editing signals
+- Any high-frequency, transient data
+
+The sender does NOT receive their own event (excluded from fan-out). The event is acknowledged with a `pong` if a `ref` is provided.
+
+Ephemeral events do not trigger webhooks and do not affect message history or sequence numbers.
 
 ### Error Codes
 
@@ -155,7 +170,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 
 | Method | Path | Description |
 |---|---|---|
-| `POST /rooms` | Create room | `{id, name, meta?}` |
+| `POST /rooms` | Create room | `{id, name, meta?, public?}` |
 | `GET /rooms` | List rooms | Returns `{rooms: [...]}` |
 | `GET /rooms/:id` | Get room | |
 | `PATCH /rooms/:id` | Update room | `{name?, meta?, archived?}` |
@@ -217,6 +232,14 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 ---
 
 ## Additional Features
+
+### Public Rooms
+
+Rooms can be created with `"public": true` to allow any authenticated user to subscribe without being pre-added as a member. When a user subscribes to a public room, they are automatically added as a member with `Member` role.
+
+Public rooms still require the room ID to be present in the JWT `rooms` claim -- authorization is enforced, but membership is not required upfront.
+
+Private rooms (default, `public: false`) continue to require membership before subscribing.
 
 ### Room Archival
 

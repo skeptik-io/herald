@@ -106,6 +106,9 @@ pub async fn inject_message(
     };
     fanout_to_room(&state, tid, &room_id, &new_msg, None);
 
+    // Cache channel: update last event for new subscribers
+    state.rooms.set_last_event(tid, &room_id, new_msg);
+
     state.fire_webhook(
         tid,
         crate::webhook::WebhookEvent {

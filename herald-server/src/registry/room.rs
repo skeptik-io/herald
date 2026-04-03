@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::DashMap;
+use parking_lot::Mutex;
 
 use crate::registry::connection::ConnId;
 
@@ -10,6 +11,9 @@ pub struct RoomState {
     pub subscribers: HashMap<String, HashSet<ConnId>>,
     pub sequence: AtomicU64,
     pub archived: AtomicBool,
+    pub public: AtomicBool,
+    /// Cache channel: last `ServerMessage::MessageNew` for this room.
+    pub last_event: Mutex<Option<herald_core::protocol::ServerMessage>>,
 }
 
 /// Composite key for tenant-scoped rooms.
@@ -25,13 +29,15 @@ impl RoomRegistry {
         Self::default()
     }
 
-    pub fn create_room(&self, tenant_id: &str, room_id: &str, initial_seq: u64) {
+    pub fn create_room(&self, tenant_id: &str, room_id: &str, initial_seq: u64, public: bool) {
         let key = (tenant_id.to_string(), room_id.to_string());
         self.rooms.entry(key).or_insert_with(|| RoomState {
             members: HashSet::new(),
             subscribers: HashMap::new(),
             sequence: AtomicU64::new(initial_seq),
             archived: AtomicBool::new(false),
+            public: AtomicBool::new(public),
+            last_event: Mutex::new(None),
         });
     }
 
@@ -173,6 +179,14 @@ impl RoomRegistry {
             .unwrap_or(false)
     }
 
+    pub fn is_public(&self, tenant_id: &str, room_id: &str) -> bool {
+        let key = (tenant_id.to_string(), room_id.to_string());
+        self.rooms
+            .get(&key)
+            .map(|s| s.public.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
     pub fn get_member_rooms(&self, tenant_id: &str, user_id: &str) -> Vec<String> {
         self.rooms
             .iter()
@@ -182,5 +196,30 @@ impl RoomRegistry {
             })
             .map(|entry| entry.key().1.clone())
             .collect()
+    }
+
+    /// Cache the last event for a room (cache channel behavior).
+    pub fn set_last_event(
+        &self,
+        tenant_id: &str,
+        room_id: &str,
+        msg: herald_core::protocol::ServerMessage,
+    ) {
+        let key = (tenant_id.to_string(), room_id.to_string());
+        if let Some(state) = self.rooms.get(&key) {
+            *state.last_event.lock() = Some(msg);
+        }
+    }
+
+    /// Get the cached last event for a room.
+    pub fn get_last_event(
+        &self,
+        tenant_id: &str,
+        room_id: &str,
+    ) -> Option<herald_core::protocol::ServerMessage> {
+        let key = (tenant_id.to_string(), room_id.to_string());
+        self.rooms
+            .get(&key)
+            .and_then(|s| s.last_event.lock().clone())
     }
 }

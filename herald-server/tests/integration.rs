@@ -4356,3 +4356,496 @@ async fn test_ws_subscribe_multiple_rooms_partial_auth() {
     assert!(got_subscribed, "should have subscribed to allowed room");
     assert!(got_error, "should have gotten error for forbidden room");
 }
+
+// ---------------------------------------------------------------------------
+// Cache channel tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_cache_channel_delivers_last_event() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("cc1", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Send a message via HTTP to populate the cache
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "cached message"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Now bob subscribes — should receive the cached last event
+    let bob_jwt = mint_jwt("bob", "cc1", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &bob_jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
+
+    // Should immediately receive the cached message
+    let cached = ws_recv_type(&mut ws, "message.new").await;
+    assert_eq!(cached["payload"]["body"], "cached message");
+    assert_eq!(cached["payload"]["sender"], "alice");
+}
+
+#[tokio::test]
+async fn test_cache_channel_updates_on_new_message() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("cc2", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Send first message
+    server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "first"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Send second message — this should replace the cache
+    server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "second"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Bob subscribes — should get the SECOND (latest) message, not the first
+    let bob_jwt = mint_jwt("bob", "cc2", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &bob_jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
+
+    let cached = ws_recv_type(&mut ws, "message.new").await;
+    assert_eq!(cached["payload"]["body"], "second");
+}
+
+#[tokio::test]
+async fn test_cache_channel_empty_on_new_room() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("cc3", TENANT_A_SECRET).await;
+    server.create_room(&token, "empty-chat").await;
+    server.add_member(&token, "empty-chat", "alice").await;
+
+    // Subscribe to a room with no messages — should get subscribed but no cached event
+    let jwt = mint_jwt("alice", "cc3", &["empty-chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["empty-chat"]}}),
+    )
+    .await;
+    let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
+
+    // No cached event — next message should timeout
+    let timeout = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
+    assert!(
+        timeout.is_err(),
+        "should not receive any cached event for empty room"
+    );
+}
+
+#[tokio::test]
+async fn test_cache_channel_ws_send_updates_cache() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("cc4", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Alice sends via WS
+    let alice_jwt = mint_jwt("alice", "cc4", &["chat"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "ws cached"}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "message.ack").await;
+
+    // Small delay to ensure fan-out and cache update complete
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Bob subscribes later — should get the WS-sent message from cache
+    let bob_jwt = mint_jwt("bob", "cc4", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    let cached = ws_recv_type(&mut ws_bob, "message.new").await;
+    assert_eq!(cached["payload"]["body"], "ws cached");
+}
+
+// ---------------------------------------------------------------------------
+// Public rooms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_public_room_subscribe_without_membership() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Create a public room
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "public-chat", "name": "Public Chat", "public": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["public"], true);
+
+    // alice is NOT added as a member — connect and subscribe
+    let jwt = mint_jwt("alice", "acme", &["public-chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["public-chat"]}}),
+    )
+    .await;
+
+    // Should succeed (auto-joined)
+    let msg = ws_recv_type(&mut ws, "subscribed").await;
+    assert_eq!(msg["payload"]["room"], "public-chat");
+
+    // Should be able to send messages
+    ws_send(
+        &mut ws,
+        json!({"type": "message.send", "payload": {"room": "public-chat", "body": "hello public"}}),
+    )
+    .await;
+    let ack = ws_recv_type(&mut ws, "message.ack").await;
+    assert!(ack["payload"]["id"].is_string());
+}
+
+#[tokio::test]
+async fn test_private_room_still_requires_membership() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Create a private room (default)
+    server.create_room(&token, "private-chat").await;
+    // Do NOT add alice as member
+
+    let jwt = mint_jwt("alice", "acme", &["private-chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["private-chat"]}}),
+    )
+    .await;
+
+    // Should fail — not a member
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "ROOM_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn test_public_room_fanout_to_auto_joined() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "pub", "name": "Public", "public": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Alice auto-joins
+    let alice_jwt = mint_jwt("alice", "acme", &["pub"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["pub"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    // Bob auto-joins
+    let bob_jwt = mint_jwt("bob", "acme", &["pub"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["pub"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Drain presence/member messages from bob
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await
+    {}
+
+    // Alice sends, bob should receive
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "message.send", "payload": {"room": "pub", "body": "hello bob"}}),
+    )
+    .await;
+    let _ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+
+    let msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    assert_eq!(msg["payload"]["body"], "hello bob");
+    assert_eq!(msg["payload"]["sender"], "alice");
+}
+
+#[tokio::test]
+async fn test_public_room_still_requires_jwt_claim() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "pub2", "name": "Public 2", "public": true}))
+        .send()
+        .await
+        .unwrap();
+
+    // JWT does NOT include "pub2" in rooms claim
+    let jwt = mint_jwt("alice", "acme", &["other-room"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["pub2"]}}),
+    )
+    .await;
+
+    // Should fail — not authorized (not in JWT rooms claim)
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "UNAUTHORIZED");
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral events
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_ephemeral_event_fanout() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Connect both users
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Drain presence events from bob
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await
+    {}
+
+    // Alice triggers an ephemeral event
+    ws_send(
+        &mut ws_alice,
+        json!({
+            "type": "event.trigger",
+            "payload": {"room": "chat", "event": "cursor-move", "data": {"x": 100, "y": 200}}
+        }),
+    )
+    .await;
+
+    // Bob should receive it
+    let msg = ws_recv_type(&mut ws_bob, "event.received").await;
+    assert_eq!(msg["payload"]["room"], "chat");
+    assert_eq!(msg["payload"]["event"], "cursor-move");
+    assert_eq!(msg["payload"]["sender"], "alice");
+    assert_eq!(msg["payload"]["data"]["x"], 100);
+    assert_eq!(msg["payload"]["data"]["y"], 200);
+}
+
+#[tokio::test]
+async fn test_ephemeral_event_not_persisted() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Alice sends an ephemeral event
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    ws_send(
+        &mut ws,
+        json!({
+            "type": "event.trigger",
+            "payload": {"room": "chat", "event": "custom-event", "data": {"key": "value"}}
+        }),
+    )
+    .await;
+
+    // Give it a moment
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check message history — ephemeral events should NOT appear
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert!(
+        messages.is_empty(),
+        "ephemeral events should not appear in message history"
+    );
+}
+
+#[tokio::test]
+async fn test_ephemeral_event_not_sent_to_sender() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Drain bob's messages
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await
+    {}
+
+    // Alice triggers event
+    ws_send(
+        &mut ws_alice,
+        json!({
+            "type": "event.trigger",
+            "ref": "evt1",
+            "payload": {"room": "chat", "event": "test-event", "data": null}
+        }),
+    )
+    .await;
+
+    // Bob receives it
+    let msg = ws_recv_type(&mut ws_bob, "event.received").await;
+    assert_eq!(msg["payload"]["event"], "test-event");
+
+    // Alice should NOT receive event.received — only a pong ack
+    let alice_msg = ws_recv_type(&mut ws_alice, "pong").await;
+    assert_eq!(alice_msg["ref"], "evt1");
+
+    // Make sure alice didn't get event.received
+    let timeout = tokio::time::timeout(Duration::from_millis(300), ws_alice.next()).await;
+    assert!(
+        timeout.is_err(),
+        "alice should not receive her own ephemeral event"
+    );
+}
+
+#[tokio::test]
+async fn test_ephemeral_event_requires_membership() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    // alice NOT added as member
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    ws_send(
+        &mut ws,
+        json!({
+            "type": "event.trigger",
+            "payload": {"room": "chat", "event": "test", "data": null}
+        }),
+    )
+    .await;
+
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "NOT_SUBSCRIBED");
+}

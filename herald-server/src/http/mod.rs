@@ -8,11 +8,12 @@ pub mod rooms;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
+use tower_http::cors::CorsLayer;
 
 use crate::state::AppState;
 
@@ -74,6 +75,21 @@ pub fn router(state: Arc<AppState>) -> Router {
             admin_auth_middleware,
         ));
 
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ])
+        .expose_headers([axum::http::header::CONTENT_TYPE]);
+
     Router::new()
         .merge(tenant_api)
         .merge(admin_api)
@@ -81,6 +97,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(health::metrics))
         // WebSocket upgrade on the same port — browsers connect to wss://domain/ws
         .route("/ws", get(crate::ws::upgrade::ws_handler))
+        .layer(cors)
         .with_state(state)
 }
 

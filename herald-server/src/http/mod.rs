@@ -59,6 +59,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/rooms/{id}/messages/{msg_id}/reactions",
             get(messages::get_reactions),
         )
+        .route("/rooms/{id}/trigger", post(messages::trigger_event))
         .route("/rooms/{id}/cursors", get(messages::list_cursors))
         .route("/rooms/{id}/presence", get(presence::room_presence))
         .route("/presence/{user_id}", get(presence::user_presence))

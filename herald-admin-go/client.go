@@ -231,6 +231,18 @@ func (ns *MessageNamespace) GetReactions(ctx context.Context, roomID, messageID 
 	return resp.Reactions, nil
 }
 
+func (ns *MessageNamespace) Trigger(ctx context.Context, roomID, event string, data any, excludeConnection *uint64) error {
+	body := map[string]any{"event": event}
+	if data != nil {
+		body["data"] = data
+	}
+	if excludeConnection != nil {
+		body["exclude_connection"] = *excludeConnection
+	}
+	_, err := ns.t.request(ctx, "POST", "/rooms/"+url.PathEscape(roomID)+"/trigger", body)
+	return err
+}
+
 // MessageListOptions are optional parameters for listing messages.
 type MessageListOptions struct {
 	Before *uint64

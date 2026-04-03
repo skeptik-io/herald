@@ -302,6 +302,48 @@ pub async fn get_reactions(
     }
 }
 
+#[derive(Deserialize)]
+pub struct TriggerEventRequest {
+    pub event: String,
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+    #[serde(default)]
+    pub exclude_connection: Option<u64>,
+}
+
+pub async fn trigger_event(
+    State(state): State<Arc<AppState>>,
+    Extension(tenant): Extension<TenantId>,
+    Path(room_id): Path<String>,
+    Json(req): Json<TriggerEventRequest>,
+) -> impl IntoResponse {
+    let tid = &tenant.0;
+
+    if !state.rooms.room_exists(tid, &room_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "room not found"})),
+        )
+            .into_response();
+    }
+
+    let exclude = req
+        .exclude_connection
+        .map(crate::registry::connection::ConnId);
+
+    let msg = ServerMessage::EventReceived {
+        payload: EventReceivedPayload {
+            room: room_id.clone(),
+            event: req.event.clone(),
+            sender: "_server".to_string(),
+            data: req.data,
+        },
+    };
+    fanout_to_room(&state, tid, &room_id, &msg, exclude);
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 pub async fn delete_message(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

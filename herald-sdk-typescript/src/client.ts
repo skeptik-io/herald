@@ -42,6 +42,7 @@ export class HeraldClient {
   private token: string;
   private lastSeenAt: number | null = null;
   private seenMessageIds = new Set<string>();
+  private _connectionId: number | null = null;
 
   // Pending request/response correlation
   private pending = new Map<
@@ -77,6 +78,11 @@ export class HeraldClient {
 
   get connected(): boolean {
     return this.connection.isConnected;
+  }
+
+  /** The connection ID assigned by the server. Available after auth. */
+  get connectionId(): number | null {
+    return this._connectionId;
   }
 
   async connect(): Promise<void> {
@@ -301,6 +307,7 @@ export class HeraldClient {
 
     switch (frame.type) {
       case "auth_ok":
+        this._connectionId = (p as any)?.connection_id ?? null;
         if (ref && this.pending.has(ref)) {
           this.pending.get(ref)!.resolve(p);
           this.pending.delete(ref);
@@ -445,6 +452,7 @@ export class HeraldClient {
         this.emit("connected", undefined as never);
         break;
       case "disconnected":
+        this._connectionId = null;
         this.emit("disconnected", undefined as never);
         break;
       case "connecting":

@@ -306,6 +306,7 @@ impl ServerMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthOkPayload {
     pub user_id: String,
+    pub connection_id: u64,
     pub server_time: i64,
     pub heartbeat_interval: u32,
 }

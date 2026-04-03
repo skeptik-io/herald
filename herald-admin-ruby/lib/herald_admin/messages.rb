@@ -44,6 +44,13 @@ module HeraldAdmin
       data["reactions"]
     end
 
+    def trigger(room_id, event, data: nil, exclude_connection: nil)
+      body = { event: event }
+      body[:data] = data if data
+      body[:exclude_connection] = exclude_connection if exclude_connection
+      @t.request("POST", "/rooms/#{esc(room_id)}/trigger", body)
+    end
+
     def search(room_id, query:, limit: nil)
       params = ["q=#{ERB::Util.url_encode(query)}"]
       params << "limit=#{limit}" if limit

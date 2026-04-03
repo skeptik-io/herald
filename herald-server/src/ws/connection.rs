@@ -137,6 +137,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             ref_: auth_ref,
             payload: AuthOkPayload {
                 user_id: user_id.clone(),
+                connection_id: conn_id.0,
                 server_time: now_millis(),
                 heartbeat_interval: 30000,
             },

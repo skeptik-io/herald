@@ -134,7 +134,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 
 | Type | Payload | Description |
 |---|---|---|
-| `auth_ok` | `{user_id, server_time, heartbeat_interval}` | Auth success |
+| `auth_ok` | `{user_id, connection_id, server_time, heartbeat_interval}` | Auth success |
 | `auth_error` | `{code, message}` | Auth failure |
 | `subscribed` | `{room, members, cursor, latest_seq}` | Room joined |
 | `message.new` | `{room, id, seq, sender, body, meta?, sent_at}` | New message |
@@ -191,6 +191,7 @@ Ephemeral events do not trigger webhooks and do not affect message history or se
 | `DELETE /rooms/:id/messages/:msg_id` | Delete/redact message | Soft-deletes: clears body, sets `meta.deleted=true` |
 | `PATCH /rooms/:id/messages/:msg_id` | Edit message | `{body}` |
 | `GET /rooms/:id/messages/:msg_id/reactions` | List reactions | Returns `{reactions: [{emoji, count, users}]}` |
+| `POST /rooms/:id/trigger` | Trigger ephemeral event | `{event, data?, exclude_connection?}` |
 | `GET /rooms/:id/cursors` | Read cursors | |
 | `POST /blocks` | Block a user | `{user_id, blocked_id}` |
 | `DELETE /blocks` | Unblock a user | `{user_id, blocked_id}` |
@@ -361,6 +362,14 @@ Example server event:
 ```
 
 This fires on explicit subscribe/unsubscribe and on disconnect (after connection cleanup). The count reflects the number of active WebSocket connections subscribed to the room.
+
+---
+
+## Server-Side Ephemeral Events
+
+`POST /rooms/:id/trigger` sends an ephemeral event to all room subscribers without persisting to storage. The sender is `_server`. Useful for server-initiated signals (session events, notifications, live updates).
+
+Supports `exclude_connection` to skip a specific WebSocket connection.
 
 ---
 

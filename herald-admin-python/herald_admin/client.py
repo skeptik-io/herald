@@ -115,6 +115,14 @@ class MessageNamespace:
         data = self._t.request("GET", f"/rooms/{quote(room_id, safe='')}/messages/{quote(message_id, safe='')}/reactions")
         return data["reactions"]
 
+    def trigger(self, room_id: str, event: str, data: Any = None, exclude_connection: int | None = None) -> None:
+        body: dict[str, Any] = {"event": event}
+        if data is not None:
+            body["data"] = data
+        if exclude_connection is not None:
+            body["exclude_connection"] = exclude_connection
+        self._t.request("POST", f"/rooms/{quote(room_id, safe='')}/trigger", body)
+
     def search(self, room_id: str, query: str, *, limit: int | None = None) -> MessageList:
         params = [f"q={quote(query, safe='')}"]
         if limit is not None:

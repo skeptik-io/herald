@@ -59,6 +59,13 @@ export class MessageNamespace {
     return res.reactions;
   }
 
+  async trigger(roomId: string, event: string, data?: unknown, excludeConnection?: number): Promise<void> {
+    const body: Record<string, unknown> = { event };
+    if (data !== undefined) body.data = data;
+    if (excludeConnection !== undefined) body.exclude_connection = excludeConnection;
+    await this.transport.request("POST", `/rooms/${encodeURIComponent(roomId)}/trigger`, body);
+  }
+
   async search(
     roomId: string,
     query: string,

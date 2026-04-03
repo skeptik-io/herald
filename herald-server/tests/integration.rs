@@ -5635,3 +5635,157 @@ async fn test_user_block_unblock() {
     let blocked = body["blocked"].as_array().unwrap();
     assert!(blocked.is_empty());
 }
+
+#[tokio::test]
+async fn test_auth_ok_includes_connection_id() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let jwt = mint_jwt("alice", "acme", &[], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    let msg = ws_recv_type(&mut ws, "auth_ok").await;
+
+    assert!(
+        msg["payload"]["connection_id"].is_number(),
+        "auth_ok should include connection_id"
+    );
+    assert!(
+        msg["payload"]["connection_id"].as_u64().unwrap() > 0,
+        "connection_id should be > 0"
+    );
+}
+
+#[tokio::test]
+async fn test_http_trigger_ephemeral_event() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Connect alice
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    // Drain
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+    {}
+
+    // Trigger ephemeral event from server via HTTP
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/trigger"))
+        .bearer_auth(&token)
+        .json(&json!({"event": "session.started", "data": {"session_id": "abc123"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Alice should receive the event
+    let msg = ws_recv_type(&mut ws, "event.received").await;
+    assert_eq!(msg["payload"]["event"], "session.started");
+    assert_eq!(msg["payload"]["data"]["session_id"], "abc123");
+    assert_eq!(msg["payload"]["sender"], "_server");
+}
+
+#[tokio::test]
+async fn test_http_trigger_not_persisted() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+
+    // Trigger an event
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/trigger"))
+        .bearer_auth(&token)
+        .json(&json!({"event": "test", "data": null}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Message history should be empty (ephemeral events not stored)
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["messages"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_http_trigger_with_exclude() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Connect alice
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "auth", "payload": {"token": &alice_jwt}}),
+    )
+    .await;
+    let auth = ws_recv_type(&mut ws_alice, "auth_ok").await;
+    let alice_conn = auth["payload"]["connection_id"].as_u64().unwrap();
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    // Connect bob
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Drain
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(300), ws_alice.next()).await
+    {}
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(300), ws_bob.next()).await
+    {}
+
+    // Trigger event excluding alice's connection
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/trigger"))
+        .bearer_auth(&token)
+        .json(&json!({"event": "update", "data": {"v": 1}, "exclude_connection": alice_conn}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Bob should receive it
+    let msg = ws_recv_type(&mut ws_bob, "event.received").await;
+    assert_eq!(msg["payload"]["event"], "update");
+
+    // Alice should NOT receive it
+    let timeout = tokio::time::timeout(Duration::from_millis(500), ws_alice.next()).await;
+    assert!(timeout.is_err(), "alice should not receive excluded event");
+}

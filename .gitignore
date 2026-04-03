@@ -8,5 +8,7 @@ herald.toml
 .DS_Store
 .cargo/credentials.toml
 node_modules/
+dist/
+*.tsbuildinfo
 .idea/
 __pycache__/

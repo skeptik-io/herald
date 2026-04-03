@@ -7,13 +7,16 @@ Multi-tenant WebSocket chat server. Rooms, messages, presence, cursors, and real
 Herald replaces Pusher/Soketi/Ably with a purpose-built chat server. Browsers connect via WebSocket for real-time messaging. Your backend manages rooms and members via HTTP. No external database required — Herald uses ShroudB's WAL-based storage engine for encrypted-at-rest persistence.
 
 ```
-Browser ←— WebSocket :6200 —→  HERALD  ←— HTTP :6201 —→ Your Backend
-                                  │
-                          ShroudB engines (embedded or remote)
-                          ├── Cipher — message encryption
-                          ├── Veil — encrypted search
-                          └── Sentry — authorization policies
+                    wss://herald.example.com/ws
+Browser ←— WebSocket (/ws) ——→  HERALD  ←—— HTTP API ——→ Your Backend
+                                   │
+                           ShroudB engines (embedded)
+                           ├── Cipher — message encryption
+                           ├── Veil — encrypted search
+                           └── Sentry — authorization policies
 ```
+
+WebSocket and HTTP API share the same port. Behind any reverse proxy (nginx, Caddy, cloud LB), TLS terminates at the proxy and Herald serves both protocols on one port. For direct TCP deployments, a standalone WebSocket port is also available.
 
 ### Create a room and add members (HTTP)
 
@@ -71,17 +74,20 @@ SHROUDB_MASTER_KEY="$(openssl rand -hex 32)" ./target/release/herald herald.toml
 ### Docker
 
 ```bash
-# Pull from GitHub Container Registry
 docker pull ghcr.io/skeptik-io/herald:latest
 
-# Run with config + persistent volume
+# Single port — HTTP API + WebSocket (/ws) on 6201
 docker run -d \
-  -p 6200:6200 -p 6201:6201 \
+  -p 6201:6201 \
   -e SHROUDB_MASTER_KEY="$(openssl rand -hex 32)" \
-  -v ./herald.toml:/data/herald.toml:ro \
+  -e HERALD_JWT_SECRET="your-secret" \
+  -e HERALD_SUPER_ADMIN_TOKEN="your-admin-token" \
+  -e HERALD_API_TOKENS="your-api-token" \
   -v herald-data:/data/herald-data \
   ghcr.io/skeptik-io/herald:latest
 ```
+
+Behind a reverse proxy (nginx, Caddy, Traefik), expose port 6201 and route `/ws` for WebSocket upgrades. No TLS config needed in Herald — the proxy handles it.
 
 ### Docker Compose
 
@@ -90,12 +96,13 @@ services:
   herald:
     image: ghcr.io/skeptik-io/herald:latest
     ports:
-      - "6200:6200"
       - "6201:6201"
     environment:
       SHROUDB_MASTER_KEY: "your-64-hex-char-master-key"
+      HERALD_JWT_SECRET: "your-secret"
+      HERALD_SUPER_ADMIN_TOKEN: "your-admin-token"
+      HERALD_API_TOKENS: "your-api-token"
     volumes:
-      - ./herald.toml:/data/herald.toml:ro
       - herald-data:/data/herald-data
 
 volumes:

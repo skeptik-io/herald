@@ -105,7 +105,12 @@ When `[shroudb]` is absent, engines run embedded (in-process) using the same sto
 
 ---
 
-## WebSocket Protocol (Port 6200)
+## WebSocket Protocol
+
+WebSocket is available at two endpoints:
+
+- **`/ws` on the HTTP port** (primary) — use this behind reverse proxies and in Docker. Browsers connect to `wss://your-domain/ws`. TLS is terminated by the proxy.
+- **Standalone WS port** (advanced) — direct TCP connections. Configure with `ws_bind`. Use when Herald terminates TLS itself via `[tls]` config, or on private networks.
 
 JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 

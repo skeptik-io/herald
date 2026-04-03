@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 export interface HeraldClientOptions {
-  /** WebSocket URL, e.g. ws://localhost:6200 or wss://herald.example.com */
+  /** WebSocket URL, e.g. wss://herald.example.com/ws or ws://localhost:6201/ws */
   url: string;
   /** JWT token minted by the app backend */
   token: string;

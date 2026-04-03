@@ -14,7 +14,7 @@ npm install @skeptik-io/herald-sdk --registry=https://npm.pkg.github.com
 import { HeraldClient } from '@skeptik-io/herald-sdk';
 
 const client = new HeraldClient({
-  url: 'wss://herald.example.com',
+  url: 'wss://herald.example.com/ws',
   token: jwt, // must include tenant claim
   onTokenExpiring: async () => {
     const resp = await fetch('/api/refresh-token');

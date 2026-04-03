@@ -2,18 +2,22 @@ import { Connection, type ConnectionState } from "./connection.js";
 import { HeraldError } from "./errors.js";
 import type {
   CursorMoved,
+  EventReceived,
   HeraldClientOptions,
   HeraldEvent,
   HeraldEventMap,
   MemberEvent,
   MessageAck,
+  MessageDeleted,
   MessageNew,
   MessagesBatch,
   PresenceChanged,
   RoomEvent,
+  RoomSubscriberCount,
   ServerFrame,
   SubscribedPayload,
   TypingEvent,
+  WatchlistEvent,
 } from "./types.js";
 
 type Handler<T> = (data: T) => void;
@@ -55,6 +59,7 @@ export class HeraldClient {
 
   // Event handlers
   private handlers = new Map<string, Set<Handler<unknown>>>();
+  private globalHandlers = new Set<(event: string, data: unknown) => void>();
 
   constructor(options: HeraldClientOptions) {
     this.options = options;
@@ -64,7 +69,7 @@ export class HeraldClient {
       options.reconnect?.enabled ?? true,
       options.reconnect?.maxDelay ?? 30_000,
       (frame) => this.handleFrame(frame),
-      (state) => this.handleStateChange(state),
+      (state, previous) => this.handleStateChange(state, previous),
     );
   }
 
@@ -168,6 +173,26 @@ export class HeraldClient {
     });
   }
 
+  // ── Ephemeral Events ────────────────────────────────────────────────
+
+  /** Trigger an ephemeral event (not persisted). */
+  trigger(room: string, event: string, data?: unknown): void {
+    this.connection.send({
+      type: "event.trigger",
+      payload: { room, event, data },
+    });
+  }
+
+  /** Delete a message. */
+  async deleteMessage(room: string, id: string): Promise<MessageAck> {
+    const ref = nextRef();
+    return this.request(ref, {
+      type: "message.delete",
+      ref,
+      payload: { room, id },
+    }) as Promise<MessageAck>;
+  }
+
   // ── Events ─────────────────────────────────────────────────────────
 
   on<E extends HeraldEvent>(event: E, handler: Handler<HeraldEventMap[E]>): void {
@@ -181,9 +206,19 @@ export class HeraldClient {
     this.handlers.get(event)?.delete(handler as Handler<unknown>);
   }
 
+  /** Listen to all events regardless of type (like Pusher's bind_global). */
+  onAny(handler: (event: string, data: unknown) => void): void {
+    this.globalHandlers.add(handler);
+  }
+
+  offAny(handler: (event: string, data: unknown) => void): void {
+    this.globalHandlers.delete(handler);
+  }
+
   // ── Internals ──────────────────────────────────────────────────────
 
   private emit<E extends HeraldEvent>(event: E, data: HeraldEventMap[E]): void {
+    // Type-specific handlers
     const set = this.handlers.get(event);
     if (set) {
       for (const handler of set) {
@@ -193,6 +228,12 @@ export class HeraldClient {
           // Don't let user handler errors break the event loop
         }
       }
+    }
+    // Global handlers
+    for (const handler of this.globalHandlers) {
+      try {
+        handler(event, data);
+      } catch { }
     }
   }
 
@@ -324,6 +365,26 @@ export class HeraldClient {
         this.emit("room.deleted", p as unknown as RoomEvent);
         break;
 
+      case "message.deleted":
+        this.emit("message.deleted", p as unknown as MessageDeleted);
+        break;
+
+      case "event.received":
+        this.emit("event.received", p as unknown as EventReceived);
+        break;
+
+      case "room.subscriber_count":
+        this.emit("room.subscriber_count", p as unknown as RoomSubscriberCount);
+        break;
+
+      case "watchlist.online":
+        this.emit("watchlist.online", p as unknown as WatchlistEvent);
+        break;
+
+      case "watchlist.offline":
+        this.emit("watchlist.offline", p as unknown as WatchlistEvent);
+        break;
+
       case "system.token_expiring":
         this.handleTokenExpiring();
         break;
@@ -344,7 +405,8 @@ export class HeraldClient {
     }
   }
 
-  private handleStateChange(state: ConnectionState): void {
+  private handleStateChange(state: ConnectionState, previous?: ConnectionState): void {
+    // Emit specific state events
     switch (state) {
       case "connected":
         this.emit("connected", undefined as never);
@@ -352,10 +414,16 @@ export class HeraldClient {
       case "disconnected":
         this.emit("disconnected", undefined as never);
         break;
-      case "reconnecting":
+      case "connecting":
+      case "unavailable":
         this.emit("reconnecting", undefined as never);
-        // On reconnect, re-authenticate with last_seen_at
         break;
+    }
+    // Emit generic state_change via global handlers
+    for (const handler of this.globalHandlers) {
+      try {
+        handler("state_change", { previous, current: state });
+      } catch { }
     }
   }
 

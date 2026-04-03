@@ -183,7 +183,7 @@ Ephemeral events do not trigger webhooks and do not affect message history or se
 | `GET /rooms/:id/members` | List members | |
 | `PATCH /rooms/:id/members/:uid` | Update role | `{role}` |
 | `DELETE /rooms/:id/members/:uid` | Remove member | |
-| `POST /rooms/:id/messages` | Inject message | `{sender, body, meta?}` |
+| `POST /rooms/:id/messages` | Inject message | `{sender, body, meta?, exclude_connection?}` |
 | `GET /rooms/:id/messages` | List messages | `?before=&after=&limit=` |
 | `DELETE /rooms/:id/messages/:msg_id` | Delete/redact message | Soft-deletes: clears body, sets `meta.deleted=true` |
 | `GET /rooms/:id/cursors` | Read cursors | |
@@ -353,3 +353,31 @@ Example server event:
 ```
 
 This fires on explicit subscribe/unsubscribe and on disconnect (after connection cleanup). The count reflects the number of active WebSocket connections subscribed to the room.
+
+---
+
+## Sender Exclusion
+
+When injecting messages via the HTTP API, pass `exclude_connection` (a connection ID as a number) to exclude that specific WebSocket connection from receiving the fan-out. This is useful for optimistic UI updates where the client already shows the message locally.
+
+```json
+POST /rooms/chat/messages
+{
+  "sender": "alice",
+  "body": "Hello!",
+  "exclude_connection": 12345
+}
+```
+
+The connection ID is available in the `auth_ok` response or can be tracked by the application server. If the specified connection ID does not match any active subscriber, the message is delivered to all subscribers as normal.
+
+---
+
+## Authorized Connections
+
+WebSocket connections must authenticate within 5 seconds or they are disconnected. Unauthenticated connections do not count toward the per-tenant connection limit. The connection limit is enforced only after successful JWT validation.
+
+This means:
+- Unauthenticated connections cannot exhaust tenant quota
+- The 5-second auth timeout prevents resource exhaustion from idle connections
+- Auth failures are tracked via the `herald_ws_auth_failures_total` Prometheus metric

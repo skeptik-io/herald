@@ -87,6 +87,28 @@ export interface ErrorPayload {
   message: string;
 }
 
+export interface EventReceived {
+  room: string;
+  event: string;
+  sender: string;
+  data?: unknown;
+}
+
+export interface WatchlistEvent {
+  user_ids: string[];
+}
+
+export interface RoomSubscriberCount {
+  room: string;
+  count: number;
+}
+
+export interface MessageDeleted {
+  room: string;
+  id: string;
+  seq: number;
+}
+
 // ---------------------------------------------------------------------------
 // Wire frame
 // ---------------------------------------------------------------------------
@@ -99,6 +121,8 @@ export interface ServerFrame {
 
 export type HeraldEventMap = {
   message: MessageNew;
+  "message.deleted": MessageDeleted;
+  "event.received": EventReceived;
   presence: PresenceChanged;
   cursor: CursorMoved;
   "member.joined": MemberEvent;
@@ -106,6 +130,9 @@ export type HeraldEventMap = {
   typing: TypingEvent;
   "room.updated": RoomEvent;
   "room.deleted": RoomEvent;
+  "room.subscriber_count": RoomSubscriberCount;
+  "watchlist.online": WatchlistEvent;
+  "watchlist.offline": WatchlistEvent;
   connected: void;
   disconnected: void;
   reconnecting: void;

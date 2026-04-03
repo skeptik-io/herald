@@ -1,9 +1,20 @@
 import type { ServerFrame } from "./types.js";
 
 export type OnFrameCallback = (frame: ServerFrame) => void;
-export type OnStateCallback = (state: ConnectionState) => void;
+export type OnStateCallback = (state: ConnectionState, previous?: ConnectionState) => void;
 
-export type ConnectionState = "connecting" | "connected" | "disconnected" | "reconnecting";
+export type ConnectionState =
+  | "initialized"     // Created but not yet connected
+  | "connecting"      // Attempting to connect
+  | "connected"       // Active WebSocket connection
+  | "unavailable"     // Connection lost, retrying every 15s
+  | "failed"          // WebSocket not supported or unrecoverable error
+  | "disconnected";   // Intentionally closed
+
+export interface StateChangeEvent {
+  previous: ConnectionState;
+  current: ConnectionState;
+}
 
 const MAX_RECONNECT_DELAY = 30_000;
 const BASE_RECONNECT_DELAY = 1_000;
@@ -14,7 +25,7 @@ export class Connection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
 
-  private state: ConnectionState = "disconnected";
+  private state: ConnectionState = "initialized";
   private onFrame: OnFrameCallback;
   private onStateChange: OnStateCallback;
 
@@ -59,9 +70,16 @@ export class Connection {
           this.setState("disconnected");
           return;
         }
-        this.setState("disconnected");
         if (this.reconnectEnabled) {
+          // After ~30 seconds of failed reconnects, transition to unavailable
+          if (this.reconnectAttempt > 3) {
+            this.setState("unavailable");
+          } else {
+            this.setState("connecting");
+          }
           this.scheduleReconnect();
+        } else {
+          this.setState("disconnected");
         }
       };
 
@@ -96,15 +114,19 @@ export class Connection {
     return this.state === "connected";
   }
 
-  private setState(state: ConnectionState): void {
-    if (this.state !== state) {
-      this.state = state;
-      this.onStateChange(state);
+  get currentState(): ConnectionState {
+    return this.state;
+  }
+
+  private setState(newState: ConnectionState): void {
+    if (this.state !== newState) {
+      const previous = this.state;
+      this.state = newState;
+      this.onStateChange(newState, previous);
     }
   }
 
   private scheduleReconnect(): void {
-    this.setState("reconnecting");
     const delay = Math.min(
       BASE_RECONNECT_DELAY * 2 ** this.reconnectAttempt,
       this.maxDelay,

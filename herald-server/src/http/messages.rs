@@ -22,6 +22,8 @@ pub struct InjectMessageRequest {
     pub body: String,
     #[serde(default)]
     pub meta: Option<serde_json::Value>,
+    #[serde(default)]
+    pub exclude_connection: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -104,7 +106,10 @@ pub async fn inject_message(
             sent_at: now,
         },
     };
-    fanout_to_room(&state, tid, &room_id, &new_msg, None);
+    let exclude = req
+        .exclude_connection
+        .map(crate::registry::connection::ConnId);
+    fanout_to_room(&state, tid, &room_id, &new_msg, exclude);
 
     // Cache channel: update last event for new subscribers
     state.rooms.set_last_event(tid, &room_id, new_msg);

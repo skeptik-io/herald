@@ -1,18 +1,16 @@
 # Herald
 
-Multi-tenant WebSocket chat server. Rooms, messages, presence, cursors, and real-time fan-out — with optional embedded encryption, search, and authorization via ShroudB.
+Multi-tenant WebSocket chat server. Rooms, messages, presence, cursors, and real-time fan-out — with ABAC authorization via ShroudB Sentry. Message body is opaque; consumers handle their own encryption and search.
 
 ## What It Does
 
-Herald replaces Pusher/Soketi/Ably with a purpose-built chat server. Browsers connect via WebSocket for real-time messaging. Your backend manages rooms and members via HTTP. No external database required — Herald uses ShroudB's WAL-based storage engine for encrypted-at-rest persistence.
+Herald replaces Pusher/Soketi/Ably with a purpose-built chat server. Browsers connect via WebSocket for real-time messaging. Your backend manages rooms and members via HTTP. No external database required — Herald uses ShroudB's WAL-based storage engine for persistence. Message bodies are treated as opaque bytes — Herald stores and delivers them as-is.
 
 ```
                     wss://herald.example.com/ws
 Browser ←— WebSocket (/ws) ——→  HERALD  ←—— HTTP API ——→ Your Backend
                                    │
                            ShroudB engines (embedded)
-                           ├── Cipher — message encryption
-                           ├── Veil — encrypted search
                            └── Sentry — authorization policies
 ```
 
@@ -45,19 +43,18 @@ curl -X POST http://localhost:6201/rooms/general/members \
 
 ## Architecture
 
-- **Storage**: ShroudB WAL engine — encrypted at rest, ~80µs writes (vs ~580µs Postgres). No external database.
+- **Storage**: ShroudB WAL engine — ~80µs writes (vs ~580µs Postgres). No external database.
 - **Multi-tenant**: Each tenant has isolated rooms, members, and JWT secrets. `--single-tenant` mode for self-hosted.
-- **ShroudB engines**: Cipher, Veil, and Sentry run **embedded by default** — no config needed. Encryption, search, and authorization work out of the box. Remote mode available via `[shroudb]` config.
-- **Circuit breakers**: All remote engine connections have timeout + circuit breaker + graceful degradation.
-- **Latency histograms**: Per-stage Prometheus metrics (encrypt, store, index, fanout).
+- **Opaque message body**: Herald stores and delivers message bodies as-is. Consumers handle their own encryption and search.
+- **ShroudB Sentry**: ABAC authorization runs **embedded by default** — no config needed. Remote mode available via `[shroudb]` config.
+- **Circuit breakers**: Remote Sentry connections have timeout + circuit breaker + graceful degradation.
+- **Latency histograms**: Per-stage Prometheus metrics (store, fanout).
 
 ## Performance
 
-| Mode | Throughput | p50 Latency |
-|------|-----------|-------------|
-| Plaintext | ~8,000 msg/s | 0.10ms |
-| Encrypted (embedded Cipher + Veil) | ~4,000 msg/s | 0.25ms |
-| Encrypted (remote Cipher + Veil) | ~1,400 msg/s | 1.00ms |
+| Throughput | p50 Latency |
+|-----------|-------------|
+| ~8,000 msg/s | 0.10ms |
 
 ## Quick Start
 
@@ -132,5 +129,7 @@ Published to GitHub Packages on each release.
 - **ShroudB Sigil** — tenant user authentication
 - **ShroudB Sentry** — ABAC authorization (embedded or remote)
 - **Meterd** — MAU tracking, quota enforcement, Stripe billing
+
+Herald treats message bodies as opaque bytes. If you need encryption, encrypt before sending. If you need search, index in your own backend via webhooks.
 
 See [DOCS.md](DOCS.md) for complete reference. See [ARCHITECTURE.md](ARCHITECTURE.md) for protocol specification.

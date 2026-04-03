@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ pub struct CircuitBreaker {
     inner: Mutex<Inner>,
     failure_threshold: u32,
     cooldown: Duration,
+    probe_in_progress: AtomicBool,
 }
 
 struct Inner {
@@ -38,6 +40,7 @@ impl CircuitBreaker {
             }),
             failure_threshold,
             cooldown,
+            probe_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -52,6 +55,7 @@ impl CircuitBreaker {
                 if let Some(last) = inner.last_failure {
                     if last.elapsed() >= self.cooldown {
                         inner.state = State::HalfOpen;
+                        self.probe_in_progress.store(true, AtomicOrdering::SeqCst);
                         tracing::info!(engine = %self.name, "circuit breaker: open → half-open");
                         Ok(())
                     } else {
@@ -64,13 +68,24 @@ impl CircuitBreaker {
                 } else {
                     // No last failure recorded — shouldn't happen, but allow
                     inner.state = State::HalfOpen;
+                    self.probe_in_progress.store(true, AtomicOrdering::SeqCst);
                     Ok(())
                 }
             }
             State::HalfOpen => {
-                // Only one call allowed in half-open — subsequent calls rejected
-                // until the probe completes
-                Ok(())
+                // Only one probe call allowed in half-open
+                if self
+                    .probe_in_progress
+                    .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
+                    .is_ok()
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} circuit half-open (probe in progress)",
+                        self.name
+                    ))
+                }
             }
         }
     }
@@ -80,6 +95,7 @@ impl CircuitBreaker {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.state == State::HalfOpen {
             tracing::info!(engine = %self.name, "circuit breaker: half-open → closed");
+            self.probe_in_progress.store(false, AtomicOrdering::SeqCst);
         }
         inner.state = State::Closed;
         inner.failures = 0;
@@ -93,6 +109,7 @@ impl CircuitBreaker {
 
         if inner.state == State::HalfOpen {
             inner.state = State::Open;
+            self.probe_in_progress.store(false, AtomicOrdering::SeqCst);
             tracing::warn!(engine = %self.name, "circuit breaker: half-open → open (probe failed)");
         } else if inner.failures >= self.failure_threshold {
             if inner.state != State::Open {
@@ -160,6 +177,37 @@ mod tests {
         // Failure in half-open → back to open
         cb.record_failure();
         assert_eq!(cb.state(), State::Open);
+    }
+
+    #[test]
+    fn test_halfopen_allows_only_one_probe() {
+        let cb = CircuitBreaker::new("test", 2, Duration::from_millis(50));
+
+        // Trip to open
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), State::Open);
+
+        // Wait for cooldown
+        std::thread::sleep(Duration::from_millis(60));
+
+        // First check transitions to half-open and allows
+        assert!(cb.check().is_ok());
+        assert_eq!(cb.state(), State::HalfOpen);
+
+        // Second check while probe is in progress should be rejected
+        assert!(cb.check().is_err());
+
+        // Third check also rejected
+        assert!(cb.check().is_err());
+
+        // Probe succeeds — circuit closes, probe flag reset
+        cb.record_success();
+        assert_eq!(cb.state(), State::Closed);
+
+        // Now all calls should pass again
+        assert!(cb.check().is_ok());
+        assert!(cb.check().is_ok());
     }
 
     #[test]

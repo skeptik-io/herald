@@ -22,10 +22,8 @@ class RoomNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def create(self, id: str, name: str, *, encryption_mode: str | None = None, meta: Any = None) -> Room:
+    def create(self, id: str, name: str, *, meta: Any = None) -> Room:
         body: dict[str, Any] = {"id": id, "name": name}
-        if encryption_mode:
-            body["encryption_mode"] = encryption_mode
         if meta is not None:
             body["meta"] = meta
         data = self._t.request("POST", "/rooms", body)
@@ -42,6 +40,10 @@ class RoomNamespace:
         if meta is not None:
             body["meta"] = meta
         self._t.request("PATCH", f"/rooms/{quote(id, safe='')}", body)
+
+    def list(self) -> list[Room]:
+        data = self._t.request("GET", "/rooms")
+        return [Room(**{k: r[k] for k in Room.__dataclass_fields__ if k in r}) for r in data["rooms"]]
 
     def delete(self, id: str) -> None:
         self._t.request("DELETE", f"/rooms/{quote(id, safe='')}")
@@ -121,15 +123,55 @@ class PresenceNamespace:
         return [Cursor(user_id=c["user_id"], seq=c["seq"]) for c in data["cursors"]]
 
 
+class TenantNamespace:
+    def __init__(self, t: HttpTransport) -> None:
+        self._t = t
+
+    def create(self, id: str, name: str, jwt_secret: str, *, jwt_issuer: str | None = None, plan: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"id": id, "name": name, "jwt_secret": jwt_secret}
+        if jwt_issuer is not None:
+            body["jwt_issuer"] = jwt_issuer
+        if plan is not None:
+            body["plan"] = plan
+        return self._t.request("POST", "/admin/tenants", body)
+
+    def list(self) -> list[dict[str, Any]]:
+        data = self._t.request("GET", "/admin/tenants")
+        return data["tenants"]
+
+    def get(self, id: str) -> dict[str, Any]:
+        return self._t.request("GET", f"/admin/tenants/{quote(id, safe='')}")
+
+    def update(self, id: str, *, name: str | None = None, plan: str | None = None) -> None:
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if plan is not None:
+            body["plan"] = plan
+        self._t.request("PATCH", f"/admin/tenants/{quote(id, safe='')}", body)
+
+    def delete(self, id: str) -> None:
+        self._t.request("DELETE", f"/admin/tenants/{quote(id, safe='')}")
+
+    def create_token(self, tenant_id: str, scope: str | None = None) -> str:
+        body = {"scope": scope} if scope else None
+        data = self._t.request("POST", f"/admin/tenants/{quote(tenant_id, safe='')}/tokens", body)
+        return data["token"]
+
+    def delete_token(self, tenant_id: str, token: str) -> None:
+        self._t.request("DELETE", f"/admin/tenants/{quote(tenant_id, safe='')}/tokens/{quote(token, safe='')}")
+
+
 class HeraldAdmin:
     """Herald HTTP admin client for Python backends."""
 
-    def __init__(self, url: str, token: str) -> None:
-        t = HttpTransport(url, token)
+    def __init__(self, url: str, token: str, *, timeout: int = 30) -> None:
+        t = HttpTransport(url, token, timeout=timeout)
         self.rooms = RoomNamespace(t)
         self.members = MemberNamespace(t)
         self.messages = MessageNamespace(t)
         self.presence = PresenceNamespace(t)
+        self.tenants = TenantNamespace(t)
         self._transport = t
 
     @classmethod
@@ -139,3 +181,26 @@ class HeraldAdmin:
     def health(self) -> HealthResponse:
         data = self._transport.request("GET", "/health")
         return HealthResponse(status=data["status"], connections=data.get("connections", 0), rooms=data.get("rooms", 0), uptime_secs=data.get("uptime_secs", 0))
+
+    def connections(self) -> Any:
+        return self._transport.request("GET", "/admin/connections")
+
+    def events(self, *, limit: int | None = None) -> Any:
+        path = "/admin/events"
+        if limit is not None:
+            path += f"?limit={limit}"
+        return self._transport.request("GET", path)
+
+    def errors(self, *, limit: int | None = None, category: str | None = None) -> Any:
+        params: list[str] = []
+        if limit is not None:
+            params.append(f"limit={limit}")
+        if category is not None:
+            params.append(f"category={quote(category, safe='')}")
+        path = "/admin/errors"
+        if params:
+            path += "?" + "&".join(params)
+        return self._transport.request("GET", path)
+
+    def stats(self) -> Any:
+        return self._transport.request("GET", "/admin/stats")

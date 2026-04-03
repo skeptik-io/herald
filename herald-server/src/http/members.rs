@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use herald_core::member::{Member, Role};
 
+use crate::http::validation;
 use crate::http::TenantId;
 use crate::state::AppState;
 use crate::store;
@@ -33,6 +34,11 @@ pub async fn add_member(
     Json(req): Json<AddMemberRequest>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
+
+    if let Err(e) = validation::validate_id(&req.user_id, "user_id") {
+        return (*e).into_response();
+    }
+
     let role = req
         .role
         .as_deref()
@@ -47,9 +53,10 @@ pub async fn add_member(
     };
 
     if let Err(e) = store::members::insert(&*state.db, tid, &member).await {
+        tracing::error!(tenant = tid, room = %room_id, user = %req.user_id, "failed to add member: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(serde_json::json!({"error": "internal error"})),
         )
             .into_response();
     }
@@ -88,14 +95,23 @@ pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
     Path(room_id): Path<String>,
+    Query(page): Query<crate::http::validation::PaginationQuery>,
 ) -> impl IntoResponse {
     match store::members::list_by_room(&*state.db, &tenant.0, &room_id).await {
-        Ok(members) => Json(serde_json::json!({"members": members})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Ok(members) => {
+            let (limit, offset) = page.resolve();
+            let total = members.len();
+            let members: Vec<_> = members.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({"members": members, "total": total, "limit": limit, "offset": offset})).into_response()
+        }
+        Err(e) => {
+            tracing::error!(tenant = %tenant.0, room = %room_id, "failed to list members: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -141,11 +157,14 @@ pub async fn remove_member(
             Json(serde_json::json!({"error": "member not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = tid, room = %room_id, user = %user_id, "failed to remove member: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -173,10 +192,13 @@ pub async fn update_member(
             Json(serde_json::json!({"error": "member not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = %tenant.0, room = %room_id, user = %user_id, "failed to update member role: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }

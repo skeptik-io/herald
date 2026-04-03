@@ -15,7 +15,7 @@ herald [--single-tenant|--multi-tenant] [config-path]
 | `config-path` | `herald.toml` | Path to TOML configuration file |
 
 **Environment variables:**
-- `SHROUDB_MASTER_KEY` — 64-character hex string (32 bytes). Required. Encrypts all stored data.
+- `SHROUDB_MASTER_KEY` — 64-character hex string (32 bytes). Required for WAL storage.
 
 ### Configuration
 
@@ -65,6 +65,7 @@ herald [--single-tenant|--multi-tenant] [config-path]
 | `url` | string | Webhook endpoint URL |
 | `secret` | string | HMAC-SHA256 key for `X-Herald-Signature` |
 | `retries` | u32 | Retry count (default 3) |
+| `events` | string[] | Event types to send (default: all) |
 
 #### `[tls]`
 
@@ -77,10 +78,6 @@ herald [--single-tenant|--multi-tenant] [config-path]
 
 | Key | Type | Description |
 |---|---|---|
-| `cipher_addr` | string | Cipher TCP address |
-| `cipher_token` | string | Cipher auth token |
-| `veil_addr` | string | Veil TCP address |
-| `veil_token` | string | Veil auth token |
 | `sentry_addr` | string | Sentry TCP address |
 | `sentry_token` | string | Sentry auth token |
 | `courier_addr` | string | Courier TCP address |
@@ -127,7 +124,6 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `presence.set` | `{status}` | `online`, `away`, `dnd` |
 | `typing.start` / `typing.stop` | `{room}` | Ephemeral |
 | `messages.fetch` | `{room, before?, limit?}` | History |
-| `messages.search` | `{room, query, limit?}` | Search (requires Veil) |
 | `ping` | — | Keepalive |
 
 ### Server → Client
@@ -149,7 +145,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 
 ### Error Codes
 
-`TOKEN_EXPIRED`, `TOKEN_INVALID`, `UNAUTHORIZED`, `NOT_SUBSCRIBED`, `ROOM_NOT_FOUND`, `RATE_LIMITED`, `BAD_REQUEST`, `SEARCH_UNAVAILABLE`, `INTERNAL`
+`TOKEN_EXPIRED`, `TOKEN_INVALID`, `UNAUTHORIZED`, `NOT_SUBSCRIBED`, `ROOM_NOT_FOUND`, `RATE_LIMITED`, `BAD_REQUEST`, `INTERNAL`
 
 ---
 
@@ -159,10 +155,10 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 
 | Method | Path | Description |
 |---|---|---|
-| `POST /rooms` | Create room | `{id, name, encryption_mode?, meta?}` |
+| `POST /rooms` | Create room | `{id, name, meta?}` |
 | `GET /rooms` | List rooms | Returns `{rooms: [...]}` |
 | `GET /rooms/:id` | Get room | |
-| `PATCH /rooms/:id` | Update room | `{name?, meta?}` |
+| `PATCH /rooms/:id` | Update room | `{name?, meta?, archived?}` |
 | `DELETE /rooms/:id` | Delete room | |
 | `POST /rooms/:id/members` | Add member | `{user_id, role?}` |
 | `GET /rooms/:id/members` | List members | |
@@ -170,10 +166,11 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `DELETE /rooms/:id/members/:uid` | Remove member | |
 | `POST /rooms/:id/messages` | Inject message | `{sender, body, meta?}` |
 | `GET /rooms/:id/messages` | List messages | `?before=&after=&limit=` |
-| `GET /rooms/:id/messages/search` | Search | `?q=&limit=` |
+| `DELETE /rooms/:id/messages/:msg_id` | Delete/redact message | Soft-deletes: clears body, sets `meta.deleted=true` |
 | `GET /rooms/:id/cursors` | Read cursors | |
 | `GET /rooms/:id/presence` | Room presence | |
 | `GET /presence/:uid` | User presence | |
+| `GET /stats` | Tenant-scoped stats | Connection count, room count, message rate for this tenant |
 
 ### Admin API (Bearer token from `auth.super_admin_token`)
 
@@ -184,14 +181,23 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `GET /admin/tenants/:id` | Get tenant | |
 | `PATCH /admin/tenants/:id` | Update tenant | `{name?, plan?, config?}` |
 | `DELETE /admin/tenants/:id` | Delete tenant | |
-| `POST /admin/tenants/:id/tokens` | Create API token | |
+| `POST /admin/tenants/:id/tokens` | Create API token | `{scope?}` — optional scope restriction |
 | `GET /admin/tenants/:id/tokens` | List API tokens | |
+| `DELETE /admin/tenants/:id/tokens/:token` | Delete API token | Verifies token belongs to tenant |
+| `GET /admin/tenants/:id/rooms` | List tenant rooms | Admin view of rooms for a tenant |
+| `GET /admin/connections` | List active connections | Active WebSocket connections |
+| `GET /admin/events` | List admin events | Recent admin events |
+| `GET /admin/events/stream` | SSE admin event stream | Server-Sent Events stream |
+| `GET /admin/errors` | List recent errors | Error log |
+| `GET /admin/stats` | Platform stats | Aggregate stats across all tenants |
 
 ### Operational (No auth required)
 
 | Method | Path | Description |
 |---|---|---|
 | `GET /health` | Health check | `{status, connections, rooms, uptime_secs}` |
+| `GET /health/live` | Liveness probe | Returns 200 if process is running |
+| `GET /health/ready` | Readiness probe | Returns 200 when store is initialized |
 | `GET /metrics` | Prometheus metrics | Histograms + counters |
 
 ### Prometheus Metrics
@@ -205,18 +211,57 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `herald_ws_auth_failures_total` | counter | Auth failures |
 | `herald_uptime_seconds` | gauge | Uptime |
 | `herald_message_total_seconds` | histogram | End-to-end send latency |
-| `herald_message_encrypt_seconds` | histogram | Cipher encrypt |
 | `herald_message_store_seconds` | histogram | WAL store |
-| `herald_message_index_seconds` | histogram | Veil index |
 | `herald_message_fanout_seconds` | histogram | Fan-out |
-| `herald_message_decrypt_seconds` | histogram | Cipher decrypt |
-| `herald_search_seconds` | histogram | Veil search |
+
+---
+
+## Additional Features
+
+### Room Archival
+
+Rooms can be archived via `PATCH /rooms/:id` with `{"archived": true}`. Archived rooms remain readable but no new messages can be sent. Unarchive by setting `archived` to `false`.
+
+### Webhook Event Filtering
+
+The `[webhook]` config supports an `events` field to filter which events trigger webhook calls:
+
+```toml
+[webhook]
+url = "https://example.com/hook"
+secret = "whsec_..."
+events = ["message.new", "member.joined", "member.left"]
+```
+
+When `events` is omitted, all events are sent. Supported event types match server-to-client message types.
+
+### API Key Scoping
+
+API tokens can be created with a `scope` to restrict access:
+
+```
+POST /admin/tenants/:id/tokens
+{"scope": "read-only"}
+```
+
+When a scoped token is used, the scope is available via middleware for route-level enforcement. `scope: null` (default) grants full access.
+
+### Pagination
+
+List endpoints support `limit` and `offset` query parameters:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `limit` | u32 | 50 | Maximum items to return |
+| `offset` | u32 | 0 | Number of items to skip |
+
+Applies to: `GET /rooms`, `GET /rooms/:id/members`, `GET /rooms/:id/messages` (also supports `before`/`after` sequence-based cursors), `GET /admin/tenants`, `GET /admin/tenants/:id/tokens`.
 
 ---
 
 ## Storage
 
-Herald uses ShroudB's WAL-based storage engine. All data is encrypted at rest using a master key derived via HKDF.
+Herald uses ShroudB's WAL-based storage engine. Message bodies are stored as opaque bytes — Herald does not interpret, encrypt, or index them.
 
 **Namespaces:**
 - `herald.tenants` — tenant configurations
@@ -226,36 +271,14 @@ Herald uses ShroudB's WAL-based storage engine. All data is encrypted at rest us
 - `herald.messages` — messages (key: `{tenant_id}/{room_id}/{seq:020}`)
 - `herald.cursors` — read positions (key: `{tenant_id}/{room_id}/{user_id}`)
 
-**Encryption modes** (per-room, set at creation time via `encryption_mode` field):
-
-| Mode | Message Bodies | Search | Cost |
-|---|---|---|---|
-| `plaintext` (default) | Stored as-is in WAL | Veil indexes if available | ~0.10ms per message |
-| `server_encrypted` | Cipher-encrypted before WAL write | Veil blind indexes | ~0.25ms per message (embedded) |
-
-Both modes benefit from storage-level encryption (the WAL is always AES-256-GCM encrypted via the master key). `server_encrypted` adds an additional per-message Cipher keyring encryption on top, so message bodies are double-encrypted and only readable with both the master key and the room's Cipher keyring.
-
-To create an encrypted room:
-```bash
-curl -X POST http://localhost:6201/rooms \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"id": "secure", "name": "Secure Room", "encryption_mode": "server_encrypted"}'
-```
-
-Each `server_encrypted` room automatically gets:
-- A Cipher keyring: `herald-{tenant_id}-room-{room_id}` (AES-256-GCM)
-- A Veil blind index: `herald-{tenant_id}-room-{room_id}`
-
 ---
 
 ## ShroudB Engine Modes
 
-Cipher, Veil, and Sentry initialize **embedded by default** — no configuration needed. They share Herald's storage engine with separate namespaces. Remote mode is available as an override via `[shroudb]` config.
+Sentry initializes **embedded by default** — no configuration needed. It shares Herald's storage engine with separate namespaces. Remote mode is available as an override via `[shroudb]` config.
 
 | Engine | Default | Remote Override | Purpose |
 |---|---|---|---|
-| **Cipher** | Embedded (automatic) | `cipher_addr` in `[shroudb]` | Message encryption |
-| **Veil** | Embedded (automatic) | `veil_addr` in `[shroudb]` | Blind index search |
 | **Sentry** | Embedded (automatic) | `sentry_addr` in `[shroudb]` | Authorization |
 | **Courier** | Disabled | `courier_addr` in `[shroudb]` | Offline notifications |
 | **Chronicle** | Disabled | `chronicle_addr` in `[shroudb]` | Audit trail |

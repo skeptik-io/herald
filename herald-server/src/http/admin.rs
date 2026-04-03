@@ -10,6 +10,7 @@ use futures_util::stream::Stream;
 use serde::Deserialize;
 
 use crate::admin_events::ErrorCategory;
+use crate::http::validation;
 use crate::state::{AppState, TenantConfig};
 use crate::store;
 use crate::store::tenants::Tenant;
@@ -37,6 +38,22 @@ pub async fn create_tenant(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTenantRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = validation::validate_id(&req.id, "tenant id") {
+        return (*e).into_response();
+    }
+    if let Err(e) = validation::validate_name(&req.name, "tenant name") {
+        return (*e).into_response();
+    }
+
+    // Check for existing tenant before insert (KV put is upsert)
+    if let Ok(Some(_)) = store::tenants::get(&*state.db, &req.id).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "failed to create tenant"})),
+        )
+            .into_response();
+    }
+
     let tenant = Tenant {
         id: req.id,
         name: req.name,
@@ -48,9 +65,10 @@ pub async fn create_tenant(
     };
 
     if let Err(e) = store::tenants::insert(&*state.db, &tenant).await {
+        tracing::error!(tenant = %tenant.id, "failed to create tenant: {e}");
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("failed to create tenant: {e}")})),
+            Json(serde_json::json!({"error": "failed to create tenant"})),
         )
             .into_response();
     }
@@ -63,6 +81,7 @@ pub async fn create_tenant(
             jwt_secret: tenant.jwt_secret.clone(),
             jwt_issuer: tenant.jwt_issuer.clone(),
             plan: tenant.plan.clone(),
+            cached_at: std::time::Instant::now(),
         },
     );
 
@@ -97,15 +116,21 @@ pub async fn get_tenant(
             Json(serde_json::json!({"error": "tenant not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = %id, "failed to get tenant: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
-pub async fn list_tenants(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_tenants(
+    State(state): State<Arc<AppState>>,
+    Query(page): Query<crate::http::validation::PaginationQuery>,
+) -> impl IntoResponse {
     match store::tenants::list(&*state.db).await {
         Ok(tenants) => {
             let list: Vec<serde_json::Value> = tenants
@@ -119,13 +144,19 @@ pub async fn list_tenants(State(state): State<Arc<AppState>>) -> impl IntoRespon
                     })
                 })
                 .collect();
-            Json(serde_json::json!({"tenants": list})).into_response()
+            let (limit, offset) = page.resolve();
+            let total = list.len();
+            let list: Vec<_> = list.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({"tenants": list, "total": total, "limit": limit, "offset": offset})).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!("failed to list tenants: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -144,11 +175,18 @@ pub async fn update_tenant(
     .await
     {
         Ok(true) => {
-            // Update cache
-            if let Some(mut cached) = state.tenant_cache.get_mut(&id) {
-                if let Some(ref plan) = req.plan {
-                    cached.plan = plan.clone();
-                }
+            // Refresh cache from DB to pick up all changes
+            if let Ok(Some(t)) = store::tenants::get(&*state.db, &id).await {
+                state.tenant_cache.insert(
+                    id.clone(),
+                    TenantConfig {
+                        id: t.id,
+                        jwt_secret: t.jwt_secret,
+                        jwt_issuer: t.jwt_issuer,
+                        plan: t.plan,
+                        cached_at: std::time::Instant::now(),
+                    },
+                );
             }
             StatusCode::OK.into_response()
         }
@@ -157,11 +195,14 @@ pub async fn update_tenant(
             Json(serde_json::json!({"error": "tenant not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = %id, "failed to update tenant: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -179,17 +220,27 @@ pub async fn delete_tenant(
             Json(serde_json::json!({"error": "tenant not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = %id, "failed to delete tenant: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
+}
+
+#[derive(Deserialize)]
+pub struct CreateTokenRequest {
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 pub async fn create_api_token(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
+    body: Option<Json<CreateTokenRequest>>,
 ) -> impl IntoResponse {
     // Verify tenant exists
     match store::tenants::get(&*state.db, &tenant_id).await {
@@ -202,26 +253,31 @@ pub async fn create_api_token(
                 .into_response();
         }
         Err(e) => {
+            tracing::error!(tenant = %tenant_id, "failed to verify tenant for token creation: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(serde_json::json!({"error": "internal error"})),
             )
                 .into_response();
         }
     }
 
+    let scope = body.and_then(|b| b.scope.clone());
     let token = uuid::Uuid::new_v4().to_string();
-    if let Err(e) = store::tenants::create_token(&*state.db, &token, &tenant_id).await {
+    if let Err(e) =
+        store::tenants::create_token(&*state.db, &token, &tenant_id, scope.as_deref()).await
+    {
+        tracing::error!(tenant = %tenant_id, "failed to create api token: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(serde_json::json!({"error": "internal error"})),
         )
             .into_response();
     }
 
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({"token": token})),
+        Json(serde_json::json!({"token": token, "scope": scope})),
     )
         .into_response()
 }
@@ -229,14 +285,23 @@ pub async fn create_api_token(
 pub async fn list_api_tokens(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
+    Query(page): Query<crate::http::validation::PaginationQuery>,
 ) -> impl IntoResponse {
     match store::tenants::list_tokens(&*state.db, &tenant_id).await {
-        Ok(tokens) => Json(serde_json::json!({"tokens": tokens})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Ok(tokens) => {
+            let (limit, offset) = page.resolve();
+            let total = tokens.len();
+            let tokens: Vec<_> = tokens.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({"tokens": tokens, "total": total, "limit": limit, "offset": offset})).into_response()
+        }
+        Err(e) => {
+            tracing::error!(tenant = %tenant_id, "failed to list api tokens: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -251,11 +316,14 @@ pub async fn delete_api_token(
             Json(serde_json::json!({"error": "token not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = %tenant_id, token = %token, "failed to delete api token: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -263,14 +331,23 @@ pub async fn delete_api_token(
 pub async fn list_tenant_rooms(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
+    Query(page): Query<crate::http::validation::PaginationQuery>,
 ) -> impl IntoResponse {
     match store::rooms::list_by_tenant(&*state.db, &tenant_id).await {
-        Ok(rooms) => Json(serde_json::json!({"rooms": rooms})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Ok(rooms) => {
+            let (limit, offset) = page.resolve();
+            let total = rooms.len();
+            let rooms: Vec<_> = rooms.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({"rooms": rooms, "total": total, "limit": limit, "offset": offset})).into_response()
+        }
+        Err(e) => {
+            tracing::error!(tenant = %tenant_id, "failed to list tenant rooms: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 

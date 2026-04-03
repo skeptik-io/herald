@@ -57,13 +57,8 @@ pub async fn handle_message(
         } => {
             handle_fetch(state, ctx, tx, ref_, room, before, limit).await;
         }
-        ClientMessage::MessagesSearch {
-            ref_,
-            room,
-            query,
-            limit,
-        } => {
-            handle_search(state, ctx, tx, ref_, room, query, limit).await;
+        ClientMessage::MessageDelete { ref_, room, id } => {
+            handle_delete(state, ctx, tx, ref_, room, id).await;
         }
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
@@ -182,12 +177,34 @@ async fn handle_send(
 ) {
     let tid = &ctx.tenant_id;
 
+    if body.len() > 65_536 {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::BadRequest,
+                "message body exceeds maximum length",
+            ))
+            .await;
+        return;
+    }
+
     if !state.rooms.is_member(tid, &room, &ctx.user_id) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::NotSubscribed,
                 "not a member of this room",
+            ))
+            .await;
+        return;
+    }
+
+    if state.rooms.is_archived(tid, &room) {
+        let _ = tx
+            .send(ServerMessage::error(
+                ref_,
+                ErrorCode::BadRequest,
+                "room is archived",
             ))
             .await;
         return;
@@ -209,26 +226,12 @@ async fn handle_send(
     let now = now_millis();
     let msg_id = uuid::Uuid::new_v4().to_string();
 
-    // Encrypt
-    let encrypt_start = std::time::Instant::now();
-    let stored_body = match state.encrypt_body(tid, &room, &body).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!("encryption failed: {e}");
-            let _ = tx
-                .send(ServerMessage::error(ref_, ErrorCode::Internal, e))
-                .await;
-            return;
-        }
-    };
-    state.metrics.message_encrypt.observe_since(encrypt_start);
-
     let message = Message {
         id: MessageId(msg_id.clone()),
         room_id: room.clone(),
         seq,
         sender: ctx.user_id.clone(),
-        body: stored_body,
+        body: body.clone(),
         meta: meta.clone(),
         sent_at: now,
     };
@@ -261,11 +264,6 @@ async fn handle_send(
             "seq": seq,
         }),
     );
-
-    // Index
-    let index_start = std::time::Instant::now();
-    state.index_message(tid, &room, &msg_id, &body).await;
-    state.metrics.message_index.observe_since(index_start);
 
     let _ = tx
         .send(ServerMessage::MessageAck {
@@ -353,6 +351,9 @@ async fn handle_presence_set(
 }
 
 fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, room: &str, active: bool) {
+    state
+        .typing
+        .set_typing(&ctx.tenant_id, room, &ctx.user_id, active);
     let msg = ServerMessage::Typing {
         payload: TypingPayload {
             room: room.to_string(),
@@ -393,26 +394,19 @@ async fn handle_fetch(
         .unwrap_or_default();
 
     let has_more = messages.len() > limit as usize;
-    let mut result = Vec::with_capacity(limit as usize);
-    for m in messages.into_iter().take(limit as usize) {
-        let body = match state.decrypt_body(tid, &room, &m.body).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(id = %m.id.0, "skipping message: decrypt failed: {e}");
-                continue;
-            }
-        };
-        result.push(MessageNewPayload {
+    let messages: Vec<MessageNewPayload> = messages
+        .into_iter()
+        .take(limit as usize)
+        .map(|m| MessageNewPayload {
             room: m.room_id,
             id: m.id.0,
             seq: m.seq,
             sender: m.sender,
-            body,
+            body: m.body,
             meta: m.meta,
             sent_at: m.sent_at,
-        });
-    }
-    let messages = result;
+        })
+        .collect();
 
     let _ = tx
         .send(ServerMessage::MessagesBatch {
@@ -426,14 +420,13 @@ async fn handle_fetch(
         .await;
 }
 
-async fn handle_search(
+async fn handle_delete(
     state: &Arc<AppState>,
     ctx: &ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
     room: String,
-    query: String,
-    limit: Option<u32>,
+    id: String,
 ) {
     let tid = &ctx.tenant_id;
 
@@ -448,54 +441,86 @@ async fn handle_search(
         return;
     }
 
-    let hits = match state
-        .search_messages(tid, &room, &query, limit.map(|l| l as usize))
-        .await
-    {
-        Ok(h) => h,
-        Err(e) => {
+    // Look up the message to verify ownership
+    let msg = match store::messages::get_by_id(&*state.db, tid, &id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
             let _ = tx
-                .send(ServerMessage::error(ref_, ErrorCode::SearchUnavailable, e))
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::BadRequest,
+                    "message not found",
+                ))
+                .await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!("failed to look up message {id}: {e}");
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::Internal,
+                    "internal error",
+                ))
                 .await;
             return;
         }
     };
 
-    let mut messages = Vec::with_capacity(hits.len());
-    for hit in &hits {
-        if let Ok(Some(msg)) = store::messages::get_by_id(&*state.db, tid, &hit.id).await {
-            messages.push(msg);
+    // Only the sender can delete their own message (admin/owner enforcement could be added via Sentry)
+    if msg.sender != ctx.user_id {
+        if let Err(e) = state
+            .authorize(tid, &ctx.user_id, "message.delete", &room)
+            .await
+        {
+            let _ = tx
+                .send(ServerMessage::error(ref_, ErrorCode::Unauthorized, e))
+                .await;
+            return;
         }
     }
 
-    let mut result = Vec::with_capacity(messages.len());
-    for m in messages {
-        let body = match state.decrypt_body(tid, &room, &m.body).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(id = %m.id.0, "skipping search result: decrypt failed: {e}");
-                continue;
-            }
-        };
-        result.push(MessageNewPayload {
-            room: m.room_id,
-            id: m.id.0,
-            seq: m.seq,
-            sender: m.sender,
-            body,
-            meta: m.meta,
-            sent_at: m.sent_at,
-        });
-    }
+    match store::messages::delete_message(&*state.db, tid, &id).await {
+        Ok(Some(original)) => {
+            let deleted_msg = ServerMessage::MessageDeleted {
+                payload: MessageDeletedPayload {
+                    room: room.clone(),
+                    id: id.clone(),
+                    seq: original.seq,
+                },
+            };
+            fanout_to_room(state, tid, &room, &deleted_msg, None);
 
-    let _ = tx
-        .send(ServerMessage::MessagesBatch {
-            ref_,
-            payload: MessagesBatchPayload {
-                room,
-                messages: result,
-                has_more: false,
-            },
-        })
-        .await;
+            // Ack to sender
+            let _ = tx
+                .send(ServerMessage::MessageAck {
+                    ref_,
+                    payload: MessageAckPayload {
+                        id,
+                        seq: original.seq,
+                        sent_at: now_millis(),
+                    },
+                })
+                .await;
+        }
+        Ok(None) => {
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::BadRequest,
+                    "message not found",
+                ))
+                .await;
+        }
+        Err(e) => {
+            tracing::error!("failed to delete message {id}: {e}");
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::Internal,
+                    "internal error",
+                ))
+                .await;
+        }
+    }
 }

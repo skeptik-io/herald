@@ -10,9 +10,10 @@ from .errors import HeraldError
 
 
 class HttpTransport:
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(self, base_url: str, token: str, timeout: int = 30) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
+        self._timeout = timeout
 
     def request(self, method: str, path: str, body: Any = None) -> Any:
         url = f"{self._base_url}{path}"
@@ -24,7 +25,7 @@ class HttpTransport:
             req.add_header("Content-Type", "application/json")
 
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 if resp.status == 204:
                     return None
                 return json.loads(resp.read())

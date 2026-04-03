@@ -10,7 +10,6 @@ pub enum ErrorCode {
     RoomNotFound,
     RateLimited,
     BadRequest,
-    SearchUnavailable,
     Internal,
 }
 
@@ -24,7 +23,6 @@ impl ErrorCode {
             Self::RoomNotFound => "ROOM_NOT_FOUND",
             Self::RateLimited => "RATE_LIMITED",
             Self::BadRequest => "BAD_REQUEST",
-            Self::SearchUnavailable => "SEARCH_UNAVAILABLE",
             Self::Internal => "INTERNAL",
         }
     }
@@ -36,7 +34,6 @@ impl ErrorCode {
             Self::NotSubscribed | Self::RoomNotFound => 404,
             Self::RateLimited => 429,
             Self::BadRequest => 400,
-            Self::SearchUnavailable => 503,
             Self::Internal => 500,
         }
     }

@@ -21,42 +21,13 @@ impl std::fmt::Display for RoomId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum EncryptionMode {
-    #[default]
-    Plaintext,
-    ServerEncrypted,
-    E2e,
-}
-
-impl EncryptionMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Plaintext => "plaintext",
-            Self::ServerEncrypted => "server_encrypted",
-            Self::E2e => "e2e",
-        }
-    }
-
-    pub fn from_str_loose(s: &str) -> Option<Self> {
-        match s {
-            "plaintext" => Some(Self::Plaintext),
-            "server_encrypted" | "server-encrypted" => Some(Self::ServerEncrypted),
-            "e2e" => Some(Self::E2e),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub id: RoomId,
     pub name: String,
-    #[serde(default)]
-    pub encryption_mode: EncryptionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
+    #[serde(default)]
+    pub archived: bool,
     pub created_at: i64,
 }

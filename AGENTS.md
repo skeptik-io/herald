@@ -1,14 +1,15 @@
 # Herald
 
-> Multi-tenant WebSocket chat server with embedded ShroudB encryption, search, and authorization.
+> Multi-tenant WebSocket chat server with ShroudB Sentry authorization. Message body is opaque — Herald is a transport+storage layer.
 
 ## Quick Context
 
 - **Role**: Real-time messaging. Browsers via WebSocket (:6200), backends via HTTP (:6201).
-- **Not a ShroudB engine**: Standalone Rust project. Uses ShroudB crates for storage + crypto.
-- **Storage**: ShroudB WAL engine (`shroudb-storage`). Encrypted at rest. ~80µs writes. No Postgres.
+- **Not a ShroudB engine**: Standalone Rust project. Uses ShroudB crates for storage.
+- **Storage**: ShroudB WAL engine (`shroudb-storage`). ~80µs writes. No Postgres.
 - **Multi-tenant**: `tenant` JWT claim. Per-tenant rooms, members, JWT secrets. Admin API for tenant CRUD.
-- **ShroudB engines**: Cipher/Veil/Sentry available as embedded (in-process) or remote (TCP with circuit breakers).
+- **Opaque message body**: Herald stores and delivers message bodies as-is. Consumers handle their own encryption and search.
+- **ShroudB Sentry**: ABAC authorization available as embedded (in-process) or remote (TCP with circuit breakers).
 
 ## Workspace Layout
 
@@ -17,7 +18,7 @@ herald/                              7,441 lines Rust
 ├── herald-core/                     9 files — domain types (no I/O)
 │   ├── auth.rs                      JwtClaims (with tenant claim)
 │   ├── cursor.rs, member.rs         Cursor, Member, Role
-│   ├── message.rs, room.rs          Message, Room, EncryptionMode
+│   ├── message.rs, room.rs          Message, Room
 │   ├── presence.rs, error.rs        PresenceStatus, HeraldError, ErrorCode
 │   └── protocol.rs                  ClientMessage, ServerMessage, all payloads
 │
@@ -50,16 +51,12 @@ herald/                              7,441 lines Rust
 │   │   ├── mod.rs                   Router + tenant/admin auth middleware
 │   │   ├── admin.rs                 Tenant CRUD + API token management
 │   │   ├── rooms.rs, members.rs     Room/member CRUD
-│   │   ├── messages.rs              Inject, list, search
+│   │   ├── messages.rs              Inject, list
 │   │   ├── presence.rs              Presence queries
 │   │   └── health.rs                /health + /metrics (Prometheus histograms)
 │   │
 │   ├── integrations/                ShroudB engine wrappers
-│   │   ├── mod.rs                   Traits + mocks: CipherOps, VeilOps, SentryOps, CourierOps, ChronicleOps
-│   │   ├── cipher.rs                RemoteCipherOps (TCP client)
-│   │   ├── embedded_cipher.rs       EmbeddedCipherOps (in-process CipherEngine)
-│   │   ├── veil.rs                  RemoteVeilOps (TCP client)
-│   │   ├── embedded_veil.rs         EmbeddedVeilOps (in-process VeilEngine)
+│   │   ├── mod.rs                   Traits + mocks: SentryOps, CourierOps, ChronicleOps
 │   │   ├── sentry.rs                RemoteSentryOps (TCP client)
 │   │   ├── embedded_sentry.rs       EmbeddedSentryOps (in-process SentryEngine)
 │   │   ├── courier.rs               RemoteCourierOps
@@ -69,7 +66,7 @@ herald/                              7,441 lines Rust
 │   │
 │   └── tests/
 │       ├── integration.rs           6 multi-tenant tests (WAL, no Postgres)
-│       └── bench_latency.rs         3 benchmarks: plaintext, encrypted remote, encrypted embedded
+│       └── bench_latency.rs         WAL latency benchmark
 │
 ├── herald-sdk-typescript/           Browser WebSocket client
 ├── herald-admin-typescript/         Node.js HTTP admin
@@ -101,9 +98,7 @@ Client sends message.send
   → JWT tenant + rooms claim check
   → Optional Sentry EVALUATE (embedded or remote)
   ─── Latency instrumented from here ───
-  → Cipher ENCRYPT body (if server_encrypted room)       [message_encrypt histogram]
   → WAL store (dual key: seq + ID index)                  [message_store histogram]
-  → Veil PUT blind index (if configured)                  [message_index histogram]
   → Metrics counter increment
   → message.ack to sender
   → Fan-out message.new to room subscribers                [message_fanout histogram]
@@ -115,14 +110,14 @@ Client sends message.send
 
 ## Integration Architecture
 
-All ShroudB engines use the same trait pattern:
+ShroudB Sentry uses a trait pattern:
 
 ```
-Trait (CipherOps)
-├── MockCipherOps          — base64 encode/decode (tests)
-├── RemoteCipherOps        — TCP client (shroudb-cipher-client)
-│   └── ResilientCipher    — circuit breaker + 10s timeout wrapper
-└── EmbeddedCipherOps      — in-process CipherEngine (shroudb-cipher-engine)
+Trait (SentryOps)
+├── MockSentryOps          — allow-all (tests)
+├── RemoteSentryOps        — TCP client (shroudb-sentry-client)
+│   └── ResilientSentry    — circuit breaker + 10s timeout wrapper
+└── EmbeddedSentryOps      — in-process SentryEngine (shroudb-sentry-engine)
 ```
 
 Config chooses mode: `[shroudb]` section → remote. No section → embedded or disabled.
@@ -130,8 +125,8 @@ Config chooses mode: `[shroudb]` section → remote. No section → embedded or 
 ## Key Design Decisions
 
 - **ShroudB WAL replaces Postgres** — ~80µs writes vs ~580µs. Single binary, no external database.
-- **Multi-tenant via composite keys** — `{tenant_id}/{room_id}` in every namespace. Crypto isolation via HKDF.
-- **Embedded engines eliminate TCP overhead** — Cipher encrypt drops from 0.3ms to 0.02ms.
+- **Message body is opaque** — Herald stores and delivers bodies as-is. Consumers handle their own encryption and search.
+- **Multi-tenant via composite keys** — `{tenant_id}/{room_id}` in every namespace.
 - **Circuit breakers on all remote calls** — 5 failures → open, 30s cooldown. Sentry fail-open.
 - **Latency histograms per pipeline stage** — Prometheus-compatible, atomic buckets, no external crate.
 - **Single-tenant mode** — `--single-tenant` bootstraps a `default` tenant from config. Zero admin overhead.

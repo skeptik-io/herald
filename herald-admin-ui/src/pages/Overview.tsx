@@ -94,18 +94,6 @@ export default function Overview() {
               </Badge>
             </span>
             <span>
-              Cipher{" "}
-              <Badge color={health.cipher ? "green" : "zinc"}>
-                {health.cipher ? "enabled" : "disabled"}
-              </Badge>
-            </span>
-            <span>
-              Veil{" "}
-              <Badge color={health.veil ? "green" : "zinc"}>
-                {health.veil ? "enabled" : "disabled"}
-              </Badge>
-            </span>
-            <span>
               Sentry{" "}
               <Badge color={health.sentry ? "green" : "zinc"}>
                 {health.sentry ? "enabled" : "disabled"}

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -6,13 +6,12 @@ use jsonwebtoken::{DecodingKey, Validation};
 
 use crate::admin_events::EventBus;
 use crate::config::{HeraldConfig, WebhookConfig};
-use crate::integrations::{
-    AuditEvent, ChronicleOps, CipherOps, CourierOps, SearchHit, SentryOps, VeilOps,
-};
+use crate::integrations::{AuditEvent, ChronicleOps, CourierOps, SentryOps};
 use crate::latency::Histogram;
 use crate::registry::connection::ConnectionRegistry;
 use crate::registry::presence::PresenceTracker;
 use crate::registry::room::RoomRegistry;
+use crate::registry::typing::TypingTracker;
 use crate::store;
 use crate::webhook::WebhookEvent;
 
@@ -22,12 +21,8 @@ pub struct Metrics {
     pub ws_auth_failures: AtomicU64,
     // Latency histograms
     pub message_total: Histogram,
-    pub message_encrypt: Histogram,
     pub message_store: Histogram,
-    pub message_index: Histogram,
     pub message_fanout: Histogram,
-    pub message_decrypt: Histogram,
-    pub search: Histogram,
 }
 
 impl Default for Metrics {
@@ -40,18 +35,8 @@ impl Default for Metrics {
                 "herald_message_total_seconds",
                 "Total message send latency",
             ),
-            message_encrypt: Histogram::new(
-                "herald_message_encrypt_seconds",
-                "Cipher encrypt latency",
-            ),
-            message_store: Histogram::new("herald_message_store_seconds", "Postgres store latency"),
-            message_index: Histogram::new("herald_message_index_seconds", "Veil index latency"),
+            message_store: Histogram::new("herald_message_store_seconds", "WAL store latency"),
             message_fanout: Histogram::new("herald_message_fanout_seconds", "Fan-out latency"),
-            message_decrypt: Histogram::new(
-                "herald_message_decrypt_seconds",
-                "Cipher decrypt latency (fetch/search)",
-            ),
-            search: Histogram::new("herald_search_seconds", "Veil search latency"),
         }
     }
 }
@@ -98,16 +83,21 @@ impl Metrics {
 
         // Latency histograms
         self.message_total.format_prometheus(&mut out);
-        self.message_encrypt.format_prometheus(&mut out);
         self.message_store.format_prometheus(&mut out);
-        self.message_index.format_prometheus(&mut out);
         self.message_fanout.format_prometheus(&mut out);
-        self.message_decrypt.format_prometheus(&mut out);
-        self.search.format_prometheus(&mut out);
 
         out
     }
 }
+
+/// Per-tenant HTTP API rate limit state.
+pub struct RateLimitEntry {
+    pub count: AtomicU32,
+    pub window_start: std::sync::Mutex<std::time::Instant>,
+}
+
+/// How long a cached tenant config entry is considered fresh (5 minutes).
+pub const TENANT_CACHE_TTL_SECS: u64 = 300;
 
 /// Cached tenant config for JWT validation.
 #[derive(Clone)]
@@ -116,6 +106,7 @@ pub struct TenantConfig {
     pub jwt_secret: String,
     pub jwt_issuer: Option<String>,
     pub plan: String,
+    pub cached_at: std::time::Instant,
 }
 
 /// Per-tenant counters.
@@ -140,11 +131,11 @@ pub struct AppState {
     pub connections: ConnectionRegistry,
     pub rooms: RoomRegistry,
     pub presence: PresenceTracker,
+    pub typing: TypingTracker,
     pub tenant_cache: DashMap<String, TenantConfig>,
     pub tenant_metrics: DashMap<String, TenantMetrics>,
+    pub api_rate_limits: DashMap<String, Arc<RateLimitEntry>>,
     pub start_time: std::time::Instant,
-    pub cipher: Option<Arc<dyn CipherOps>>,
-    pub veil: Option<Arc<dyn VeilOps>>,
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
@@ -157,8 +148,6 @@ pub struct AppState {
 pub struct AppStateBuilder {
     pub config: HeraldConfig,
     pub db: Arc<shroudb_storage::EmbeddedStore>,
-    pub cipher: Option<Arc<dyn CipherOps>>,
-    pub veil: Option<Arc<dyn VeilOps>>,
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
@@ -171,6 +160,7 @@ impl AppState {
                 url: w.url.clone(),
                 secret: w.secret.clone(),
                 retries: w.retries,
+                events: w.events.clone(),
             })
         });
 
@@ -180,11 +170,11 @@ impl AppState {
             connections: ConnectionRegistry::new(),
             rooms: RoomRegistry::new(),
             presence: PresenceTracker::new(),
+            typing: TypingTracker::new(),
             tenant_cache: DashMap::new(),
             tenant_metrics: DashMap::new(),
+            api_rate_limits: DashMap::new(),
             start_time: std::time::Instant::now(),
-            cipher: b.cipher,
-            veil: b.veil,
             sentry: b.sentry,
             courier: b.courier,
             chronicle: b.chronicle,
@@ -206,6 +196,7 @@ impl AppState {
                     jwt_secret: t.jwt_secret,
                     jwt_issuer: t.jwt_issuer,
                     plan: t.plan,
+                    cached_at: std::time::Instant::now(),
                 },
             );
         }
@@ -241,7 +232,7 @@ impl AppState {
         for token in &self.config.auth.api.tokens {
             let existing = store::tenants::validate_token(&*self.db, token).await?;
             if existing.is_none() {
-                store::tenants::create_token(&*self.db, token, &tenant_id).await?;
+                store::tenants::create_token(&*self.db, token, &tenant_id, None).await?;
             }
         }
 
@@ -253,6 +244,7 @@ impl AppState {
                 jwt_secret,
                 jwt_issuer,
                 plan: "self-hosted".to_string(),
+                cached_at: std::time::Instant::now(),
             },
         );
 
@@ -335,6 +327,12 @@ impl AppState {
 
     pub fn fire_webhook(&self, tenant_id: &str, event: WebhookEvent) {
         if let Some(ref config) = self.webhook_config {
+            // Check event filter
+            if let Some(ref allowed) = config.events {
+                if !allowed.iter().any(|e| e == &event.event) {
+                    return;
+                }
+            }
             self.event_bus.increment_webhooks();
             self.increment_tenant_webhooks(tenant_id);
             crate::webhook::deliver(
@@ -344,80 +342,6 @@ impl AppState {
                 self.event_bus.clone(),
             );
         }
-    }
-
-    pub async fn encrypt_body(
-        &self,
-        tenant_id: &str,
-        room_id: &str,
-        body: &str,
-    ) -> Result<String, String> {
-        let mode = self.rooms.encryption_mode(tenant_id, room_id);
-        if mode != herald_core::room::EncryptionMode::ServerEncrypted {
-            return Ok(body.to_string());
-        }
-        let cipher = self
-            .cipher
-            .as_ref()
-            .ok_or_else(|| "cipher not configured for encrypted room".to_string())?;
-        let keyring = format!("herald-{tenant_id}-room-{room_id}");
-        cipher
-            .encrypt(&keyring, body, Some(room_id))
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    pub async fn decrypt_body(
-        &self,
-        tenant_id: &str,
-        room_id: &str,
-        body: &str,
-    ) -> Result<String, String> {
-        let mode = self.rooms.encryption_mode(tenant_id, room_id);
-        if mode != herald_core::room::EncryptionMode::ServerEncrypted {
-            return Ok(body.to_string());
-        }
-        let cipher = self
-            .cipher
-            .as_ref()
-            .ok_or_else(|| "cipher not configured for encrypted room".to_string())?;
-        let keyring = format!("herald-{tenant_id}-room-{room_id}");
-        cipher
-            .decrypt(&keyring, body, Some(room_id))
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    pub async fn index_message(
-        &self,
-        tenant_id: &str,
-        room_id: &str,
-        message_id: &str,
-        body: &str,
-    ) {
-        if let Some(ref veil) = self.veil {
-            let index = format!("herald-{tenant_id}-room-{room_id}");
-            if let Err(e) = veil.put(&index, message_id, body).await {
-                tracing::warn!("veil indexing failed for {message_id}: {e}");
-            }
-        }
-    }
-
-    pub async fn search_messages(
-        &self,
-        tenant_id: &str,
-        room_id: &str,
-        query: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<SearchHit>, String> {
-        let veil = self
-            .veil
-            .as_ref()
-            .ok_or_else(|| "search not available".to_string())?;
-        let index = format!("herald-{tenant_id}-room-{room_id}");
-        veil.search(&index, query, limit)
-            .await
-            .map_err(|e| e.to_string())
     }
 
     pub async fn authorize(
@@ -460,6 +384,16 @@ impl AppState {
                 }
             }
         });
+    }
+
+    /// Evict tenant cache entries older than `TENANT_CACHE_TTL_SECS`.
+    /// Stale entries are re-populated on the next JWT validation via `hydrate_tenant_cache`
+    /// or admin API create/update.
+    pub fn evict_stale_tenants(&self) -> usize {
+        let before = self.tenant_cache.len();
+        self.tenant_cache
+            .retain(|_, config| config.cached_at.elapsed().as_secs() < TENANT_CACHE_TTL_SECS);
+        before - self.tenant_cache.len()
     }
 
     pub fn audit(

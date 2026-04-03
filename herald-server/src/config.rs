@@ -20,6 +20,8 @@ pub struct HeraldConfig {
     pub tls: Option<TlsConfig>,
     #[serde(default)]
     pub tenant_limits: TenantLimitsConfig,
+    #[serde(default)]
+    pub cors: Option<CorsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,10 +51,6 @@ fn default_max_rooms_per_tenant() -> u32 {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct ShroudbConfig {
-    pub cipher_addr: Option<String>,
-    pub cipher_token: Option<String>,
-    pub veil_addr: Option<String>,
-    pub veil_token: Option<String>,
     pub sentry_addr: Option<String>,
     pub sentry_token: Option<String>,
     pub courier_addr: Option<String>,
@@ -153,6 +151,9 @@ pub struct WebhookConfig {
     pub secret: String,
     #[serde(default = "default_webhook_retries")]
     pub retries: u32,
+    /// Event types to deliver. Empty/None = all events.
+    #[serde(default)]
+    pub events: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,6 +161,13 @@ pub struct WebhookConfig {
 pub struct TlsConfig {
     pub cert_path: String,
     pub key_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct CorsConfig {
+    /// Allowed origins. Use ["*"] for any origin (development only).
+    pub allowed_origins: Vec<String>,
 }
 
 fn default_ws_bind() -> String {
@@ -197,6 +205,72 @@ fn default_shutdown_timeout() -> u64 {
 }
 
 impl HeraldConfig {
+    /// Validate configuration values at startup. Returns descriptive errors.
+    pub fn validate(&self, multi_tenant: bool) -> anyhow::Result<()> {
+        // Server config
+        if self.server.max_messages_per_sec == 0 {
+            anyhow::bail!("server.max_messages_per_sec must be > 0");
+        }
+        if self.server.api_rate_limit == 0 {
+            anyhow::bail!("server.api_rate_limit must be > 0");
+        }
+        if self.server.shutdown_timeout_secs == 0 {
+            anyhow::bail!("server.shutdown_timeout_secs must be > 0");
+        }
+
+        // Store config
+        if self.store.message_ttl_days == 0 {
+            anyhow::bail!("store.message_ttl_days must be > 0");
+        }
+
+        // Auth config
+        if multi_tenant {
+            let token = self.auth.super_admin_token.as_deref().unwrap_or("");
+            if token.is_empty() {
+                anyhow::bail!("auth.super_admin_token is required for multi-tenant mode");
+            }
+            if token.len() < 16 {
+                anyhow::bail!("auth.super_admin_token should be at least 16 characters");
+            }
+        } else {
+            let secret = self.auth.jwt_secret.as_deref().unwrap_or("");
+            if secret.is_empty() {
+                anyhow::bail!("auth.jwt_secret is required for single-tenant mode");
+            }
+            if secret.len() < 16 {
+                anyhow::bail!("auth.jwt_secret should be at least 16 characters for security");
+            }
+        }
+
+        // TLS config
+        if let Some(ref tls) = self.tls {
+            if tls.cert_path.is_empty() {
+                anyhow::bail!("tls.cert_path must not be empty when TLS is configured");
+            }
+            if tls.key_path.is_empty() {
+                anyhow::bail!("tls.key_path must not be empty when TLS is configured");
+            }
+            if !std::path::Path::new(&tls.cert_path).exists() {
+                anyhow::bail!("tls.cert_path '{}' does not exist", tls.cert_path);
+            }
+            if !std::path::Path::new(&tls.key_path).exists() {
+                anyhow::bail!("tls.key_path '{}' does not exist", tls.key_path);
+            }
+        }
+
+        // Webhook config
+        if let Some(ref webhook) = self.webhook {
+            if webhook.url.is_empty() {
+                anyhow::bail!("webhook.url must not be empty when webhook is configured");
+            }
+            if webhook.secret.is_empty() {
+                anyhow::bail!("webhook.secret must not be empty when webhook is configured — unsigned webhooks are insecure");
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("failed to read config {path}: {e}"))?;
@@ -265,16 +339,11 @@ impl HeraldConfig {
                 retries: env("HERALD_WEBHOOK_RETRIES")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(3),
+                events: env("HERALD_WEBHOOK_EVENTS")
+                    .map(|s| s.split(',').map(|e| e.trim().to_string()).collect()),
             }),
-            shroudb: if env("HERALD_CIPHER_ADDR").is_some()
-                || env("HERALD_VEIL_ADDR").is_some()
-                || env("HERALD_SENTRY_ADDR").is_some()
-            {
+            shroudb: if env("HERALD_SENTRY_ADDR").is_some() {
                 Some(ShroudbConfig {
-                    cipher_addr: env("HERALD_CIPHER_ADDR"),
-                    cipher_token: env("HERALD_CIPHER_TOKEN"),
-                    veil_addr: env("HERALD_VEIL_ADDR"),
-                    veil_token: env("HERALD_VEIL_TOKEN"),
                     sentry_addr: env("HERALD_SENTRY_ADDR"),
                     sentry_token: env("HERALD_SENTRY_TOKEN"),
                     courier_addr: env("HERALD_COURIER_ADDR"),
@@ -299,6 +368,9 @@ impl HeraldConfig {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(10000),
             },
+            cors: env("HERALD_CORS_ORIGINS").map(|origins| CorsConfig {
+                allowed_origins: origins.split(',').map(|s| s.trim().to_string()).collect(),
+            }),
         })
     }
 

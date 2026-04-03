@@ -128,6 +128,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     state
         .connections
         .register(conn_id, tenant_id.clone(), user_id.clone(), msg_tx.clone());
+    let _gen = state.connections.increment_generation(&tenant_id, &user_id);
 
     let _ = msg_tx
         .send(ServerMessage::AuthOk {
@@ -174,18 +175,18 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     };
 
     let max_msg_per_sec = state.config.server.max_messages_per_sec;
-    let mut rate_window_start = std::time::Instant::now();
-    let mut rate_count: u32 = 0;
+    let mut tokens: f64 = max_msg_per_sec as f64;
+    let mut last_refill = std::time::Instant::now();
 
     while let Some(Ok(frame)) = ws_rx.next().await {
         match frame {
             Message::Text(text) => {
-                if rate_window_start.elapsed().as_secs() >= 1 {
-                    rate_window_start = std::time::Instant::now();
-                    rate_count = 0;
-                }
-                rate_count += 1;
-                if rate_count > max_msg_per_sec {
+                // Token bucket rate limiting (no window boundary exploit)
+                let elapsed = last_refill.elapsed().as_secs_f64();
+                last_refill = std::time::Instant::now();
+                tokens = (tokens + elapsed * max_msg_per_sec as f64).min(max_msg_per_sec as f64);
+                tokens -= 1.0;
+                if tokens < 0.0 {
                     let _ = msg_tx
                         .send(ServerMessage::error(
                             None,
@@ -236,6 +237,19 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "disconnected");
 
+    // Clear typing state and broadcast stop for any rooms this user was typing in
+    let typing_rooms = state.typing.remove_user(&tenant_id, &user_id);
+    for room_id in typing_rooms {
+        let msg = ServerMessage::Typing {
+            payload: herald_core::protocol::TypingPayload {
+                room: room_id.clone(),
+                user_id: user_id.clone(),
+                active: false,
+            },
+        };
+        crate::ws::fanout::fanout_to_room(&state, &tenant_id, &room_id, &msg, None);
+    }
+
     state.event_bus.push_event(
         crate::admin_events::EventKind::Disconnection,
         Some(tenant_id.clone()),
@@ -259,12 +273,19 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let linger_state = state.clone();
         let linger_tenant = tenant_id.clone();
         let linger_user = user_id.clone();
+        // Capture generation at disconnect time — if a reconnect happens during linger,
+        // the generation will be different and we skip the offline broadcast.
+        let gen_at_disconnect = state.connections.current_generation(&tenant_id, &user_id);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(linger_secs)).await;
-            if linger_state
+            let current_gen = linger_state
                 .connections
-                .user_connection_count(&linger_tenant, &linger_user)
-                == 0
+                .current_generation(&linger_tenant, &linger_user);
+            if current_gen == gen_at_disconnect
+                && linger_state
+                    .connections
+                    .user_connection_count(&linger_tenant, &linger_user)
+                    == 0
             {
                 broadcast_presence_change(&linger_state, &linger_tenant, &linger_user);
             }
@@ -333,31 +354,26 @@ async fn reconnect_catchup(
             tenant_id,
             room_id,
             since_ms,
-            CATCHUP_LIMIT,
+            CATCHUP_LIMIT + 1,
         )
         .await
         .unwrap_or_default();
 
         if !messages.is_empty() {
-            let mut batch = Vec::with_capacity(messages.len());
-            for m in messages {
-                let body = match state.decrypt_body(tenant_id, room_id, &m.body).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(id = %m.id.0, "skipping catch-up message: decrypt failed: {e}");
-                        continue;
-                    }
-                };
-                batch.push(MessageNewPayload {
+            let has_more = messages.len() > CATCHUP_LIMIT as usize;
+            let batch: Vec<MessageNewPayload> = messages
+                .into_iter()
+                .take(CATCHUP_LIMIT as usize)
+                .map(|m| MessageNewPayload {
                     room: m.room_id,
                     id: m.id.0,
                     seq: m.seq,
                     sender: m.sender,
-                    body,
+                    body: m.body,
                     meta: m.meta,
                     sent_at: m.sent_at,
-                });
-            }
+                })
+                .collect();
 
             info!(
                 conn = %conn_id,
@@ -365,6 +381,7 @@ async fn reconnect_catchup(
                 user = %user_id,
                 room = %room_id,
                 messages = batch.len(),
+                has_more,
                 "catch-up replay"
             );
 
@@ -374,7 +391,7 @@ async fn reconnect_catchup(
                     payload: MessagesBatchPayload {
                         room: room_id.clone(),
                         messages: batch,
-                        has_more: false,
+                        has_more,
                     },
                 })
                 .await;

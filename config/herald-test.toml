@@ -20,7 +20,5 @@ linger_secs = 5
 manual_override_ttl_secs = 3600
 
 [shroudb]
-cipher_addr = "shroudb:8201"
-veil_addr = "shroudb:8201"
 sentry_addr = "shroudb:8201"
 chronicle_addr = "shroudb:8201"

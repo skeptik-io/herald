@@ -28,10 +28,20 @@ async fn main() -> anyhow::Result<()> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.server.log_level));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .init();
 
     // Pull secrets from Keep if HERALD_KEEP_ADDR is set
     config.load_secrets_from_keep().await?;
+
+    // Validate configuration before proceeding
+    config.validate(!single_tenant)?;
 
     // Open ShroudB storage engine
     let data_dir = &config.store.path;
@@ -66,40 +76,12 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_timeout = config.server.shutdown_timeout_secs;
     let tls_config = config.tls.clone();
 
-    // Initialize ShroudB integrations — embedded by default, remote if configured.
-    // Cipher, Veil, and Sentry share Herald's storage engine (separate namespaces).
-    let cipher_store = Arc::new(shroudb_storage::EmbeddedStore::new(
-        storage.clone(),
-        "cipher",
-    ));
-    let veil_store = Arc::new(shroudb_storage::EmbeddedStore::new(storage.clone(), "veil"));
+    // Initialize ShroudB integrations — Sentry for authorization.
     let sentry_store = Arc::new(shroudb_storage::EmbeddedStore::new(
         storage.clone(),
         "sentry",
     ));
 
-    let mut cipher: Option<Arc<dyn integrations::CipherOps>> =
-        match integrations::embedded_cipher::EmbeddedCipherOps::new(cipher_store).await {
-            Ok(c) => {
-                info!("Cipher engine initialized (embedded)");
-                Some(Arc::new(c))
-            }
-            Err(e) => {
-                warn!("embedded Cipher init failed: {e}");
-                None
-            }
-        };
-    let mut veil: Option<Arc<dyn integrations::VeilOps>> =
-        match integrations::embedded_veil::EmbeddedVeilOps::new(veil_store).await {
-            Ok(v) => {
-                info!("Veil engine initialized (embedded)");
-                Some(Arc::new(v))
-            }
-            Err(e) => {
-                warn!("embedded Veil init failed: {e}");
-                None
-            }
-        };
     let mut sentry: Option<Arc<dyn integrations::SentryOps>> =
         match integrations::embedded_sentry::EmbeddedSentryOps::new(sentry_store).await {
             Ok(s) => {
@@ -118,31 +100,6 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref shroudb) = config.shroudb {
         use integrations::resilient::*;
 
-        if let Some(ref addr) = shroudb.cipher_addr {
-            match integrations::cipher::RemoteCipherOps::connect(
-                addr,
-                shroudb.cipher_token.as_deref(),
-            )
-            .await
-            {
-                Ok(c) => {
-                    info!(addr = %addr, "connected to Cipher (with circuit breaker)");
-                    cipher = Some(Arc::new(ResilientCipher::new(Arc::new(c))));
-                }
-                Err(e) => warn!(addr = %addr, error = %e, "failed to connect to Cipher"),
-            }
-        }
-        if let Some(ref addr) = shroudb.veil_addr {
-            match integrations::veil::RemoteVeilOps::connect(addr, shroudb.veil_token.as_deref())
-                .await
-            {
-                Ok(v) => {
-                    info!(addr = %addr, "connected to Veil (with circuit breaker)");
-                    veil = Some(Arc::new(ResilientVeil::new(Arc::new(v))));
-                }
-                Err(e) => warn!(addr = %addr, error = %e, "failed to connect to Veil"),
-            }
-        }
         if let Some(ref addr) = shroudb.sentry_addr {
             match integrations::sentry::RemoteSentryOps::connect(
                 addr,
@@ -191,8 +148,6 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::build(AppStateBuilder {
         config,
         db,
-        cipher,
-        veil,
         sentry,
         courier,
         chronicle,
@@ -222,9 +177,10 @@ async fn main() -> anyhow::Result<()> {
         let latest_seq = store::messages::latest_seq(&*state.db, tid, room.id.as_str())
             .await
             .unwrap_or(0);
-        state
-            .rooms
-            .create_room(tid, room.id.as_str(), latest_seq, room.encryption_mode);
+        state.rooms.create_room(tid, room.id.as_str(), latest_seq);
+        if room.archived {
+            state.rooms.set_archived(tid, room.id.as_str(), true);
+        }
 
         if let Ok(members) = store::members::list_by_room(&*state.db, tid, room.id.as_str()).await {
             for member in members {
@@ -256,6 +212,12 @@ async fn main() -> anyhow::Result<()> {
                 .event_bus
                 .record_snapshot(connections, messages, rooms, auth_failures);
 
+            // Evict stale tenant cache entries (TTL safety net)
+            let evicted = stats_state.evict_stale_tenants();
+            if evicted > 0 {
+                info!(evicted, "evicted stale tenant cache entries");
+            }
+
             // Per-tenant snapshots
             for entry in stats_state.tenant_cache.iter() {
                 let tid = entry.key();
@@ -269,6 +231,31 @@ async fn main() -> anyhow::Result<()> {
                     t_messages,
                     t_webhooks,
                     t_rooms,
+                );
+            }
+        }
+    });
+
+    // Typing TTL expiry — every 5 seconds
+    let typing_state = state.clone();
+    let typing_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let expired = typing_state.typing.expire();
+            for (tenant_id, room_id, user_id) in expired {
+                let msg = herald_core::protocol::ServerMessage::Typing {
+                    payload: herald_core::protocol::TypingPayload {
+                        room: room_id.clone(),
+                        user_id: user_id.clone(),
+                        active: false,
+                    },
+                };
+                herald_server::ws::fanout::fanout_to_room(
+                    &typing_state,
+                    &tenant_id,
+                    &room_id,
+                    &msg,
+                    None,
                 );
             }
         }
@@ -343,8 +330,21 @@ async fn main() -> anyhow::Result<()> {
         tokio::signal::ctrl_c().await?;
         info!("shutdown signal received, draining...");
         let _ = shutdown_tx.send(true);
+
+        // Notify all WebSocket clients of impending shutdown
+        state
+            .connections
+            .broadcast_all(&herald_core::protocol::ServerMessage::error(
+                None,
+                herald_core::error::ErrorCode::Internal,
+                "server shutting down",
+            ));
+
+        // Grace period for background tasks to finish their current iteration
+        tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        typing_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
             let _ = ws_handle.await;
@@ -378,8 +378,21 @@ async fn main() -> anyhow::Result<()> {
         tokio::signal::ctrl_c().await?;
         info!("shutdown signal received, draining...");
         let _ = shutdown_tx.send(true);
+
+        // Notify all WebSocket clients of impending shutdown
+        state
+            .connections
+            .broadcast_all(&herald_core::protocol::ServerMessage::error(
+                None,
+                herald_core::error::ErrorCode::Internal,
+                "server shutting down",
+            ));
+
+        // Grace period for background tasks to finish their current iteration
+        tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        typing_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
             let _ = ws_handle.await;

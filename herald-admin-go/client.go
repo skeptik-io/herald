@@ -21,6 +21,7 @@ type HeraldAdmin struct {
 	Members  *MemberNamespace
 	Messages *MessageNamespace
 	Presence *PresenceNamespace
+	Tenants  *TenantNamespace
 
 	transport *httpTransport
 }
@@ -33,6 +34,7 @@ func New(opts Options) *HeraldAdmin {
 		Members:   &MemberNamespace{t: t},
 		Messages:  &MessageNamespace{t: t},
 		Presence:  &PresenceNamespace{t: t},
+		Tenants:   &TenantNamespace{t: t},
 		transport: t,
 	}
 }
@@ -55,16 +57,12 @@ type RoomNamespace struct{ t *httpTransport }
 
 // RoomCreateOptions are optional parameters for room creation.
 type RoomCreateOptions struct {
-	EncryptionMode string `json:"encryption_mode,omitempty"`
-	Meta           any    `json:"meta,omitempty"`
+	Meta any `json:"meta,omitempty"`
 }
 
 func (ns *RoomNamespace) Create(ctx context.Context, id, name string, opts *RoomCreateOptions) (*Room, error) {
 	body := map[string]any{"id": id, "name": name}
 	if opts != nil {
-		if opts.EncryptionMode != "" {
-			body["encryption_mode"] = opts.EncryptionMode
-		}
 		if opts.Meta != nil {
 			body["meta"] = opts.Meta
 		}
@@ -102,6 +100,20 @@ func (ns *RoomNamespace) Update(ctx context.Context, id string, name *string, me
 	}
 	_, err := ns.t.request(ctx, "PATCH", "/rooms/"+url.PathEscape(id), body)
 	return err
+}
+
+func (ns *RoomNamespace) List(ctx context.Context) ([]Room, error) {
+	data, err := ns.t.request(ctx, "GET", "/rooms", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Rooms []Room `json:"rooms"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Rooms, nil
 }
 
 func (ns *RoomNamespace) Delete(ctx context.Context, id string) error {
@@ -264,4 +276,155 @@ func (ns *PresenceNamespace) GetCursors(ctx context.Context, roomID string) ([]C
 		return nil, err
 	}
 	return resp.Cursors, nil
+}
+
+// --- Observability ---
+
+// Connections returns active connection info from the admin endpoint.
+func (h *HeraldAdmin) Connections(ctx context.Context) (json.RawMessage, error) {
+	data, err := h.transport.request(ctx, "GET", "/admin/connections", nil)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+// EventListOptions are optional parameters for listing events.
+type EventListOptions struct {
+	Limit *int
+}
+
+// Events returns recent server events from the admin endpoint.
+func (h *HeraldAdmin) Events(ctx context.Context, opts *EventListOptions) (json.RawMessage, error) {
+	path := "/admin/events"
+	if opts != nil && opts.Limit != nil {
+		path += fmt.Sprintf("?limit=%d", *opts.Limit)
+	}
+	data, err := h.transport.request(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+// ErrorListOptions are optional parameters for listing errors.
+type ErrorListOptions struct {
+	Limit    *int
+	Category *string
+}
+
+// Errors returns recent server errors from the admin endpoint.
+func (h *HeraldAdmin) Errors(ctx context.Context, opts *ErrorListOptions) (json.RawMessage, error) {
+	path := "/admin/errors"
+	params := url.Values{}
+	if opts != nil {
+		if opts.Limit != nil {
+			params.Set("limit", fmt.Sprint(*opts.Limit))
+		}
+		if opts.Category != nil {
+			params.Set("category", *opts.Category)
+		}
+	}
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	data, err := h.transport.request(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+// Stats returns server stats from the admin endpoint.
+func (h *HeraldAdmin) Stats(ctx context.Context) (json.RawMessage, error) {
+	data, err := h.transport.request(ctx, "GET", "/admin/stats", nil)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+// --- Tenant Management ---
+
+// TenantNamespace provides tenant management operations via /admin/tenants.
+type TenantNamespace struct{ t *httpTransport }
+
+func (ns *TenantNamespace) Create(ctx context.Context, id, name, jwtSecret string) (*Tenant, error) {
+	data, err := ns.t.request(ctx, "POST", "/admin/tenants", map[string]string{
+		"id": id, "name": name, "jwt_secret": jwtSecret,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var t Tenant
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (ns *TenantNamespace) List(ctx context.Context) ([]Tenant, error) {
+	data, err := ns.t.request(ctx, "GET", "/admin/tenants", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Tenants []Tenant `json:"tenants"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tenants, nil
+}
+
+func (ns *TenantNamespace) Get(ctx context.Context, id string) (*Tenant, error) {
+	data, err := ns.t.request(ctx, "GET", "/admin/tenants/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	var t Tenant
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (ns *TenantNamespace) Update(ctx context.Context, id string, name *string, plan *string) error {
+	body := map[string]any{}
+	if name != nil {
+		body["name"] = *name
+	}
+	if plan != nil {
+		body["plan"] = *plan
+	}
+	_, err := ns.t.request(ctx, "PATCH", "/admin/tenants/"+url.PathEscape(id), body)
+	return err
+}
+
+func (ns *TenantNamespace) Delete(ctx context.Context, id string) error {
+	_, err := ns.t.request(ctx, "DELETE", "/admin/tenants/"+url.PathEscape(id), nil)
+	return err
+}
+
+func (ns *TenantNamespace) CreateToken(ctx context.Context, tenantID string, scope *string) (string, error) {
+	var body any
+	if scope != nil {
+		body = map[string]string{"scope": *scope}
+	}
+	data, err := ns.t.request(ctx, "POST", "/admin/tenants/"+url.PathEscape(tenantID)+"/tokens", body)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
+	return resp.Token, nil
+}
+
+func (ns *TenantNamespace) DeleteToken(ctx context.Context, tenantID, token string) error {
+	_, err := ns.t.request(ctx, "DELETE", "/admin/tenants/"+url.PathEscape(tenantID)+"/tokens/"+url.PathEscape(token), nil)
+	return err
 }

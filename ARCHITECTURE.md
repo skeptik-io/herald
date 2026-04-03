@@ -2,7 +2,7 @@
 
 Herald is a product-agnostic WebSocket chat server. It handles rooms, messages, presence, cursors, and real-time fan-out. It does not know about any consuming application's domain model.
 
-Herald is a standalone Rust project. It optionally integrates with [ShroudB](https://github.com/nicklucas/shroudb) for message encryption, encrypted search, authorization, offline notifications, and audit — but runs independently without it.
+Herald is a standalone Rust project. It optionally integrates with [ShroudB](https://github.com/nicklucas/shroudb) for authorization, offline notifications, and audit — but runs independently without it. Message bodies are opaque — Herald stores and delivers them as-is. Consumers handle their own encryption and search.
 
 ---
 
@@ -10,17 +10,16 @@ Herald is a standalone Rust project. It optionally integrates with [ShroudB](htt
 
 1. [System Architecture](#1-system-architecture)
 2. [Generic Primitives](#2-generic-primitives)
-3. [Encryption Model](#3-encryption-model)
-4. [WebSocket Protocol](#4-websocket-protocol)
-5. [HTTP API](#5-http-api)
-6. [Connection Management](#6-connection-management)
-7. [Presence Model](#7-presence-model)
-8. [Fan-Out Model](#8-fan-out-model)
-9. [Storage Model](#9-storage-model)
-10. [Room Lifecycle](#10-room-lifecycle)
-11. [Crate Structure](#11-crate-structure)
-12. [Configuration](#12-configuration)
-13. [Implementation Phasing](#13-implementation-phasing)
+3. [WebSocket Protocol](#3-websocket-protocol)
+4. [HTTP API](#4-http-api)
+5. [Connection Management](#5-connection-management)
+6. [Presence Model](#6-presence-model)
+7. [Fan-Out Model](#7-fan-out-model)
+8. [Storage Model](#8-storage-model)
+9. [Room Lifecycle](#9-room-lifecycle)
+10. [Crate Structure](#10-crate-structure)
+11. [Configuration](#11-configuration)
+12. [Implementation Phasing](#12-implementation-phasing)
 
 ---
 
@@ -49,13 +48,12 @@ Herald is a standalone Rust project. It optionally integrates with [ShroudB](htt
   │    ShroudB Moat     │
   │     :8200 / :8201   │
   │                     │
-  │  Cipher  │  Veil    │
   │  Sentry  │  Courier │
   │  Chronicle          │
   └─────────────────────┘
 ```
 
-Herald and ShroudB are separate services. Herald connects to Moat (or individual ShroudB engines) over TCP using published Rust client crates as regular Cargo dependencies. ShroudB integration is behind a `shroudb` feature flag — when the feature is disabled or the `[shroudb]` config section is absent, Herald operates in plaintext mode.
+Herald and ShroudB are separate services. Herald connects to Moat (or individual ShroudB engines) over TCP using published Rust client crates as regular Cargo dependencies. ShroudB Sentry integration is behind a `shroudb` feature flag — when the feature is disabled or the `[shroudb]` config section is absent, Herald relies on JWT `rooms` claim for authorization only.
 
 ### What Herald Is
 
@@ -68,7 +66,7 @@ Herald and ShroudB are separate services. Herald connects to Moat (or individual
 ### What Herald Is Not
 
 - Not a ShroudB engine (no RESP3, no Moat embedding, no engine conventions)
-- Storage is ShroudB WAL engine — encrypted at rest, ~80µs writes
+- Storage is ShroudB WAL engine — ~80µs writes
 - Not an application server (no business logic, no domain awareness)
 
 ---
@@ -78,7 +76,7 @@ Herald and ShroudB are separate services. Herald connects to Moat (or individual
 | Concept | Description |
 |---------|-------------|
 | **Room** | A named channel with a member list and an opaque `meta` JSON blob. The app defines what rooms mean (DMs, group chats, support threads) via `meta`. |
-| **Message** | A text `body` + opaque `meta` JSON + sender ID + monotonic sequence number. Herald stores and delivers messages but never interprets `meta`. |
+| **Message** | An opaque `body` + opaque `meta` JSON + sender ID + monotonic sequence number. Herald stores and delivers messages but never interprets `body` or `meta`. |
 | **Member** | A user ID + role (`owner`, `admin`, `member`) in a room. Roles are informational — Herald does not enforce role-based permissions beyond room membership. |
 | **Presence** | A user's online status, derived from WebSocket connections with manual override support. One of: `online`, `away`, `dnd`, `offline`. |
 | **Cursor** | A per-user, per-room read position expressed as a sequence number. The gap between a user's cursor and the room's latest sequence is the unread count. |
@@ -100,69 +98,7 @@ Both rooms and messages carry an opaque `meta: JsonValue` field. Herald stores i
 
 ---
 
-## 3. Encryption Model
-
-### Modes
-
-Herald supports per-room encryption modes:
-
-| Mode | Description | ShroudB Required |
-|------|-------------|-----------------|
-| `plaintext` | No encryption. Messages stored and delivered as-is. | No |
-| `server-encrypted` | Encrypted at rest via Cipher. Searchable via Veil. Server sees plaintext transiently during ingest, then zeroizes. | Yes |
-| `e2e` *(future)* | True E2EE. Cipher `GENERATE_DATA_KEY` per room. Browsers encrypt locally. Herald stores opaque ciphertext. Search unavailable. | Yes |
-
-Default mode is `plaintext`. The app sets the mode when creating a room via the HTTP API.
-
-### Threat Model (`server-encrypted`)
-
-| Threat | Mitigated? | Mechanism |
-|--------|-----------|-----------|
-| Database/disk breach | Yes | Messages encrypted via Cipher (embedded) before WAL write |
-| Network sniffing (client ↔ Herald) | Yes | TLS on WebSocket |
-| Network sniffing (Herald ↔ ShroudB) | Yes | TLS on engine connections |
-| Herald memory dump | Partially | Plaintext transient, zeroized after pipeline completes |
-| Rogue Herald operator | No | Operator can observe plaintext during ingest |
-
-### Why `server-encrypted` Is Not True E2EE
-
-ShroudB Veil requires server-side plaintext to build HMAC-SHA256 blind indexes for search. The HMAC key is server-held by design — distributing it to browsers would allow brute-force attacks against the index. This is a deliberate tradeoff: `server-encrypted` gives encrypted storage + search, `e2e` gives true E2EE without search.
-
-### Message Ingest Pipeline
-
-```
-1. Client sends plaintext message over TLS WebSocket
-2. Herald validates JWT + room membership
-3. Assign sequence number (atomic per room)
-
-── If room mode is `server-encrypted` and ShroudB is configured: ──
-4. In parallel:
-   a. Cipher ENCRYPT (keyring: herald.room.{room_id}, AAD: room_id)
-   b. Veil PUT (index: herald.room.{room_id}, entry: msg_{id}, body)
-   c. Chronicle INGEST (event: message.send, room, sender, timestamp)
-5. Zeroize plaintext from memory
-6. Store encrypted body in catch-up buffer
-
-── If room mode is `plaintext`: ──
-4. Store plaintext body in catch-up buffer
-
-── Both modes: ──
-7. Fan-out message to all subscribed connections
-8. POST webhook to app backend (with signature)
-9. If Courier configured: deliver notification to offline room members
-```
-
-### Per-Room ShroudB Resources
-
-When a room is created with `server-encrypted` mode:
-- Cipher keyring: `herald.room.{room_id}` (algorithm: `aes-256-gcm`)
-- Veil index: `herald.room.{room_id}`
-
-Key rotation is managed by Cipher's built-in rotation lifecycle (configurable `rotation_days` and `drain_days`).
-
----
-
-## 4. WebSocket Protocol
+## 3. WebSocket Protocol
 
 Port `6200`. JSON text frames only — binary frames are rejected and the connection is closed.
 
@@ -258,7 +194,7 @@ Server responds with one `subscribed` message per room.
 }
 ```
 
-- `body` — Message content (plaintext)
+- `body` — Message content (opaque, passed through as-is)
 - `meta` — Opaque JSON, passed through unmodified
 
 #### `cursor.update`
@@ -318,22 +254,6 @@ Fetch historical messages for scroll-back or catch-up.
 
 - `before` — Sequence number. Returns messages with `seq < before`.
 - `limit` — Max messages (server-capped at 100).
-
-#### `messages.search`
-
-Search messages via Veil blind indexes. Returns `SEARCH_UNAVAILABLE` if Veil is not configured.
-
-```json
-{
-  "type": "messages.search",
-  "ref": "stu901",
-  "payload": {
-    "room": "room_a",
-    "query": "payment link",
-    "limit": 20
-  }
-}
-```
 
 #### `ping`
 
@@ -435,7 +355,7 @@ Sent to the originating connection only.
 
 #### `messages.batch`
 
-Response to `messages.fetch`, `messages.search`, and reconnect catch-up.
+Response to `messages.fetch` and reconnect catch-up.
 
 ```json
 {
@@ -557,7 +477,6 @@ Broadcast to room subscribers. Ephemeral.
 | `ROOM_NOT_FOUND` | Room does not exist |
 | `RATE_LIMITED` | Too many requests |
 | `BAD_REQUEST` | Malformed frame or invalid payload |
-| `SEARCH_UNAVAILABLE` | Veil not configured or room is `plaintext` mode |
 | `INTERNAL` | Server error |
 
 ### JWT Claims
@@ -586,7 +505,7 @@ Herald validates the signature using the configured HMAC secret or RSA/EC public
 
 ---
 
-## 5. HTTP API
+## 4. HTTP API
 
 Port `6201`. Backend-to-Herald communication. Authenticated via `Authorization: Bearer <token>` where `<token>` is one of the values in `auth.api.tokens` in Herald's config.
 
@@ -602,18 +521,12 @@ Create a room.
 {
   "id": "room_abc",
   "name": "General Chat",
-  "encryption_mode": "server-encrypted",
   "meta": { "type": "dm", "app_id": "fanvalt" }
 }
 ```
 
 - `id` — Client-generated room ID. Must be unique.
-- `encryption_mode` — `plaintext` (default) or `server-encrypted`
 - `meta` — Opaque JSON, stored and returned unchanged
-
-If `encryption_mode` is `server-encrypted` and ShroudB is configured, Herald creates:
-- Cipher keyring: `herald.room.{id}`
-- Veil index: `herald.room.{id}`
 
 Response: `201 Created`
 
@@ -621,7 +534,6 @@ Response: `201 Created`
 {
   "id": "room_abc",
   "name": "General Chat",
-  "encryption_mode": "server-encrypted",
   "meta": { "type": "dm", "app_id": "fanvalt" },
   "created_at": 1712000000000
 }
@@ -637,7 +549,7 @@ Update room `name` or `meta`. Broadcasts `room.updated` to subscribers.
 
 #### `DELETE /rooms/:id`
 
-Deletes the room, all messages from the catch-up buffer, and Veil index entries. The Cipher keyring is NOT deleted (audit trail / legal hold). Broadcasts `room.deleted` to all subscribers and terminates their subscriptions.
+Deletes the room and all messages from the catch-up buffer. Broadcasts `room.deleted` to all subscribers and terminates their subscriptions.
 
 Response: `204 No Content`
 
@@ -693,7 +605,7 @@ Inject a message from the backend (system messages, bot messages, migration impo
 }
 ```
 
-Triggers the full ingest pipeline (encryption, indexing, fan-out, webhook).
+Triggers the full ingest pipeline (store, fan-out, webhook).
 
 #### `GET /rooms/:id/messages`
 
@@ -715,19 +627,6 @@ Response:
   "has_more": true
 }
 ```
-
-Bodies are decrypted before returning (if `server-encrypted` mode).
-
-#### `GET /rooms/:id/messages/search`
-
-Search via Veil.
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `q` | string | Search query |
-| `limit` | number | Max results (default 20) |
-
-Returns matching messages (decrypted). Returns `503` if Veil is not configured.
 
 ### Presence & Cursors
 
@@ -767,7 +666,7 @@ All room members' presence.
   "connections": 142,
   "rooms": 87,
   "uptime_secs": 3600,
-  "shroudb": true
+  "sentry": true
 }
 ```
 
@@ -777,7 +676,7 @@ Prometheus-format metrics (connections, messages/sec, fan-out latency, etc.).
 
 ---
 
-## 6. Connection Management
+## 5. Connection Management
 
 ### Multi-Tab
 
@@ -835,7 +734,7 @@ The `last_seen_at` approach is deliberately coarse. It may deliver some duplicat
 
 ---
 
-## 7. Presence Model
+## 6. Presence Model
 
 Presence is derived from WebSocket connection state with manual override support. No external dependencies (no Redis, no TTLs, no heartbeat polling).
 
@@ -868,7 +767,7 @@ Presence changes are broadcast only to rooms the affected user is a member of. I
 
 ---
 
-## 8. Fan-Out Model
+## 7. Fan-Out Model
 
 Herald uses an in-memory pub/sub model. No external message broker.
 
@@ -896,14 +795,13 @@ ConnectionHandle {
 
 1. Message arrives (from WebSocket `message.send` or HTTP `POST /rooms/:id/messages`)
 2. Sequence number assigned: `room.sequence.fetch_add(1, SeqCst)`
-3. Encryption pipeline runs (if `server-encrypted` mode)
-4. Message stored in ShroudB WAL storage
-5. For each user in `room.subscribers`:
+3. Message stored in ShroudB WAL storage
+4. For each user in `room.subscribers`:
    - Look up all `ConnId`s for that user
    - Send the message JSON frame via each connection's `mpsc::Sender`
    - If the channel is full (backpressure), try for 100ms, then drop for that connection
-6. Webhook POST to app backend
-7. For offline members: Courier notification (if configured)
+5. Webhook POST to app backend
+6. For offline members: Courier notification (if configured)
 
 ### Sender Receives Own Message
 
@@ -927,7 +825,7 @@ Each connection has a bounded `mpsc` channel (capacity: 256 frames). If the chan
 
 ---
 
-## 9. Storage Model
+## 8. Storage Model
 
 ### Herald: WAL Catch-Up Buffer
 
@@ -937,10 +835,7 @@ Herald uses ShroudB WAL engine as the primary persistence layer for reconnect ca
 CREATE TABLE rooms (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
-    encryption_mode TEXT NOT NULL DEFAULT 'plaintext',
     meta            TEXT,            -- JSON blob
-    cipher_keyring  TEXT,            -- ShroudB keyring name (if encrypted)
-    veil_index      TEXT,            -- ShroudB index name (if encrypted)
     created_at      INTEGER NOT NULL
 );
 
@@ -957,7 +852,7 @@ CREATE TABLE messages (
     room_id    TEXT NOT NULL,
     seq        INTEGER NOT NULL,
     sender     TEXT NOT NULL,
-    body       BLOB NOT NULL,        -- plaintext or Cipher ciphertext
+    body       BLOB NOT NULL,        -- opaque bytes, passed through as-is
     meta       TEXT,                  -- JSON blob (always plaintext)
     sent_at    INTEGER NOT NULL,
     expires_at INTEGER NOT NULL       -- TTL for automatic cleanup
@@ -1029,25 +924,22 @@ Fire-and-forget with retries: 3 attempts with exponential backoff (1s, 2s, 4s). 
 
 #### What the App Persists
 
-The webhook delivers plaintext message bodies (decrypted if `server-encrypted` mode). The app persists messages in its own database for:
+The webhook delivers message bodies as-is (opaque). The app persists messages in its own database for:
 
 - Long-term storage (beyond Herald's 7-day buffer)
 - Domain-specific queries (PPV resolution, attachment access control, etc.)
-- Full-text search (Postgres FTS, Elasticsearch, etc. — independent of Veil)
+- Full-text search (Postgres FTS, Elasticsearch, etc.)
 - Business analytics
 
 ---
 
-## 10. Room Lifecycle
+## 9. Room Lifecycle
 
 ### Creation
 
 1. App backend calls `POST /rooms` on Herald's HTTP API
 2. Herald inserts room record into WAL
-3. If `encryption_mode` is `server-encrypted` and ShroudB is configured:
-   - Create Cipher keyring: `KEYRING CREATE herald.room.{id} aes-256-gcm`
-   - Create Veil index: `INDEX CREATE herald.room.{id}`
-4. Return `201 Created`
+3. Return `201 Created`
 
 ### Member Management
 
@@ -1063,13 +955,11 @@ The webhook delivers plaintext message bodies (decrypted if `server-encrypted` m
 2. Herald broadcasts `room.deleted` to all subscribers
 3. Herald terminates all subscriptions for this room
 4. Herald deletes all messages from catch-up buffer
-5. Herald deletes Veil index entries (if applicable)
-6. Herald does NOT delete the Cipher keyring (legal hold / audit trail)
-7. Herald removes room from WAL and in-memory state
+5. Herald removes room from WAL and in-memory state
 
 ---
 
-## 11. Crate Structure
+## 10. Crate Structure
 
 ```
 herald/
@@ -1083,7 +973,7 @@ herald/
 ├── herald-core/                    # Domain types (no I/O, no async)
 │   └── src/
 │       ├── lib.rs
-│       ├── room.rs                 # Room, RoomId, RoomConfig, EncryptionMode
+│       ├── room.rs                 # Room, RoomId, RoomConfig
 │       ├── message.rs              # Message, MessageId, Sequence
 │       ├── member.rs               # Member, Role
 │       ├── presence.rs             # PresenceStatus, ManualOverride
@@ -1109,15 +999,13 @@ herald/
 │       │   ├── mod.rs              # Axum router
 │       │   ├── rooms.rs            # CRUD
 │       │   ├── members.rs          # Member management
-│       │   ├── messages.rs         # Query, inject, search
+│       │   ├── messages.rs         # Query, inject
 │       │   ├── presence.rs         # Presence queries
 │       │   ├── cursors.rs          # Cursor queries
 │       │   └── health.rs           # Health + metrics
 │       │
 │       ├── integrations/           # Optional ShroudB integration
 │       │   ├── mod.rs              # Capabilities struct (all Option<T>)
-│       │   ├── cipher.rs           # Encrypt/decrypt via shroudb-cipher-client
-│       │   ├── veil.rs             # Index/search via shroudb-veil-client
 │       │   ├── sentry.rs           # Policy eval via shroudb-sentry-client
 │       │   ├── courier.rs          # Offline delivery via shroudb-courier-client
 │       │   └── chronicle.rs        # Audit via shroudb-chronicle-client
@@ -1136,7 +1024,7 @@ herald/
 │       │   └── presence.rs         # PresenceTracker
 │       │
 │       ├── pipeline/               # Message processing
-│       │   └── ingest.rs           # validate → encrypt → index → store → fanout → webhook
+│       │   └── ingest.rs           # validate → store → fanout → webhook
 │       │
 │       └── webhook/                # Outbound webhooks
 │           └── mod.rs              # Signed delivery with retries
@@ -1174,8 +1062,6 @@ tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive"] }
 
 # Optional — ShroudB client crates from the shroudb crate registry
-shroudb-cipher-client = { version = "1", optional = true }
-shroudb-veil-client = { version = "1", optional = true }
 shroudb-sentry-client = { version = "1", optional = true }
 shroudb-courier-client = { version = "1", optional = true }
 shroudb-chronicle-client = { version = "1", optional = true }
@@ -1183,8 +1069,6 @@ shroudb-chronicle-client = { version = "1", optional = true }
 [features]
 default = []
 shroudb = [
-    "shroudb-cipher-client",
-    "shroudb-veil-client",
     "shroudb-sentry-client",
     "shroudb-courier-client",
     "shroudb-chronicle-client",
@@ -1197,15 +1081,14 @@ All ShroudB integration is optional. Herald operates in degraded mode when engin
 
 | Feature | Without ShroudB | With ShroudB |
 |---------|----------------|--------------|
-| Message storage | Plaintext in WAL | Cipher-encrypted in WAL |
-| Search | Unavailable (`SEARCH_UNAVAILABLE`) | Veil blind index search |
+| Message storage | Opaque body in WAL | Opaque body in WAL |
 | Room authorization | JWT `rooms` claim only | JWT + Sentry policy eval |
 | Offline notifications | Skipped | Courier delivery |
 | Audit trail | Local structured logs | Chronicle audit events |
 
 ---
 
-## 12. Configuration
+## 11. Configuration
 
 See `herald.toml.example` for a complete annotated example.
 
@@ -1243,15 +1126,13 @@ auth_token = "herald-service-token"
 
 ---
 
-## 13. Implementation Phasing
+## 12. Implementation Phasing
 
 | Phase | Scope | ShroudB? |
 |-------|-------|----------|
-| **1. Skeleton** | `herald-core` types. `herald-server` with axum + WebSocket. Auth, subscribe, send/receive with in-memory state. WAL store. Plaintext only. | No |
+| **1. Skeleton** | `herald-core` types. `herald-server` with axum + WebSocket. Auth, subscribe, send/receive with in-memory state. WAL store. | No |
 | **2. Fan-out + Presence** | ConnectionRegistry, RoomRegistry, PresenceTracker. Multi-connection fan-out. Cursors. Reconnect catch-up via `last_seen_at`. | No |
 | **3. HTTP API + Webhook** | Room CRUD, member management, message query/inject. Signed webhook delivery with retries. | No |
-| **4. Cipher Integration** | Per-room keyrings. Encrypt/decrypt message pipeline. Zeroization. `server-encrypted` room mode. | Yes |
-| **5. Veil Integration** | Per-room indexes. Message indexing on ingest. `messages.search` endpoint. | Yes |
-| **6. Sentry + Courier + Chronicle** | Optional Sentry policy eval. Courier offline notifications. Chronicle audit trail. | Yes |
-| **7. TypeScript SDK** | `herald-sdk-typescript` — HeraldClient, reconnect with backoff, message dedup, client-side store. | No |
-| **8. Hardening** | Rate limiting. TLS config. Prometheus metrics. Graceful shutdown. Docker image. | No |
+| **4. Sentry + Courier + Chronicle** | Optional Sentry policy eval. Courier offline notifications. Chronicle audit trail. | Yes |
+| **5. TypeScript SDK** | `herald-sdk-typescript` — HeraldClient, reconnect with backoff, message dedup, client-side store. | No |
+| **6. Hardening** | Rate limiting. TLS config. Prometheus metrics. Graceful shutdown. Docker image. | No |

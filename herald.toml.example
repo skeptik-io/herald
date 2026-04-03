@@ -67,14 +67,10 @@ manual_override_ttl_secs = 14400    # 4 hours — DND/away expiry
 # ----------------------------------------------------------------------
 # ShroudB Remote Engines (optional)
 # ----------------------------------------------------------------------
-# By default, Cipher/Veil/Sentry run embedded (in-process).
+# By default, Sentry runs embedded (in-process).
 # Set these to use remote TCP engines instead.
 
 # [shroudb]
-# cipher_addr = "127.0.0.1:6599"
-# cipher_token = "herald-cipher-token"
-# veil_addr = "127.0.0.1:6799"
-# veil_token = "herald-veil-token"
 # sentry_addr = "127.0.0.1:6899"
 # sentry_token = "herald-sentry-token"
 # courier_addr = "127.0.0.1:6999"

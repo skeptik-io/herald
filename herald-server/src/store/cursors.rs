@@ -87,3 +87,67 @@ pub async fn list_by_room<S: Store>(
     }
     Ok(cursors)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_cursor_upsert_and_get() {
+        let store = crate::store::test_store().await;
+        upsert(&*store, "t1", "r1", "u1", 5, 1000).await.unwrap();
+
+        let seq = get(&*store, "t1", "r1", "u1").await.unwrap();
+        assert_eq!(seq, 5);
+
+        // Missing cursor returns 0
+        let seq = get(&*store, "t1", "r1", "nope").await.unwrap();
+        assert_eq!(seq, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_max_semantics() {
+        let store = crate::store::test_store().await;
+        upsert(&*store, "t1", "r1", "u1", 10, 1000).await.unwrap();
+        // Lower seq should not overwrite
+        upsert(&*store, "t1", "r1", "u1", 5, 2000).await.unwrap();
+
+        let seq = get(&*store, "t1", "r1", "u1").await.unwrap();
+        assert_eq!(seq, 10);
+
+        // Higher seq should overwrite
+        upsert(&*store, "t1", "r1", "u1", 20, 3000).await.unwrap();
+        let seq = get(&*store, "t1", "r1", "u1").await.unwrap();
+        assert_eq!(seq, 20);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_list_by_room() {
+        let store = crate::store::test_store().await;
+        for i in 0..3 {
+            upsert(&*store, "t1", "r1", &format!("u{i}"), i + 1, 1000)
+                .await
+                .unwrap();
+        }
+        // Different room
+        upsert(&*store, "t1", "r2", "u0", 1, 1000).await.unwrap();
+
+        let cursors = list_by_room(&*store, "t1", "r1").await.unwrap();
+        assert_eq!(cursors.len(), 3);
+
+        let cursors = list_by_room(&*store, "t1", "r2").await.unwrap();
+        assert_eq!(cursors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_tenant_isolation() {
+        let store = crate::store::test_store().await;
+        upsert(&*store, "t1", "r1", "u1", 5, 1000).await.unwrap();
+        upsert(&*store, "t2", "r1", "u1", 10, 1000).await.unwrap();
+
+        let seq1 = get(&*store, "t1", "r1", "u1").await.unwrap();
+        let seq2 = get(&*store, "t2", "r1", "u1").await.unwrap();
+        assert_eq!(seq1, 5);
+        assert_eq!(seq2, 10);
+    }
+}

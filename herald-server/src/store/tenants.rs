@@ -85,15 +85,28 @@ pub async fn delete<S: Store>(store: &S, id: &str) -> Result<bool, anyhow::Error
 }
 
 // --- API tokens ---
-// Key format: "{token}" → value: "{tenant_id}"
+// Key format: "{token}" → value: JSON ApiToken (or legacy plain tenant_id)
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApiToken {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub scope: Option<String>, // "read-only", "room:chat", etc. None = full access
+}
 
 pub async fn create_token<S: Store>(
     store: &S,
     token: &str,
     tenant_id: &str,
+    scope: Option<&str>,
 ) -> Result<(), anyhow::Error> {
+    let api_token = ApiToken {
+        tenant_id: tenant_id.to_string(),
+        scope: scope.map(String::from),
+    };
+    let value = serde_json::to_vec(&api_token)?;
     store
-        .put(NS_API_TOKENS, token.as_bytes(), tenant_id.as_bytes(), None)
+        .put(NS_API_TOKENS, token.as_bytes(), &value, None)
         .await?;
     Ok(())
 }
@@ -101,9 +114,20 @@ pub async fn create_token<S: Store>(
 pub async fn validate_token<S: Store>(
     store: &S,
     token: &str,
-) -> Result<Option<String>, anyhow::Error> {
+) -> Result<Option<ApiToken>, anyhow::Error> {
     match store.get(NS_API_TOKENS, token.as_bytes(), None).await {
-        Ok(entry) => Ok(Some(String::from_utf8(entry.value)?)),
+        Ok(entry) => {
+            // Try JSON format first (new), fall back to plain tenant_id (legacy)
+            if let Ok(api_token) = serde_json::from_slice::<ApiToken>(&entry.value) {
+                Ok(Some(api_token))
+            } else {
+                let tenant_id = String::from_utf8(entry.value)?;
+                Ok(Some(ApiToken {
+                    tenant_id,
+                    scope: None,
+                }))
+            }
+        }
         Err(shroudb_store::StoreError::NotFound) => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -117,7 +141,13 @@ pub async fn delete_token<S: Store>(
     // Verify token belongs to this tenant
     match store.get(NS_API_TOKENS, token.as_bytes(), None).await {
         Ok(entry) => {
-            if entry.value != tenant_id.as_bytes() {
+            // Check tenant ownership — handle both JSON and legacy formats
+            let owner = if let Ok(api_token) = serde_json::from_slice::<ApiToken>(&entry.value) {
+                api_token.tenant_id
+            } else {
+                String::from_utf8(entry.value)?
+            };
+            if owner != tenant_id {
                 return Ok(false);
             }
             store.delete(NS_API_TOKENS, token.as_bytes()).await?;
@@ -131,7 +161,7 @@ pub async fn delete_token<S: Store>(
 pub async fn list_tokens<S: Store>(
     store: &S,
     tenant_id: &str,
-) -> Result<Vec<String>, anyhow::Error> {
+) -> Result<Vec<serde_json::Value>, anyhow::Error> {
     // Scan all tokens and filter by tenant_id
     let mut tokens = Vec::new();
     let mut cursor = None;
@@ -141,8 +171,17 @@ pub async fn list_tokens<S: Store>(
             .await?;
         for key in &page.keys {
             if let Ok(entry) = store.get(NS_API_TOKENS, key, None).await {
-                if entry.value == tenant_id.as_bytes() {
-                    tokens.push(String::from_utf8_lossy(key).to_string());
+                let (tid, scope) =
+                    if let Ok(api_token) = serde_json::from_slice::<ApiToken>(&entry.value) {
+                        (api_token.tenant_id, api_token.scope)
+                    } else {
+                        (String::from_utf8_lossy(&entry.value).to_string(), None)
+                    };
+                if tid == tenant_id {
+                    tokens.push(serde_json::json!({
+                        "token": String::from_utf8_lossy(key),
+                        "scope": scope,
+                    }));
                 }
             }
         }
@@ -152,4 +191,119 @@ pub async fn list_tokens<S: Store>(
         cursor = page.cursor;
     }
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tenant_crud() {
+        let store = crate::store::test_store().await;
+        let tenant = Tenant {
+            id: "t1".to_string(),
+            name: "Test".to_string(),
+            jwt_secret: "secret".to_string(),
+            jwt_issuer: None,
+            plan: "free".to_string(),
+            config: serde_json::json!({}),
+            created_at: 1000,
+        };
+        insert(&*store, &tenant).await.unwrap();
+
+        let got = get(&*store, "t1").await.unwrap().unwrap();
+        assert_eq!(got.id, "t1");
+        assert_eq!(got.name, "Test");
+
+        assert!(get(&*store, "nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tenant_list() {
+        let store = crate::store::test_store().await;
+        for i in 0..3 {
+            let t = Tenant {
+                id: format!("t{i}"),
+                name: format!("T{i}"),
+                jwt_secret: "s".into(),
+                jwt_issuer: None,
+                plan: "free".into(),
+                config: serde_json::json!({}),
+                created_at: 1000,
+            };
+            insert(&*store, &t).await.unwrap();
+        }
+        let all = list(&*store).await.unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_tenant_update() {
+        let store = crate::store::test_store().await;
+        let t = Tenant {
+            id: "t1".into(),
+            name: "Old".into(),
+            jwt_secret: "s".into(),
+            jwt_issuer: None,
+            plan: "free".into(),
+            config: serde_json::json!({}),
+            created_at: 1000,
+        };
+        insert(&*store, &t).await.unwrap();
+
+        assert!(update(&*store, "t1", Some("New"), None, None)
+            .await
+            .unwrap());
+        let got = get(&*store, "t1").await.unwrap().unwrap();
+        assert_eq!(got.name, "New");
+
+        assert!(!update(&*store, "nope", Some("X"), None, None)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_tenant_delete() {
+        let store = crate::store::test_store().await;
+        let t = Tenant {
+            id: "t1".into(),
+            name: "T".into(),
+            jwt_secret: "s".into(),
+            jwt_issuer: None,
+            plan: "free".into(),
+            config: serde_json::json!({}),
+            created_at: 1000,
+        };
+        insert(&*store, &t).await.unwrap();
+
+        assert!(delete(&*store, "t1").await.unwrap());
+        assert!(get(&*store, "t1").await.unwrap().is_none());
+        assert!(!delete(&*store, "t1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_api_tokens() {
+        let store = crate::store::test_store().await;
+        create_token(&*store, "tok1", "t1", None).await.unwrap();
+        create_token(&*store, "tok2", "t1", Some("read-only"))
+            .await
+            .unwrap();
+        create_token(&*store, "tok3", "t2", None).await.unwrap();
+
+        let v = validate_token(&*store, "tok1").await.unwrap().unwrap();
+        assert_eq!(v.tenant_id, "t1");
+        assert!(v.scope.is_none());
+
+        let v = validate_token(&*store, "tok2").await.unwrap().unwrap();
+        assert_eq!(v.scope, Some("read-only".to_string()));
+
+        assert!(validate_token(&*store, "missing").await.unwrap().is_none());
+
+        let tokens = list_tokens(&*store, "t1").await.unwrap();
+        assert_eq!(tokens.len(), 2);
+
+        assert!(delete_token(&*store, "tok1", "t1").await.unwrap());
+        assert!(!delete_token(&*store, "tok1", "t1").await.unwrap());
+        assert!(!delete_token(&*store, "tok3", "t1").await.unwrap());
+    }
 }

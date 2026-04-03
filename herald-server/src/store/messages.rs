@@ -162,6 +162,39 @@ pub async fn get_by_id<S: Store>(
     }
 }
 
+pub async fn delete_message<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    msg_id: &str,
+) -> Result<Option<Message>, anyhow::Error> {
+    // Look up by ID
+    let id_key = msg_id_key(tenant_id, msg_id);
+    let seq_key = match store.get(NS_MESSAGES, &id_key, None).await {
+        Ok(entry) => entry.value,
+        Err(shroudb_store::StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    // Get the message
+    let entry = match store.get(NS_MESSAGES, &seq_key, None).await {
+        Ok(e) => e,
+        Err(shroudb_store::StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut stored: StoredMessage = serde_json::from_slice(&entry.value)?;
+    let original = stored.msg.clone();
+
+    // Soft delete: clear body, set meta to indicate deletion
+    stored.msg.body = String::new();
+    stored.msg.meta = Some(serde_json::json!({"deleted": true}));
+
+    let value = serde_json::to_vec(&stored)?;
+    store.put(NS_MESSAGES, &seq_key, &value, None).await?;
+
+    Ok(Some(original))
+}
+
 pub async fn latest_seq<S: Store>(
     store: &S,
     tenant_id: &str,
@@ -220,4 +253,100 @@ pub async fn delete_expired<S: Store>(store: &S, now_ms: i64) -> Result<u64, any
         cursor = page.cursor;
     }
     Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use herald_core::message::MessageId;
+
+    fn make_msg(id: &str, room: &str, seq: u64, sent_at: i64) -> Message {
+        Message {
+            id: MessageId(id.into()),
+            room_id: room.into(),
+            seq,
+            sender: "user1".into(),
+            body: "hello".into(),
+            meta: None,
+            sent_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_message_insert_and_get() {
+        let store = crate::store::test_store().await;
+        let msg = make_msg("m1", "r1", 1, 1000);
+        insert(&*store, "t1", &msg, 99999).await.unwrap();
+
+        let got = get_by_id(&*store, "t1", "m1").await.unwrap().unwrap();
+        assert_eq!(got.body, "hello");
+        assert_eq!(got.seq, 1);
+
+        assert!(get_by_id(&*store, "t1", "nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_message_list_before() {
+        let store = crate::store::test_store().await;
+        for i in 1..=5 {
+            let msg = make_msg(&format!("m{i}"), "r1", i, 1000 + i as i64);
+            insert(&*store, "t1", &msg, 99999).await.unwrap();
+        }
+
+        let msgs = list_before(&*store, "t1", "r1", 4, 10).await.unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn test_message_list_after() {
+        let store = crate::store::test_store().await;
+        for i in 1..=5 {
+            let msg = make_msg(&format!("m{i}"), "r1", i, 1000 + i as i64);
+            insert(&*store, "t1", &msg, 99999).await.unwrap();
+        }
+
+        let msgs = list_after(&*store, "t1", "r1", 3, 10).await.unwrap();
+        assert_eq!(msgs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_message_soft_delete() {
+        let store = crate::store::test_store().await;
+        let msg = make_msg("m1", "r1", 1, 1000);
+        insert(&*store, "t1", &msg, 99999).await.unwrap();
+
+        let original = delete_message(&*store, "t1", "m1").await.unwrap().unwrap();
+        assert_eq!(original.body, "hello");
+
+        let got = get_by_id(&*store, "t1", "m1").await.unwrap().unwrap();
+        assert_eq!(got.body, "");
+        assert_eq!(got.meta, Some(serde_json::json!({"deleted": true})));
+    }
+
+    #[tokio::test]
+    async fn test_message_latest_seq() {
+        let store = crate::store::test_store().await;
+        for i in 1..=3 {
+            let msg = make_msg(&format!("m{i}"), "r1", i, 1000);
+            insert(&*store, "t1", &msg, 99999).await.unwrap();
+        }
+
+        let seq = latest_seq(&*store, "t1", "r1").await.unwrap();
+        assert_eq!(seq, 3);
+    }
+
+    #[tokio::test]
+    async fn test_message_list_since_time() {
+        let store = crate::store::test_store().await;
+        for i in 1..=5 {
+            let msg = make_msg(&format!("m{i}"), "r1", i, 1000 + i as i64 * 100);
+            insert(&*store, "t1", &msg, 99999).await.unwrap();
+        }
+
+        let msgs = list_since_time(&*store, "t1", "r1", 1300, 10)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 2); // sent_at 1400 and 1500
+    }
 }

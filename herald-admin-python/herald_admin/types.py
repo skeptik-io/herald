@@ -7,7 +7,6 @@ from typing import Any
 class Room:
     id: str
     name: str
-    encryption_mode: str = "plaintext"
     meta: Any = None
     created_at: int = 0
 

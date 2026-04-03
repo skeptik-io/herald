@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 
-use herald_core::room::{EncryptionMode, Room, RoomId};
+use herald_core::room::{Room, RoomId};
 
+use crate::http::validation;
 use crate::http::TenantId;
 use crate::state::AppState;
 use crate::store;
@@ -18,8 +19,6 @@ pub struct CreateRoomRequest {
     pub id: String,
     pub name: String,
     #[serde(default)]
-    pub encryption_mode: Option<String>,
-    #[serde(default)]
     pub meta: Option<serde_json::Value>,
 }
 
@@ -27,6 +26,7 @@ pub struct CreateRoomRequest {
 pub struct UpdateRoomRequest {
     pub name: Option<String>,
     pub meta: Option<serde_json::Value>,
+    pub archived: Option<bool>,
 }
 
 pub async fn create_room(
@@ -34,56 +34,45 @@ pub async fn create_room(
     Extension(tenant): Extension<TenantId>,
     Json(req): Json<CreateRoomRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = validation::validate_id(&req.id, "room id") {
+        return (*e).into_response();
+    }
+    if let Err(e) = validation::validate_name(&req.name, "room name") {
+        return (*e).into_response();
+    }
+    if let Err(e) = validation::validate_meta(&req.meta) {
+        return (*e).into_response();
+    }
+
     let tid = &tenant.0;
-    let enc = req
-        .encryption_mode
-        .as_deref()
-        .and_then(EncryptionMode::from_str_loose)
-        .unwrap_or_default();
 
-    let room = Room {
-        id: RoomId(req.id),
-        name: req.name,
-        encryption_mode: enc,
-        meta: req.meta,
-        created_at: now_millis(),
-    };
-
-    if enc == EncryptionMode::ServerEncrypted {
-        if let Some(ref cipher) = state.cipher {
-            let keyring = format!("herald-{tid}-room-{}", room.id.as_str());
-            if let Err(e) = cipher.create_keyring(&keyring).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("failed to create keyring: {e}")})),
-                )
-                    .into_response();
-            }
-        } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "cipher not configured — cannot create encrypted room"})),
-            )
-                .into_response();
-        }
-    }
-
-    if let Some(ref veil) = state.veil {
-        let index = format!("herald-{tid}-room-{}", room.id.as_str());
-        if let Err(e) = veil.create_index(&index).await {
-            tracing::warn!("failed to create veil index: {e}");
-        }
-    }
-
-    if let Err(e) = store::rooms::insert(&*state.db, tid, &room).await {
+    // Check for existing room before insert (KV put is upsert)
+    if let Ok(Some(_)) = store::rooms::get(&*state.db, tid, &req.id).await {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("failed to create room: {e}")})),
+            Json(serde_json::json!({"error": "failed to create room"})),
         )
             .into_response();
     }
 
-    state.rooms.create_room(tid, room.id.as_str(), 0, enc);
+    let room = Room {
+        id: RoomId(req.id),
+        name: req.name,
+        meta: req.meta,
+        archived: false,
+        created_at: now_millis(),
+    };
+
+    if let Err(e) = store::rooms::insert(&*state.db, tid, &room).await {
+        tracing::error!(tenant = tid, room = %room.id.as_str(), "failed to create room: {e}");
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "failed to create room"})),
+        )
+            .into_response();
+    }
+
+    state.rooms.create_room(tid, room.id.as_str(), 0);
 
     state.audit(tid, "room.create", room.id.as_str(), "api", "success");
 
@@ -93,14 +82,23 @@ pub async fn create_room(
 pub async fn list_rooms(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
+    Query(page): Query<crate::http::validation::PaginationQuery>,
 ) -> impl IntoResponse {
     match store::rooms::list_by_tenant(&*state.db, &tenant.0).await {
-        Ok(rooms) => Json(serde_json::json!({ "rooms": rooms })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Ok(rooms) => {
+            let (limit, offset) = page.resolve();
+            let total = rooms.len();
+            let rooms: Vec<_> = rooms.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({ "rooms": rooms, "total": total, "limit": limit, "offset": offset })).into_response()
+        }
+        Err(e) => {
+            tracing::error!(tenant = %tenant.0, "failed to list rooms: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -116,11 +114,14 @@ pub async fn get_room(
             Json(serde_json::json!({"error": "room not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = %tenant.0, room = %id, "failed to get room: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -136,20 +137,29 @@ pub async fn update_room(
         &id,
         req.name.as_deref(),
         req.meta.as_ref(),
+        req.archived,
     )
     .await
     {
-        Ok(true) => StatusCode::OK.into_response(),
+        Ok(true) => {
+            if let Some(archived) = req.archived {
+                state.rooms.set_archived(&tenant.0, &id, archived);
+            }
+            StatusCode::OK.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "room not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = %tenant.0, room = %id, "failed to update room: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -173,10 +183,13 @@ pub async fn delete_room(
             Json(serde_json::json!({"error": "room not found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(tenant = tid, room = %id, "failed to delete room: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
     }
 }

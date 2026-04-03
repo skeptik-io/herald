@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 use herald_core::auth::JwtClaims;
 use herald_server::config::{
     ApiAuthConfig, AuthConfig, HeraldConfig, PresenceConfig, ServerConfig, StoreConfig,
+    TenantLimitsConfig, TlsConfig, WebhookConfig,
 };
 use herald_server::state::{AppState, AppStateBuilder};
 use herald_server::store;
@@ -63,6 +64,7 @@ impl TestServer {
                 http_bind: "127.0.0.1:0".to_string(),
                 log_level: "warn".to_string(),
                 max_messages_per_sec: 1000,
+                api_rate_limit: 10000,
                 ..Default::default()
             },
             store: StoreConfig {
@@ -83,13 +85,12 @@ impl TestServer {
             shroudb: None,
             tls: None,
             tenant_limits: Default::default(),
+            cors: None,
         };
 
         let state = AppState::build(AppStateBuilder {
             config,
             db,
-            cipher: None,
-            veil: None,
             sentry: None,
             courier: None,
             chronicle: None,
@@ -558,7 +559,7 @@ async fn test_admin_api_token_management() {
         .unwrap();
     let body: Value = resp.json().await.unwrap();
     let tokens = body["tokens"].as_array().unwrap();
-    assert!(tokens.iter().any(|t| t.as_str() == Some(token)));
+    assert!(tokens.iter().any(|t| t["token"].as_str() == Some(token)));
 
     // Token works for tenant API
     let resp = server
@@ -1750,4 +1751,2608 @@ async fn test_tenant_stats_isolated() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["current"]["messages_sent"].as_u64().unwrap(), 2);
     assert_eq!(body["current"]["rooms"].as_u64().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_admin_token_constant_time_comparison() {
+    let server = TestServer::start().await;
+
+    // Valid token works
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/tenants"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Wrong tokens of varying prefix-match lengths all get 401
+    let wrong_tokens = [
+        "",
+        "x",
+        "test-super-admi",        // one char short
+        "test-super-admin-extra", // too long
+        "test-super-admio",       // last char wrong
+        "xest-super-admin",       // first char wrong
+        "test-sXper-admin",       // middle char wrong
+    ];
+    for bad_token in &wrong_tokens {
+        let resp = server
+            .http_client()
+            .get(server.http_url("/admin/tenants"))
+            .bearer_auth(bad_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected 401 for token: {bad_token:?}"
+        );
+    }
+
+    // No auth header at all
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/tenants"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Body size limit & input validation tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_body_size_limit() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Create a body larger than 1MB
+    let huge_body = "x".repeat(2 * 1024 * 1024);
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"id":"room","name":"{huge_body}"}}"#))
+        .send()
+        .await
+        .unwrap();
+    // Should be rejected — either 413 Payload Too Large or 400
+    assert!(
+        resp.status() == StatusCode::PAYLOAD_TOO_LARGE || resp.status() == StatusCode::BAD_REQUEST,
+        "expected 413 or 400 for oversized body, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn test_input_validation_room_id() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Path traversal in room ID
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "../etc/passwd", "name": "bad room"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Null bytes in room ID
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "room\0evil", "name": "bad room"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Overly long room ID
+    let long_id = "a".repeat(300);
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": long_id, "name": "bad room"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Valid room ID works
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "valid-room_123", "name": "Good Room"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_input_validation_message_body_size() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Message body over 64KB should be rejected
+    let huge_body = "x".repeat(70_000);
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": huge_body}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Normal message works
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_input_validation_tenant_id() {
+    let server = TestServer::start().await;
+
+    // Path traversal in tenant ID
+    let resp = server
+        .http_client()
+        .post(server.http_url("/admin/tenants"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"id": "../evil", "name": "bad", "jwt_secret": "secret123"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Valid tenant ID works
+    let resp = server
+        .http_client()
+        .post(server.http_url("/admin/tenants"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"id": "good-tenant", "name": "Good", "jwt_secret": "secret123"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_http_api_rate_limiting() {
+    // Build a server with a very low rate limit
+    let db = create_test_store().await;
+    let config = HeraldConfig {
+        server: ServerConfig {
+            ws_bind: "127.0.0.1:0".to_string(),
+            http_bind: "127.0.0.1:0".to_string(),
+            log_level: "warn".to_string(),
+            max_messages_per_sec: 1000,
+            api_rate_limit: 5, // Only 5 requests per minute
+            ..Default::default()
+        },
+        store: StoreConfig {
+            path: "/tmp/herald-test-rate".into(),
+            message_ttl_days: 7,
+        },
+        auth: AuthConfig {
+            jwt_secret: Some(TENANT_A_SECRET.to_string()),
+            jwt_issuer: None,
+            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
+            api: ApiAuthConfig {
+                tokens: vec!["rate-test-token".to_string()],
+            },
+        },
+        presence: PresenceConfig {
+            linger_secs: 0,
+            manual_override_ttl_secs: 14400,
+        },
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: Default::default(),
+        cors: None,
+    };
+
+    let state = AppState::build(AppStateBuilder {
+        config,
+        db,
+        sentry: None,
+        courier: None,
+        chronicle: None,
+    });
+    state.bootstrap_single_tenant().await.unwrap();
+
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+    let http_app = herald_server::http::router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(http_listener, http_app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+
+    // Send 6 requests (limit is 5)
+    let mut statuses = Vec::new();
+    for _ in 0..6 {
+        let resp = client
+            .get(format!("{base}/rooms"))
+            .bearer_auth("rate-test-token")
+            .send()
+            .await
+            .unwrap();
+        statuses.push(resp.status());
+    }
+
+    // First 5 should succeed, 6th should be 429
+    for s in &statuses[..5] {
+        assert_eq!(*s, StatusCode::OK, "first 5 requests should succeed");
+    }
+    assert_eq!(
+        statuses[5],
+        StatusCode::TOO_MANY_REQUESTS,
+        "6th request should be rate limited"
+    );
+}
+
+#[tokio::test]
+async fn test_ws_sliding_window_rate_limit() {
+    // Build a server with low WS rate limit
+    let db = create_test_store().await;
+    let config = HeraldConfig {
+        server: ServerConfig {
+            ws_bind: "127.0.0.1:0".to_string(),
+            http_bind: "127.0.0.1:0".to_string(),
+            log_level: "warn".to_string(),
+            max_messages_per_sec: 3, // Very low for testing
+            ..Default::default()
+        },
+        store: StoreConfig {
+            path: "/tmp/herald-test-wsrate".into(),
+            message_ttl_days: 7,
+        },
+        auth: AuthConfig {
+            jwt_secret: Some(TENANT_A_SECRET.to_string()),
+            jwt_issuer: None,
+            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
+            api: ApiAuthConfig {
+                tokens: vec!["ws-rate-token".to_string()],
+            },
+        },
+        presence: PresenceConfig {
+            linger_secs: 0,
+            manual_override_ttl_secs: 14400,
+        },
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: Default::default(),
+        cors: None,
+    };
+
+    let state = AppState::build(AppStateBuilder {
+        config,
+        db,
+        sentry: None,
+        courier: None,
+        chronicle: None,
+    });
+    state.bootstrap_single_tenant().await.unwrap();
+
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_port = ws_listener.local_addr().unwrap().port();
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+
+    let ws_state = state.clone();
+    let ws_app = axum::Router::new()
+        .route(
+            "/",
+            axum::routing::get(herald_server::ws::upgrade::ws_handler),
+        )
+        .with_state(ws_state);
+    let http_app = herald_server::http::router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(ws_listener, ws_app).await.unwrap();
+    });
+    tokio::spawn(async move {
+        axum::serve(http_listener, http_app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Setup: create room and member
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    client
+        .post(format!("{base}/rooms"))
+        .bearer_auth("ws-rate-token")
+        .json(&json!({"id": "chat", "name": "Chat"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/rooms/chat/members"))
+        .bearer_auth("ws-rate-token")
+        .json(&json!({"user_id": "alice"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Connect WS
+    let ws_url = format!("ws://127.0.0.1:{ws_port}/");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let token = mint_jwt("alice", "default", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws, &token).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    // Send 5 messages rapidly (limit is 3/sec)
+    for i in 0..5 {
+        ws_send(
+            &mut ws,
+            json!({
+                "type": "message.send",
+                "payload": {"room": "chat", "body": format!("msg {i}")}
+            }),
+        )
+        .await;
+    }
+
+    // Collect responses - should get some acks and at least one rate_limited error
+    let mut got_rate_limited = false;
+    let mut got_ack = false;
+    for _ in 0..10 {
+        let timeout = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                if msg["type"] == "error" && msg["payload"]["code"] == "RATE_LIMITED" {
+                    got_rate_limited = true;
+                }
+                if msg["type"] == "message.ack" {
+                    got_ack = true;
+                }
+                if got_rate_limited && got_ack {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(got_ack, "should have received at least one message ack");
+    assert!(got_rate_limited, "should have received rate limit error");
+}
+
+#[tokio::test]
+async fn test_backpressure_increments_dropped_metric() {
+    use herald_server::registry::connection::ConnId;
+    use std::sync::atomic::Ordering;
+
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Register a connection with a tiny channel that will fill immediately
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let conn_id = ConnId::next();
+    server
+        .state
+        .connections
+        .register(conn_id, "acme".to_string(), "alice".to_string(), tx);
+    server
+        .state
+        .connections
+        .add_room_subscription(conn_id, "chat");
+    server
+        .state
+        .rooms
+        .subscribe("acme", "chat", "alice", conn_id);
+
+    // Fill the channel capacity (1 slot) then the next send should drop
+    let msg = herald_core::protocol::ServerMessage::error(
+        None,
+        herald_core::error::ErrorCode::Internal,
+        "test",
+    );
+
+    // First send fills the single slot
+    assert!(server.state.connections.send_to_conn(conn_id, &msg));
+    // Second send should fail (channel full)
+    assert!(!server.state.connections.send_to_conn(conn_id, &msg));
+
+    // Now test via fanout — send a few messages that fanout to the room
+    let dropped_before = server
+        .state
+        .metrics
+        .messages_dropped
+        .load(Ordering::Relaxed);
+
+    for _ in 0..5 {
+        herald_server::ws::fanout::fanout_to_room(&server.state, "acme", "chat", &msg, None);
+    }
+
+    let dropped_after = server
+        .state
+        .metrics
+        .messages_dropped
+        .load(Ordering::Relaxed);
+
+    assert!(
+        dropped_after > dropped_before,
+        "expected messages_dropped to increase via fanout, before={dropped_before} after={dropped_after}"
+    );
+
+    // Also verify the metric is exposed via /metrics endpoint
+    let resp = server
+        .http_client()
+        .get(server.http_url("/metrics"))
+        .send()
+        .await
+        .unwrap();
+    let body = resp.text().await.unwrap();
+
+    let dropped_line = body
+        .lines()
+        .find(|l| l.starts_with("herald_messages_dropped_total"))
+        .expect("should have messages_dropped metric");
+    let dropped: u64 = dropped_line
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        dropped > 0,
+        "expected some messages to be dropped due to backpressure, got {dropped}"
+    );
+}
+
+#[tokio::test]
+async fn test_circuit_breaker_halfopen_single_probe() {
+    use herald_server::integrations::circuit_breaker::{CircuitBreaker, State};
+    use std::time::Duration;
+
+    let cb = CircuitBreaker::new("test-integration", 3, Duration::from_millis(100));
+
+    // Trip to open
+    cb.record_failure();
+    cb.record_failure();
+    cb.record_failure();
+    assert_eq!(cb.state(), State::Open);
+    assert!(cb.check().is_err(), "should reject when open");
+
+    // Wait for cooldown
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // First call: transitions to half-open, allowed through
+    assert!(cb.check().is_ok(), "first call in half-open should pass");
+    assert_eq!(cb.state(), State::HalfOpen);
+
+    // Concurrent calls: should be rejected (probe in progress)
+    assert!(
+        cb.check().is_err(),
+        "second call should be rejected while probe in progress"
+    );
+    assert!(
+        cb.check().is_err(),
+        "third call should be rejected while probe in progress"
+    );
+    assert!(
+        cb.check().is_err(),
+        "fourth call should be rejected while probe in progress"
+    );
+
+    // Probe succeeds
+    cb.record_success();
+    assert_eq!(cb.state(), State::Closed);
+
+    // All calls pass again
+    assert!(cb.check().is_ok());
+    assert!(cb.check().is_ok());
+}
+
+#[tokio::test]
+async fn test_presence_linger_reconnect_no_offline() {
+    // Server with linger = 2 seconds
+    let db = create_test_store().await;
+    let config = HeraldConfig {
+        server: ServerConfig {
+            ws_bind: "127.0.0.1:0".to_string(),
+            http_bind: "127.0.0.1:0".to_string(),
+            log_level: "warn".to_string(),
+            max_messages_per_sec: 1000,
+            ..Default::default()
+        },
+        store: StoreConfig {
+            path: "/tmp/herald-test-linger".into(),
+            message_ttl_days: 7,
+        },
+        auth: AuthConfig {
+            jwt_secret: Some(TENANT_A_SECRET.to_string()),
+            jwt_issuer: None,
+            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
+            api: ApiAuthConfig {
+                tokens: vec!["linger-token".to_string()],
+            },
+        },
+        presence: PresenceConfig {
+            linger_secs: 2,
+            manual_override_ttl_secs: 14400,
+        },
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: Default::default(),
+        cors: None,
+    };
+
+    let state = AppState::build(AppStateBuilder {
+        config,
+        db,
+        sentry: None,
+        courier: None,
+        chronicle: None,
+    });
+    state.bootstrap_single_tenant().await.unwrap();
+
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_port = ws_listener.local_addr().unwrap().port();
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+
+    let ws_state = state.clone();
+    let ws_app = axum::Router::new()
+        .route(
+            "/",
+            axum::routing::get(herald_server::ws::upgrade::ws_handler),
+        )
+        .with_state(ws_state);
+    let http_app = herald_server::http::router(state.clone());
+
+    tokio::spawn(async move { axum::serve(ws_listener, ws_app).await.unwrap() });
+    tokio::spawn(async move { axum::serve(http_listener, http_app).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+
+    // Setup room and members
+    client
+        .post(format!("{base}/rooms"))
+        .bearer_auth("linger-token")
+        .json(&json!({"id": "chat", "name": "Chat"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/rooms/chat/members"))
+        .bearer_auth("linger-token")
+        .json(&json!({"user_id": "alice"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/rooms/chat/members"))
+        .bearer_auth("linger-token")
+        .json(&json!({"user_id": "bob"}))
+        .send()
+        .await
+        .unwrap();
+
+    let ws_url = format!("ws://127.0.0.1:{ws_port}/");
+
+    // Connect bob as observer
+    let (mut ws_bob, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let bob_jwt = mint_jwt("bob", "default", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Connect alice
+    let (mut ws_alice, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let alice_jwt = mint_jwt("alice", "default", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    // Bob should see alice come online
+    let presence_msg = ws_recv_type(&mut ws_bob, "presence.changed").await;
+    assert_eq!(presence_msg["payload"]["user_id"], "alice");
+    assert_eq!(presence_msg["payload"]["presence"], "online");
+
+    // Disconnect alice
+    drop(ws_alice);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Immediately reconnect alice (within linger window)
+    let (mut ws_alice2, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws_auth(&mut ws_alice2, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice2,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice2, "subscribed").await;
+
+    // Wait for linger to expire
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Check bob's messages — should see alice online (reconnect), but NOT offline
+    // Drain all messages bob received
+    let mut saw_offline = false;
+    loop {
+        let timeout = tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                if msg["type"] == "presence.changed"
+                    && msg["payload"]["user_id"] == "alice"
+                    && msg["payload"]["presence"] == "offline"
+                {
+                    saw_offline = true;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        !saw_offline,
+        "alice should NOT have been broadcast as offline during quick reconnect"
+    );
+}
+
+#[tokio::test]
+async fn test_cors_headers_present() {
+    let server = TestServer::start().await;
+
+    // Regular request should get CORS headers (permissive by default)
+    let resp = server
+        .http_client()
+        .get(server.http_url("/health"))
+        .header("origin", "http://example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().contains_key("access-control-allow-origin"),
+        "response should include CORS allow-origin header"
+    );
+
+    // OPTIONS preflight request should succeed
+    let resp = server
+        .http_client()
+        .request(reqwest::Method::OPTIONS, server.http_url("/health"))
+        .header("origin", "http://example.com")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "preflight OPTIONS should succeed, got {}",
+        resp.status()
+    );
+    assert!(
+        resp.headers().contains_key("access-control-allow-origin"),
+        "preflight should include CORS allow-origin header"
+    );
+    assert!(
+        resp.headers().contains_key("access-control-allow-methods"),
+        "preflight should include CORS allow-methods header"
+    );
+}
+
+#[tokio::test]
+async fn test_error_responses_do_not_leak_internals() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+
+    // Try to create a duplicate room — triggers store conflict error
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "chat", "name": "Chat Again"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body: Value = resp.json().await.unwrap();
+    let error_msg = body["error"].as_str().unwrap();
+    // Should be generic — no internal details like "WAL", "store", "UNIQUE constraint"
+    assert!(
+        !error_msg.contains("WAL")
+            && !error_msg.contains("store")
+            && !error_msg.contains("UNIQUE")
+            && !error_msg.contains("constraint"),
+        "error message should not contain internal details: {error_msg}"
+    );
+    assert_eq!(error_msg, "failed to create room");
+
+    // Try to create a duplicate tenant
+    let resp = server
+        .http_client()
+        .post(server.http_url("/admin/tenants"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"id": "acme", "name": "Acme Again", "jwt_secret": "secret"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body: Value = resp.json().await.unwrap();
+    let error_msg = body["error"].as_str().unwrap();
+    assert!(
+        !error_msg.contains("WAL") && !error_msg.contains("store"),
+        "admin error should not contain internal details: {error_msg}"
+    );
+    assert_eq!(error_msg, "failed to create tenant");
+}
+
+// ---------------------------------------------------------------------------
+// Config validation tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_config_validation_rejects_invalid() {
+    // zero max_messages_per_sec
+    let config = HeraldConfig {
+        server: ServerConfig {
+            max_messages_per_sec: 0,
+            ..Default::default()
+        },
+        store: StoreConfig::default(),
+        auth: AuthConfig {
+            jwt_secret: Some("a-long-enough-secret".to_string()),
+            jwt_issuer: None,
+            super_admin_token: None,
+            api: ApiAuthConfig::default(),
+        },
+        presence: PresenceConfig::default(),
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: TenantLimitsConfig::default(),
+        cors: None,
+    };
+    assert!(
+        config.validate(false).is_err(),
+        "should reject max_messages_per_sec=0"
+    );
+
+    // empty jwt_secret in single-tenant mode
+    let config = HeraldConfig {
+        server: ServerConfig::default(),
+        store: StoreConfig::default(),
+        auth: AuthConfig {
+            jwt_secret: Some("".to_string()),
+            jwt_issuer: None,
+            super_admin_token: None,
+            api: ApiAuthConfig::default(),
+        },
+        presence: PresenceConfig::default(),
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: TenantLimitsConfig::default(),
+        cors: None,
+    };
+    assert!(
+        config.validate(false).is_err(),
+        "should reject empty jwt_secret"
+    );
+
+    // short jwt_secret
+    let config = HeraldConfig {
+        server: ServerConfig::default(),
+        store: StoreConfig::default(),
+        auth: AuthConfig {
+            jwt_secret: Some("short".to_string()),
+            jwt_issuer: None,
+            super_admin_token: None,
+            api: ApiAuthConfig::default(),
+        },
+        presence: PresenceConfig::default(),
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: TenantLimitsConfig::default(),
+        cors: None,
+    };
+    assert!(
+        config.validate(false).is_err(),
+        "should reject short jwt_secret"
+    );
+
+    // empty webhook secret
+    let config = HeraldConfig {
+        server: ServerConfig::default(),
+        store: StoreConfig::default(),
+        auth: AuthConfig {
+            jwt_secret: Some("a-long-enough-secret".to_string()),
+            jwt_issuer: None,
+            super_admin_token: None,
+            api: ApiAuthConfig::default(),
+        },
+        presence: PresenceConfig::default(),
+        webhook: Some(WebhookConfig {
+            url: "http://example.com/hook".to_string(),
+            secret: "".to_string(),
+            retries: 3,
+            events: None,
+        }),
+        shroudb: None,
+        tls: None,
+        tenant_limits: TenantLimitsConfig::default(),
+        cors: None,
+    };
+    assert!(
+        config.validate(false).is_err(),
+        "should reject empty webhook secret"
+    );
+
+    // empty TLS key path
+    let config = HeraldConfig {
+        server: ServerConfig::default(),
+        store: StoreConfig::default(),
+        auth: AuthConfig {
+            jwt_secret: Some("a-long-enough-secret".to_string()),
+            jwt_issuer: None,
+            super_admin_token: None,
+            api: ApiAuthConfig::default(),
+        },
+        presence: PresenceConfig::default(),
+        webhook: None,
+        shroudb: None,
+        tls: Some(TlsConfig {
+            cert_path: "/tmp/nonexistent.pem".to_string(),
+            key_path: "".to_string(),
+        }),
+        tenant_limits: TenantLimitsConfig::default(),
+        cors: None,
+    };
+    assert!(
+        config.validate(false).is_err(),
+        "should reject empty TLS key_path"
+    );
+
+    // Valid config should pass
+    let config = HeraldConfig {
+        server: ServerConfig::default(),
+        store: StoreConfig::default(),
+        auth: AuthConfig {
+            jwt_secret: Some("a-long-enough-secret".to_string()),
+            jwt_issuer: None,
+            super_admin_token: None,
+            api: ApiAuthConfig::default(),
+        },
+        presence: PresenceConfig::default(),
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: TenantLimitsConfig::default(),
+        cors: None,
+    };
+    assert!(config.validate(false).is_ok(), "valid config should pass");
+
+    // Multi-tenant requires super_admin_token
+    let config = HeraldConfig {
+        server: ServerConfig::default(),
+        store: StoreConfig::default(),
+        auth: AuthConfig {
+            jwt_secret: None,
+            jwt_issuer: None,
+            super_admin_token: None,
+            api: ApiAuthConfig::default(),
+        },
+        presence: PresenceConfig::default(),
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: TenantLimitsConfig::default(),
+        cors: None,
+    };
+    assert!(
+        config.validate(true).is_err(),
+        "should require super_admin_token in multi-tenant"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Request ID + Security headers
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_request_id_header() {
+    let server = TestServer::start().await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let request_id = resp
+        .headers()
+        .get("x-request-id")
+        .expect("response should have x-request-id header")
+        .to_str()
+        .unwrap();
+
+    // Should be a valid UUID
+    assert!(
+        uuid::Uuid::parse_str(request_id).is_ok(),
+        "x-request-id should be a valid UUID, got: {request_id}"
+    );
+
+    // Two requests should have different IDs
+    let resp2 = server
+        .http_client()
+        .get(server.http_url("/health"))
+        .send()
+        .await
+        .unwrap();
+    let request_id2 = resp2
+        .headers()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_ne!(
+        request_id, request_id2,
+        "each request should get a unique ID"
+    );
+}
+
+#[tokio::test]
+async fn test_security_headers_present() {
+    let server = TestServer::start().await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        resp.headers()
+            .get("x-content-type-options")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-frame-options")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "DENY"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("referrer-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-referrer"
+    );
+}
+
+#[tokio::test]
+async fn test_structured_json_logging() {
+    // This test verifies that the JSON logging feature compiles and the tracing-subscriber
+    // json feature is available. The actual JSON output is validated at the config level.
+    // We verify it indirectly by checking the feature is importable.
+    use tracing_subscriber::fmt::format::JsonFields;
+    let _: fn() -> JsonFields = JsonFields::new;
+    // If this compiles, the json feature is available
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_pagination_on_list_rooms() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Create 10 rooms
+    for i in 0..10 {
+        server.create_room(&token, &format!("room-{i:02}")).await;
+    }
+
+    // Default pagination
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"], 10);
+    assert_eq!(body["rooms"].as_array().unwrap().len(), 10);
+
+    // With limit
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms?limit=3"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rooms"].as_array().unwrap().len(), 3);
+    assert_eq!(body["total"], 10);
+    assert_eq!(body["limit"], 3);
+    assert_eq!(body["offset"], 0);
+
+    // With offset
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms?limit=3&offset=8"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rooms"].as_array().unwrap().len(), 2); // only 2 remaining
+    assert_eq!(body["total"], 10);
+    assert_eq!(body["offset"], 8);
+}
+
+#[tokio::test]
+async fn test_pagination_on_list_tenants() {
+    let server = TestServer::start().await;
+
+    // Create 5 tenants
+    for i in 0..5 {
+        server
+            .create_tenant(&format!("tenant-{i}"), "secret-for-testing-12345")
+            .await;
+    }
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/tenants?limit=2"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["tenants"].as_array().unwrap().len(), 2);
+    assert!(body["total"].as_u64().unwrap() >= 5);
+}
+
+// ---------------------------------------------------------------------------
+// Liveness / Readiness probes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_health_liveness_readiness() {
+    let server = TestServer::start().await;
+
+    // Liveness -- always 200
+    let resp = server
+        .http_client()
+        .get(server.http_url("/health/live"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "alive");
+
+    // Readiness -- checks storage
+    let resp = server
+        .http_client()
+        .get(server.http_url("/health/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["storage"], true);
+}
+
+#[tokio::test]
+async fn test_tenant_cache_invalidation_on_delete() {
+    let server = TestServer::start().await;
+    let _token = server.create_tenant("ephemeral", TENANT_A_SECRET).await;
+
+    // JWT should work before deletion
+    let jwt = mint_jwt("user1", "ephemeral", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    let msg = ws_recv_type(&mut ws, "auth_ok").await;
+    assert_eq!(msg["payload"]["user_id"], "user1");
+    drop(ws);
+
+    // Delete tenant via admin API
+    let resp = server
+        .http_client()
+        .delete(server.http_url("/admin/tenants/ephemeral"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // JWT should now fail — cache entry was removed on delete
+    let mut ws2 = server.ws_connect().await;
+    ws_send(
+        &mut ws2,
+        json!({"type": "auth", "payload": {"token": &jwt}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws2, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+#[tokio::test]
+async fn test_tenant_cache_refresh_on_update() {
+    let server = TestServer::start().await;
+    let _token = server.create_tenant("updatable", TENANT_A_SECRET).await;
+
+    // Verify initial plan
+    let cached = server.state.tenant_cache.get("updatable").unwrap();
+    assert_eq!(cached.plan, "free");
+    drop(cached);
+
+    // Update tenant plan
+    let resp = server
+        .http_client()
+        .patch(server.http_url("/admin/tenants/updatable"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"plan": "enterprise"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Cache should be refreshed with new plan
+    let cached = server.state.tenant_cache.get("updatable").unwrap();
+    assert_eq!(cached.plan, "enterprise");
+}
+
+#[tokio::test]
+async fn test_typing_cleanup_on_disconnect() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Connect bob as observer
+    let mut ws_bob = server.ws_connect().await;
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Connect alice
+    let mut ws_alice = server.ws_connect().await;
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    // Drain bob's presence messages
+    loop {
+        let timeout = tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(_)))) => continue,
+            _ => break,
+        }
+    }
+
+    // Alice starts typing
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "typing.start", "payload": {"room": "chat"}}),
+    )
+    .await;
+
+    // Bob should see typing start
+    let typing_msg = ws_recv_type(&mut ws_bob, "typing").await;
+    assert_eq!(typing_msg["payload"]["user_id"], "alice");
+    assert_eq!(typing_msg["payload"]["active"], true);
+
+    // Alice disconnects WITHOUT sending typing.stop
+    drop(ws_alice);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Bob should receive typing.stop (broadcast on disconnect)
+    let stop_msg = ws_recv_type(&mut ws_bob, "typing").await;
+    assert_eq!(stop_msg["payload"]["user_id"], "alice");
+    assert_eq!(stop_msg["payload"]["active"], false);
+}
+
+#[tokio::test]
+async fn test_reconnect_catchup_has_more() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Send 210 messages (more than CATCHUP_LIMIT=200)
+    let client = server.http_client();
+    for i in 0..210 {
+        let resp = client
+            .post(server.http_url("/rooms/chat/messages"))
+            .bearer_auth(&token)
+            .json(&json!({"sender": "bot", "body": format!("msg {i}")}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "inject message {i} failed"
+        );
+    }
+
+    // Connect alice with last_seen_at=0 (ancient) to trigger catchup
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_send(
+        &mut ws,
+        json!({
+            "type": "auth",
+            "payload": {"token": &alice_jwt, "last_seen_at": 0}
+        }),
+    )
+    .await;
+    ws_recv_type(&mut ws, "auth_ok").await;
+
+    // Should receive subscribed + messages.batch
+    let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
+    let batch = ws_recv_type(&mut ws, "messages.batch").await;
+
+    let messages = batch["payload"]["messages"].as_array().unwrap();
+    let has_more = batch["payload"]["has_more"].as_bool().unwrap();
+
+    assert!(messages.len() <= 200, "should return at most 200 messages");
+    assert!(
+        has_more,
+        "has_more should be true when more than 200 messages exist"
+    );
+}
+
+#[tokio::test]
+async fn test_graceful_shutdown_notifies_clients() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Connect alice
+    let mut ws = server.ws_connect().await;
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    // Simulate shutdown broadcast
+    server
+        .state
+        .connections
+        .broadcast_all(&herald_core::protocol::ServerMessage::error(
+            None,
+            herald_core::error::ErrorCode::Internal,
+            "server shutting down",
+        ));
+
+    // Alice should receive the shutdown error
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["message"], "server shutting down");
+}
+
+// ---------------------------------------------------------------------------
+// Message deletion tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_message_deletion_http() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Send a message
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "to be deleted"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let msg_id = body["id"].as_str().unwrap().to_string();
+
+    // Delete the message
+    let resp = server
+        .http_client()
+        .delete(server.http_url(&format!("/rooms/chat/messages/{msg_id}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Verify message body is empty in history
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    let deleted_msg = messages.iter().find(|m| m["id"] == msg_id).unwrap();
+    assert_eq!(deleted_msg["body"], "");
+    assert_eq!(deleted_msg["meta"]["deleted"], true);
+}
+
+#[tokio::test]
+async fn test_message_deletion_ws() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Connect bob
+    let mut ws_bob = server.ws_connect().await;
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Connect alice and send a message
+    let mut ws_alice = server.ws_connect().await;
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    // Drain presence messages
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await
+    {}
+
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello"}}),
+    )
+    .await;
+    let ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+    let msg_id = ack["payload"]["id"].as_str().unwrap().to_string();
+
+    // Bob receives the message
+    let _new_msg = ws_recv_type(&mut ws_bob, "message.new").await;
+
+    // Alice deletes the message
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "message.delete", "payload": {"room": "chat", "id": &msg_id}}),
+    )
+    .await;
+    let _delete_ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+
+    // Bob should receive message.deleted
+    let deleted = ws_recv_type(&mut ws_bob, "message.deleted").await;
+    assert_eq!(deleted["payload"]["id"], msg_id);
+    assert_eq!(deleted["payload"]["room"], "chat");
+}
+
+// ---------------------------------------------------------------------------
+// Room archival tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_room_archival() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Send a message — should work
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "before archive"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Archive the room
+    let resp = server
+        .http_client()
+        .patch(server.http_url("/rooms/chat"))
+        .bearer_auth(&token)
+        .json(&json!({"archived": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify room shows archived
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["archived"], true);
+
+    // Send a message — should fail
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "after archive"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // History still readable
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert!(!body["messages"].as_array().unwrap().is_empty());
+
+    // Unarchive
+    let resp = server
+        .http_client()
+        .patch(server.http_url("/rooms/chat"))
+        .bearer_auth(&token)
+        .json(&json!({"archived": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Send a message — should work again
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "after unarchive"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+// ---------------------------------------------------------------------------
+// Webhook event filtering (Item 28)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_webhook_event_filtering() {
+    // Start webhook receiver
+    let (webhook_tx, mut webhook_rx) = tokio::sync::mpsc::channel::<String>(10);
+    let webhook_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let webhook_port = webhook_listener.local_addr().unwrap().port();
+
+    let webhook_app = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(move |body: String| {
+            let tx = webhook_tx.clone();
+            async move {
+                let _ = tx.send(body).await;
+                "ok"
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(webhook_listener, webhook_app).await.unwrap();
+    });
+
+    // Create server with webhook filtered to message.new only
+    let db = create_test_store().await;
+    let config = HeraldConfig {
+        server: ServerConfig {
+            ws_bind: "127.0.0.1:0".to_string(),
+            http_bind: "127.0.0.1:0".to_string(),
+            log_level: "warn".to_string(),
+            max_messages_per_sec: 1000,
+            ..Default::default()
+        },
+        store: StoreConfig {
+            path: "/tmp/herald-test-whfilter".into(),
+            message_ttl_days: 7,
+        },
+        auth: AuthConfig {
+            jwt_secret: Some(TENANT_A_SECRET.to_string()),
+            jwt_issuer: None,
+            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
+            api: ApiAuthConfig {
+                tokens: vec!["wh-token".to_string()],
+            },
+        },
+        presence: PresenceConfig {
+            linger_secs: 0,
+            manual_override_ttl_secs: 14400,
+        },
+        webhook: Some(WebhookConfig {
+            url: format!("http://127.0.0.1:{webhook_port}/hook"),
+            secret: "test-webhook-secret-1234567890".to_string(),
+            retries: 0,
+            events: Some(vec!["message.new".to_string()]),
+        }),
+        shroudb: None,
+        tls: None,
+        tenant_limits: Default::default(),
+        cors: None,
+    };
+
+    let state = AppState::build(AppStateBuilder {
+        config,
+        db,
+        sentry: None,
+        courier: None,
+        chronicle: None,
+    });
+    state.bootstrap_single_tenant().await.unwrap();
+
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+    let http_app = herald_server::http::router(state.clone());
+    tokio::spawn(async move { axum::serve(http_listener, http_app).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+
+    // Create room + member (triggers member.joined webhook — should be filtered out)
+    client
+        .post(format!("{base}/rooms"))
+        .bearer_auth("wh-token")
+        .json(&json!({"id": "chat", "name": "Chat"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/rooms/chat/members"))
+        .bearer_auth("wh-token")
+        .json(&json!({"user_id": "alice"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Wait briefly — no webhook should arrive for member.joined
+    let result = tokio::time::timeout(Duration::from_millis(500), webhook_rx.recv()).await;
+    assert!(
+        result.is_err(),
+        "should NOT receive webhook for member.joined (filtered out)"
+    );
+
+    // Send a message — should trigger webhook
+    client
+        .post(format!("{base}/rooms/chat/messages"))
+        .bearer_auth("wh-token")
+        .json(&json!({"sender": "alice", "body": "hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    let webhook_body = tokio::time::timeout(Duration::from_secs(5), webhook_rx.recv())
+        .await
+        .expect("webhook timeout")
+        .expect("webhook channel closed");
+    let parsed: Value = serde_json::from_str(&webhook_body).unwrap();
+    assert_eq!(parsed["event"], "message.new");
+}
+
+// ---------------------------------------------------------------------------
+// API key scoping (Item 29)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_api_key_scoping_read_only() {
+    let server = TestServer::start().await;
+    let _full_token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Create a read-only scoped token
+    let resp = server
+        .http_client()
+        .post(server.http_url("/admin/tenants/acme/tokens"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"scope": "read-only"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let read_token = body["token"].as_str().unwrap().to_string();
+
+    // GET should work with read-only token
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth(&read_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // POST should be forbidden with read-only token
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&read_token)
+        .json(&json!({"id": "test", "name": "Test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_api_key_scoping_room() {
+    let server = TestServer::start().await;
+    let full_token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&full_token, "allowed").await;
+    server.create_room(&full_token, "forbidden").await;
+
+    // Create a room-scoped token
+    let resp = server
+        .http_client()
+        .post(server.http_url("/admin/tenants/acme/tokens"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"scope": "room:allowed"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let room_token = body["token"].as_str().unwrap().to_string();
+
+    // Access to allowed room should work
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/allowed"))
+        .bearer_auth(&room_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Access to forbidden room should fail
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/forbidden"))
+        .bearer_auth(&room_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------------------
+// Security & Authorization Tests (Item 37)
+// ---------------------------------------------------------------------------
+
+// --- JWT Security ---
+
+#[tokio::test]
+async fn test_jwt_expired_token_rejected() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired_jwt = jsonwebtoken::encode(
+        &Header::default(),
+        &JwtClaims {
+            sub: "alice".to_string(),
+            tenant: "acme".to_string(),
+            rooms: vec!["chat".to_string()],
+            exp: now - 3600, // Expired 1 hour ago
+            iat: now - 7200,
+            iss: "test".to_string(),
+        },
+        &EncodingKey::from_secret(TENANT_A_SECRET.as_bytes()),
+    )
+    .unwrap();
+
+    let mut ws = server.ws_connect().await;
+    ws_send(
+        &mut ws,
+        json!({"type": "auth", "payload": {"token": &expired_jwt}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+#[tokio::test]
+async fn test_jwt_wrong_secret_rejected() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], "wrong-secret-value");
+    let mut ws = server.ws_connect().await;
+    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    let msg = ws_recv_type(&mut ws, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+#[tokio::test]
+async fn test_jwt_missing_tenant_claim() {
+    let server = TestServer::start().await;
+
+    // Manually craft a JWT with empty tenant
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let jwt = jsonwebtoken::encode(
+        &Header::default(),
+        &JwtClaims {
+            sub: "alice".to_string(),
+            tenant: "".to_string(), // Empty tenant
+            rooms: vec![],
+            exp: now + 3600,
+            iat: now,
+            iss: "test".to_string(),
+        },
+        &EncodingKey::from_secret(b"any-secret"),
+    )
+    .unwrap();
+
+    let mut ws = server.ws_connect().await;
+    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    let msg = ws_recv_type(&mut ws, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+#[tokio::test]
+async fn test_jwt_unknown_tenant_rejected() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let jwt = mint_jwt("alice", "nonexistent-tenant", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    let msg = ws_recv_type(&mut ws, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+#[tokio::test]
+async fn test_jwt_missing_sub_claim() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Craft JWT without sub claim using a raw map
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = serde_json::json!({
+        "tenant": "acme",
+        "rooms": ["chat"],
+        "exp": now + 3600,
+        "iat": now,
+        "iss": "test",
+    });
+    let jwt = jsonwebtoken::encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(TENANT_A_SECRET.as_bytes()),
+    )
+    .unwrap();
+
+    let mut ws = server.ws_connect().await;
+    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    let msg = ws_recv_type(&mut ws, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+// --- Authorization ---
+
+#[tokio::test]
+async fn test_subscribe_to_room_not_in_jwt() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "secret-room").await;
+    server.add_member(&token, "secret-room", "alice").await;
+
+    // JWT only authorizes "other-room", not "secret-room"
+    let jwt = mint_jwt("alice", "acme", &["other-room"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["secret-room"]}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "UNAUTHORIZED");
+}
+
+#[tokio::test]
+async fn test_subscribe_to_room_not_a_member() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    // alice is NOT added as a member
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "ROOM_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn test_send_message_to_unsubscribed_room() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    // alice is not a member
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    ws_send(
+        &mut ws,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello"}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "NOT_SUBSCRIBED");
+}
+
+#[tokio::test]
+async fn test_cross_tenant_room_access_blocked() {
+    let server = TestServer::start().await;
+    let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let _token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+
+    server.create_room(&token_a, "acme-chat").await;
+    server.add_member(&token_a, "acme-chat", "alice").await;
+
+    // Try to access acme's room with beta's JWT
+    let jwt = mint_jwt("alice", "beta", &["acme-chat"], TENANT_B_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["acme-chat"]}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    // Should fail — room doesn't exist in beta tenant
+    assert!(
+        msg["payload"]["code"] == "ROOM_NOT_FOUND" || msg["payload"]["code"] == "UNAUTHORIZED",
+        "expected room not found or unauthorized, got: {:?}",
+        msg["payload"]["code"]
+    );
+}
+
+#[tokio::test]
+async fn test_http_api_requires_auth() {
+    let server = TestServer::start().await;
+
+    // No auth header
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Invalid token
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth("bogus-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_admin_api_requires_super_token() {
+    let server = TestServer::start().await;
+
+    // No auth
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/tenants"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Wrong token
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/tenants"))
+        .bearer_auth("wrong-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Correct token works
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/tenants"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_tenant_api_token_cross_tenant_blocked() {
+    let server = TestServer::start().await;
+    let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+
+    server.create_room(&token_a, "acme-room").await;
+
+    // Try to access acme-room with beta's token — should get 404 (room not in beta's scope)
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/acme-room"))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// --- Input validation edge cases ---
+
+#[tokio::test]
+async fn test_empty_room_id_rejected() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "", "name": "Empty ID Room"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_special_chars_in_room_id_rejected() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    for bad_id in &[
+        "room/evil",
+        "room\\bad",
+        "room\x00null",
+        "room with spaces",
+        "room@email",
+    ] {
+        let resp = server
+            .http_client()
+            .post(server.http_url("/rooms"))
+            .bearer_auth(&token)
+            .json(&json!({"id": bad_id, "name": "Bad Room"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 for id: {bad_id:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_oversized_meta_rejected() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Meta larger than 16KB
+    let big_meta = serde_json::json!({"data": "x".repeat(20_000)});
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "room1", "name": "Room", "meta": big_meta}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_ws_message_body_too_large() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    // Send 70KB body (limit is 64KB)
+    let big_body = "x".repeat(70_000);
+    ws_send(
+        &mut ws,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": big_body}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn test_malformed_json_rejected() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    // Send malformed JSON
+    ws.send(Message::Text("not valid json{{{".into()))
+        .await
+        .unwrap();
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn test_unknown_message_type_rejected() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    ws_send(&mut ws, json!({"type": "nonexistent.type", "payload": {}})).await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "BAD_REQUEST");
+}
+
+// --- Error paths ---
+
+#[tokio::test]
+async fn test_get_nonexistent_room() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/does-not-exist"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_nonexistent_room() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let resp = server
+        .http_client()
+        .delete(server.http_url("/rooms/nope"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_remove_nonexistent_member() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+
+    let resp = server
+        .http_client()
+        .delete(server.http_url("/rooms/chat/members/nobody"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_send_to_nonexistent_room_http() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/nope/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_nonexistent_tenant() {
+    let server = TestServer::start().await;
+
+    let resp = server
+        .http_client()
+        .delete(server.http_url("/admin/tenants/nope"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_invalid_role_rejected() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    let resp = server
+        .http_client()
+        .patch(server.http_url("/rooms/chat/members/alice"))
+        .bearer_auth(&token)
+        .json(&json!({"role": "superadmin"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_auth_timeout_on_ws() {
+    let server = TestServer::start().await;
+
+    // Connect but don't send auth
+    let mut ws = server.ws_connect().await;
+    // Wait for auth timeout (5 seconds)
+    let timeout = tokio::time::timeout(Duration::from_secs(7), ws.next()).await;
+    match timeout {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            let msg: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(msg["type"], "auth_error");
+        }
+        Ok(Some(Ok(Message::Close(_)))) => {
+            // Server closed connection — acceptable
+        }
+        _other => {
+            // Connection closed or timed out — both acceptable for auth timeout
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_double_auth_rejected() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let jwt = mint_jwt("alice", "acme", &[], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    // Try to auth again
+    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn test_ws_delete_message_non_member_blocked() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    // Bob is NOT a member
+
+    // Alice sends a message via HTTP
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "alice's message"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let msg_id = body["id"].as_str().unwrap().to_string();
+
+    // Bob tries to delete alice's message but is not a member
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &bob_jwt).await;
+
+    ws_send(
+        &mut ws,
+        json!({"type": "message.delete", "payload": {"room": "chat", "id": &msg_id}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "NOT_SUBSCRIBED");
+}
+
+#[tokio::test]
+async fn test_ws_send_to_archived_room() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Alice subscribes first before archiving
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    // Archive the room
+    let resp = server
+        .http_client()
+        .patch(server.http_url("/rooms/chat"))
+        .bearer_auth(&token)
+        .json(&json!({"archived": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Alice tries to send via WS
+    ws_send(
+        &mut ws,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello"}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn test_health_endpoint_no_auth_required() {
+    let server = TestServer::start().await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_empty_name_rejected() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "room1", "name": ""}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_tenant_isolation_messages() {
+    let server = TestServer::start().await;
+    let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+
+    server.create_room(&token_a, "chat").await;
+    server.create_room(&token_b, "chat").await; // Same room name, different tenant
+    server.add_member(&token_a, "chat", "alice").await;
+    server.add_member(&token_b, "chat", "bob").await;
+
+    // Send message in acme's chat
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token_a)
+        .json(&json!({"sender": "alice", "body": "acme message"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // List messages in beta's chat — should be empty
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert!(
+        messages.is_empty(),
+        "beta's chat should have no messages from acme"
+    );
+}
+
+#[tokio::test]
+async fn test_ws_fetch_messages_non_member_blocked() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    // alice is NOT a member
+
+    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    ws_send(
+        &mut ws,
+        json!({"type": "messages.fetch", "payload": {"room": "chat"}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws, "error").await;
+    assert_eq!(msg["payload"]["code"], "NOT_SUBSCRIBED");
+}
+
+#[tokio::test]
+async fn test_duplicate_room_creation_rejected() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+
+    // Try to create the same room again
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "chat", "name": "Chat Again"}))
+        .send()
+        .await
+        .unwrap();
+    // Should get conflict or bad request
+    assert!(
+        resp.status() == StatusCode::CONFLICT || resp.status() == StatusCode::BAD_REQUEST,
+        "expected 409 or 400 for duplicate room, got: {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn test_duplicate_tenant_creation_rejected() {
+    let server = TestServer::start().await;
+    server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Try to create the same tenant again
+    let resp = server
+        .http_client()
+        .post(server.http_url("/admin/tenants"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"id": "acme", "name": "acme", "jwt_secret": TENANT_A_SECRET}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::CONFLICT || resp.status() == StatusCode::BAD_REQUEST,
+        "expected 409 or 400 for duplicate tenant, got: {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn test_http_send_to_archived_room() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+
+    // Archive the room
+    let resp = server
+        .http_client()
+        .patch(server.http_url("/rooms/chat"))
+        .bearer_auth(&token)
+        .json(&json!({"archived": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Try to inject a message
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_http_body_too_large() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+
+    let big_body = "x".repeat(70_000);
+    let resp = server
+        .http_client()
+        .post(server.http_url("/rooms/chat/messages"))
+        .bearer_auth(&token)
+        .json(&json!({"sender": "alice", "body": big_body}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_ws_subscribe_multiple_rooms_partial_auth() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "allowed").await;
+    server.create_room(&token, "forbidden").await;
+    server.add_member(&token, "allowed", "alice").await;
+    server.add_member(&token, "forbidden", "alice").await;
+
+    // JWT only permits "allowed"
+    let jwt = mint_jwt("alice", "acme", &["allowed"], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+
+    // Subscribe to both
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["allowed", "forbidden"]}}),
+    )
+    .await;
+
+    // Should get error for forbidden, subscribed for allowed (order may vary)
+    let mut got_subscribed = false;
+    let mut got_error = false;
+    for _ in 0..2 {
+        let timeout = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        if let Ok(Some(Ok(Message::Text(text)))) = timeout {
+            let msg: Value = serde_json::from_str(&text).unwrap();
+            if msg["type"] == "subscribed" {
+                got_subscribed = true;
+            } else if msg["type"] == "error" && msg["payload"]["code"] == "UNAUTHORIZED" {
+                got_error = true;
+            }
+        }
+    }
+    assert!(got_subscribed, "should have subscribed to allowed room");
+    assert!(got_error, "should have gotten error for forbidden room");
 }

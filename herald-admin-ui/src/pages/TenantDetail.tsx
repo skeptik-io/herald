@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import type { Tenant, Room } from "../api/client";
-import { PageHeader, Card, Table, Btn, Input, EmptyState, formatTime, Badge } from "../components/shared";
+import { PageHeader, Card, Table, Btn, Input, EmptyState, formatTime } from "../components/shared";
 
 export default function TenantDetail() {
   const { id } = useParams<{ id: string }>();
@@ -115,7 +115,7 @@ export default function TenantDetail() {
         {rooms.length === 0 ? (
           <EmptyState message="No rooms for this tenant" />
         ) : (
-          <Table headers={["ID", "Name", "Encryption", "Created"]}>
+          <Table headers={["ID", "Name", "Created"]}>
             {rooms.map((r) => (
               <tr key={r.id} className="hover:bg-zinc-800/50">
                 <td className="px-4 py-2.5 font-mono text-xs">
@@ -124,11 +124,6 @@ export default function TenantDetail() {
                   </Link>
                 </td>
                 <td className="px-4 py-2.5">{r.name}</td>
-                <td className="px-4 py-2.5">
-                  <Badge color={r.encryption_mode === "server_encrypted" ? "green" : "zinc"}>
-                    {r.encryption_mode}
-                  </Badge>
-                </td>
                 <td className="px-4 py-2.5 text-zinc-500 text-xs">{formatTime(r.created_at)}</td>
               </tr>
             ))}

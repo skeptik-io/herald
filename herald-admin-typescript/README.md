@@ -19,9 +19,7 @@ const admin = new HeraldAdmin({
 });
 
 // Rooms
-const room = await admin.rooms.create('general', 'General Chat', {
-  encryption_mode: 'server_encrypted',
-});
+const room = await admin.rooms.create('general', 'General Chat');
 const rooms = await admin.rooms.get('general');
 await admin.rooms.delete('general');
 

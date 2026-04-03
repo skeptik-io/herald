@@ -4,7 +4,6 @@ package herald
 type Room struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
-	EncryptionMode string `json:"encryption_mode"`
 	Meta           any    `json:"meta,omitempty"`
 	CreatedAt      int64  `json:"created_at"`
 }
@@ -66,4 +65,12 @@ type HealthResponse struct {
 	Connections int    `json:"connections"`
 	Rooms       int    `json:"rooms"`
 	UptimeSecs  int64  `json:"uptime_secs"`
+}
+
+// Tenant represents a Herald tenant.
+type Tenant struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Plan      string `json:"plan"`
+	CreatedAt int64  `json:"created_at"`
 }

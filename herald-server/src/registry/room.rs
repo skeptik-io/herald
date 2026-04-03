@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use herald_core::room::EncryptionMode;
 
 use crate::registry::connection::ConnId;
 
@@ -10,7 +9,7 @@ pub struct RoomState {
     pub members: HashSet<String>,
     pub subscribers: HashMap<String, HashSet<ConnId>>,
     pub sequence: AtomicU64,
-    pub encryption_mode: EncryptionMode,
+    pub archived: AtomicBool,
 }
 
 /// Composite key for tenant-scoped rooms.
@@ -26,19 +25,13 @@ impl RoomRegistry {
         Self::default()
     }
 
-    pub fn create_room(
-        &self,
-        tenant_id: &str,
-        room_id: &str,
-        initial_seq: u64,
-        encryption_mode: EncryptionMode,
-    ) {
+    pub fn create_room(&self, tenant_id: &str, room_id: &str, initial_seq: u64) {
         let key = (tenant_id.to_string(), room_id.to_string());
         self.rooms.entry(key).or_insert_with(|| RoomState {
             members: HashSet::new(),
             subscribers: HashMap::new(),
             sequence: AtomicU64::new(initial_seq),
-            encryption_mode,
+            archived: AtomicBool::new(false),
         });
     }
 
@@ -68,14 +61,6 @@ impl RoomRegistry {
             .get(&key)
             .map(|s| s.members.contains(user_id))
             .unwrap_or(false)
-    }
-
-    pub fn encryption_mode(&self, tenant_id: &str, room_id: &str) -> EncryptionMode {
-        let key = (tenant_id.to_string(), room_id.to_string());
-        self.rooms
-            .get(&key)
-            .map(|s| s.encryption_mode)
-            .unwrap_or_default()
     }
 
     pub fn subscribe(&self, tenant_id: &str, room_id: &str, user_id: &str, conn_id: ConnId) {
@@ -171,6 +156,21 @@ impl RoomRegistry {
             .iter()
             .filter(|entry| entry.key().0 == tenant_id)
             .count()
+    }
+
+    pub fn set_archived(&self, tenant_id: &str, room_id: &str, archived: bool) {
+        let key = (tenant_id.to_string(), room_id.to_string());
+        if let Some(state) = self.rooms.get(&key) {
+            state.archived.store(archived, Ordering::SeqCst);
+        }
+    }
+
+    pub fn is_archived(&self, tenant_id: &str, room_id: &str) -> bool {
+        let key = (tenant_id.to_string(), room_id.to_string());
+        self.rooms
+            .get(&key)
+            .map(|s| s.archived.load(Ordering::SeqCst))
+            .unwrap_or(false)
     }
 
     pub fn get_member_rooms(&self, tenant_id: &str, user_id: &str) -> Vec<String> {

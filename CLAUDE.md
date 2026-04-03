@@ -1,6 +1,6 @@
 # Herald
 
-Multi-tenant WebSocket chat server. Standalone Rust project using ShroudB for storage, encryption, search, and authorization.
+Multi-tenant WebSocket message server. Standalone Rust project using ShroudB for storage and authorization. Message body is opaque — Herald is a transport and delivery layer.
 
 ## Read Order
 
@@ -25,17 +25,17 @@ All must pass before any push.
 - **Herald is not a ShroudB engine.** Standalone project. Uses ShroudB crates (storage, store, engine crates) as dependencies.
 - **No external database.** Storage is ShroudB WAL (`shroudb-storage`). Encrypted at rest. Master key from `SHROUDB_MASTER_KEY` env var.
 - **Multi-tenant by default.** Every store key is `{tenant_id}/...`. Every registry uses `(tenant_id, room_id)` composite keys. JWT must include `tenant` claim.
-- **Three engine modes.** Embedded (in-process, ~0.02ms), Remote (TCP with circuit breaker, ~0.3ms), or Disabled (plaintext). Trait boundary (`CipherOps`, `VeilOps`, `SentryOps`) makes mode transparent to handlers.
+- **Message body is opaque.** Herald stores and delivers message bodies as-is. No server-side encryption, decryption, indexing, or search. Consumers handle their own encryption and search.
+- **Sentry for authorization.** Embedded (in-process) or Remote (TCP with circuit breaker). Fail-open when circuit trips.
 - **Single-tenant DX.** `--single-tenant` (default) auto-creates a `default` tenant from config-level `jwt_secret` and `api.tokens`. No admin API needed.
 - **No unwrap on fallible ops in production.** Use `?`, `if let`, or `match`. Mocks in `integrations/mod.rs` may use `lock().unwrap()`.
-- **Decrypt failures skip messages.** Never send ciphertext to clients.
 - **Circuit breakers on all remote calls.** 5 failures → open, 30s cooldown. Sentry fail-open (permit when circuit trips).
-- **Latency instrumented.** Every message pipeline stage has a Prometheus histogram. Check `/metrics`.
+- **Latency instrumented.** Message pipeline stages (store, fanout) have Prometheus histograms. Check `/metrics`.
 
 ## Test Structure
 
-- `tests/integration.rs` — 6 multi-tenant tests (WAL storage, no Postgres)
-- `tests/bench_latency.rs` — 3 benchmarks: plaintext WAL, encrypted remote, encrypted embedded
+- `tests/integration.rs` — multi-tenant tests (WAL storage, no Postgres)
+- `tests/bench_latency.rs` — WAL latency benchmark
 
 Tests use `EphemeralKey` (random master key per test) and `tempfile` directories for isolation.
 

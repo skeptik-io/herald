@@ -87,13 +87,20 @@ export class HeraldClient {
 
   async subscribe(rooms: string[]): Promise<SubscribedPayload[]> {
     const ref = nextRef();
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       this.pendingSubscribes.set(ref, { rooms: [...rooms], results: [], resolve });
       this.connection.send({
         type: "subscribe",
         ref,
         payload: { rooms },
       });
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        if (this.pendingSubscribes.has(ref)) {
+          this.pendingSubscribes.delete(ref);
+          reject(new HeraldError("TIMEOUT", "subscribe timed out"));
+        }
+      }, 10_000);
     });
   }
 
@@ -124,19 +131,6 @@ export class HeraldClient {
       type: "messages.fetch",
       ref,
       payload: { room, ...options },
-    }) as Promise<MessagesBatch>;
-  }
-
-  async search(
-    room: string,
-    query: string,
-    limit?: number,
-  ): Promise<MessagesBatch> {
-    const ref = nextRef();
-    return this.request(ref, {
-      type: "messages.search",
-      ref,
-      payload: { room, query, limit },
     }) as Promise<MessagesBatch>;
   }
 
@@ -279,11 +273,10 @@ export class HeraldClient {
         // Dedup
         if (this.seenMessageIds.has(msg.id)) break;
         this.seenMessageIds.add(msg.id);
-        // Cap dedup set size
+        // Cap dedup set size — keep the most recent 5000
         if (this.seenMessageIds.size > 10_000) {
-          const iter = this.seenMessageIds.values();
-          for (let i = 0; i < 5_000; i++) iter.next();
-          // Keep the most recent 5000
+          const ids = Array.from(this.seenMessageIds);
+          this.seenMessageIds = new Set(ids.slice(-5_000));
         }
         this.emit("message", msg);
         break;

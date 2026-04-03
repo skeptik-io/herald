@@ -45,9 +45,6 @@ export default function RoomDetail() {
     <div>
       <PageHeader title={room.name}>
         <div className="flex gap-2 items-center">
-          <Badge color={room.encryption_mode === "server_encrypted" ? "green" : "zinc"}>
-            {room.encryption_mode}
-          </Badge>
           <Btn
             variant="danger"
             size="xs"

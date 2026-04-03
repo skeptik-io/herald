@@ -69,11 +69,10 @@ pub enum ClientMessage {
         before: Option<Sequence>,
         limit: Option<u32>,
     },
-    MessagesSearch {
+    MessageDelete {
         ref_: Option<String>,
         room: String,
-        query: String,
-        limit: Option<u32>,
+        id: String,
     },
     Ping {
         ref_: Option<String>,
@@ -135,14 +134,10 @@ impl ClientMessage {
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok()),
             }),
-            "messages.search" => Ok(Self::MessagesSearch {
+            "message.delete" => Ok(Self::MessageDelete {
                 ref_: raw.ref_,
                 room: str_field(p, "room")?,
-                query: str_field(p, "query")?,
-                limit: p
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .and_then(|v| u32::try_from(v).ok()),
+                id: str_field(p, "id")?,
             }),
             "ping" => Ok(Self::Ping { ref_: raw.ref_ }),
             other => Err(format!("unknown message type: {other}")),
@@ -189,6 +184,8 @@ pub enum ServerMessage {
         ref_: Option<String>,
         payload: MessagesBatchPayload,
     },
+    #[serde(rename = "message.deleted")]
+    MessageDeleted { payload: MessageDeletedPayload },
     #[serde(rename = "presence.changed")]
     PresenceChanged { payload: PresenceChangedPayload },
     #[serde(rename = "cursor.moved")]
@@ -293,6 +290,13 @@ pub struct MessagesBatchPayload {
     pub room: String,
     pub messages: Vec<MessageNewPayload>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageDeletedPayload {
+    pub room: String,
+    pub id: String,
+    pub seq: Sequence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

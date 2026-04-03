@@ -1,9 +1,10 @@
-export { HeraldAdmin, type HeraldAdminOptions } from "./client.js";
+export { HeraldAdmin, type HeraldAdminOptions, type EventListOptions, type ErrorListOptions } from "./client.js";
 export { HeraldError } from "./errors.js";
 export { RoomNamespace } from "./namespaces/rooms.js";
 export { MemberNamespace } from "./namespaces/members.js";
 export { MessageNamespace } from "./namespaces/messages.js";
 export { PresenceNamespace } from "./namespaces/presence.js";
+export { TenantNamespace, type Tenant, type CreateTenantOptions, type ApiToken } from "./namespaces/tenants.js";
 export type {
   Room,
   Member,

@@ -64,10 +64,19 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      - name: Test
+      - name: Unit tests
+        run: cargo test --workspace --lib
+        env:
+          SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+      - name: Integration tests
         run: cargo test --test integration --test bench_latency -- --test-threads=1
         env:
           SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+      - name: Security audit
+        run: cargo install cargo-audit --locked && cargo audit
+        continue-on-error: true
 
   sdk-check:
     name: SDK Type Check

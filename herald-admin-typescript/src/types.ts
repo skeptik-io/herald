@@ -1,7 +1,6 @@
 export interface Room {
   id: string;
   name: string;
-  encryption_mode: string;
   meta?: unknown;
   created_at: number;
 }

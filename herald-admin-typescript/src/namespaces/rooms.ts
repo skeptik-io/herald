@@ -12,12 +12,11 @@ export class RoomNamespace {
   async create(
     id: string,
     name: string,
-    options?: { encryption_mode?: string; meta?: unknown },
+    options?: { meta?: unknown },
   ): Promise<Room> {
     return this.transport.request<Room>("POST", "/rooms", {
       id,
       name,
-      encryption_mode: options?.encryption_mode,
       meta: options?.meta,
     });
   }

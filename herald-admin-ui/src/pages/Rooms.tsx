@@ -7,7 +7,6 @@ import {
   Table,
   Btn,
   Input,
-  Select,
   Badge,
   EmptyState,
   formatTime,
@@ -52,7 +51,7 @@ export default function Rooms() {
       ) : rooms.length === 0 ? (
         <EmptyState message="No rooms yet" />
       ) : (
-        <Table headers={["ID", "Name", "Encryption", "Created", ""]}>
+        <Table headers={["ID", "Name", "Created", ""]}>
           {rooms.map((r) => (
             <tr key={r.id} className="hover:bg-zinc-800/50">
               <td className="px-4 py-2.5 font-mono text-xs">
@@ -61,11 +60,6 @@ export default function Rooms() {
                 </Link>
               </td>
               <td className="px-4 py-2.5">{r.name}</td>
-              <td className="px-4 py-2.5">
-                <Badge color={r.encryption_mode === "server_encrypted" ? "green" : "zinc"}>
-                  {r.encryption_mode}
-                </Badge>
-              </td>
               <td className="px-4 py-2.5 text-zinc-500 text-xs">
                 {formatTime(r.created_at)}
               </td>
@@ -100,7 +94,6 @@ function CreateRoomForm({
   const { client } = useAuth();
   const [id, setId] = useState("");
   const [name, setName] = useState("");
-  const [encryption, setEncryption] = useState("plaintext");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -113,7 +106,6 @@ function CreateRoomForm({
       await client.createRoom({
         id,
         name,
-        encryption_mode: encryption,
       });
       onCreated();
       onClose();
@@ -128,7 +120,7 @@ function CreateRoomForm({
     <div className="mb-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
       <h3 className="text-sm font-medium mb-3">New Room</h3>
       <form onSubmit={handleSubmit} className="space-y-3">
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-zinc-400 mb-1">ID</label>
             <Input value={id} onChange={(e) => setId(e.target.value)} required placeholder="general" />
@@ -136,13 +128,6 @@ function CreateRoomForm({
           <div>
             <label className="block text-xs text-zinc-400 mb-1">Name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} required placeholder="General Chat" />
-          </div>
-          <div>
-            <label className="block text-xs text-zinc-400 mb-1">Encryption</label>
-            <Select value={encryption} onChange={(e) => setEncryption(e.target.value)}>
-              <option value="plaintext">Plaintext</option>
-              <option value="server_encrypted">Server Encrypted</option>
-            </Select>
           </div>
         </div>
         {error && <p className="text-sm text-red-400">{error}</p>}

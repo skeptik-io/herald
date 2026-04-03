@@ -23,8 +23,31 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "tenants": state.tenant_cache.len(),
         "uptime_secs": state.start_time.elapsed().as_secs(),
         "storage": storage_ok,
-        "cipher": state.cipher.is_some(),
-        "veil": state.veil.is_some(),
+        "sentry": state.sentry.is_some(),
+    });
+
+    let http_status = if storage_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (http_status, Json(checks))
+}
+
+/// Liveness probe -- always 200 if process is running.
+pub async fn liveness() -> impl IntoResponse {
+    Json(serde_json::json!({"status": "alive"}))
+}
+
+/// Readiness probe -- checks storage and integration health.
+pub async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let storage_health = state.db.engine().health();
+    let storage_ok = matches!(storage_health, shroudb_storage::engine::HealthState::Ready);
+
+    let checks = serde_json::json!({
+        "status": if storage_ok { "ready" } else { "not_ready" },
+        "storage": storage_ok,
         "sentry": state.sentry.is_some(),
     });
 

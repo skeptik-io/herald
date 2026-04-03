@@ -14,6 +14,23 @@ pub const NS_MESSAGES: &str = "herald.messages";
 pub const NS_CURSORS: &str = "herald.cursors";
 
 /// Initialize all namespaces on startup.
+#[cfg(test)]
+pub(crate) async fn test_store() -> std::sync::Arc<shroudb_storage::EmbeddedStore> {
+    let dir = tempfile::tempdir().unwrap();
+    let config = shroudb_storage::StorageEngineConfig {
+        data_dir: dir.keep(),
+        ..Default::default()
+    };
+    let engine = std::sync::Arc::new(
+        shroudb_storage::StorageEngine::open(config, &shroudb_storage::EphemeralKey)
+            .await
+            .unwrap(),
+    );
+    let store = std::sync::Arc::new(shroudb_storage::EmbeddedStore::new(engine, "test"));
+    init_namespaces(&*store).await.unwrap();
+    store
+}
+
 pub async fn init_namespaces<S: Store>(store: &S) -> Result<(), shroudb_store::StoreError> {
     let config = shroudb_store::NamespaceConfig::default();
     for ns in [

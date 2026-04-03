@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use herald_core::protocol::ServerMessage;
@@ -18,7 +19,12 @@ pub fn fanout_to_room(
             if Some(conn_id) == exclude_conn {
                 continue;
             }
-            state.connections.send_to_conn(conn_id, msg);
+            if !state.connections.send_to_conn(conn_id, msg) {
+                state
+                    .metrics
+                    .messages_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }

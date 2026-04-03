@@ -5,8 +5,6 @@ export interface HealthResponse {
   tenants: number;
   uptime_secs: number;
   storage: boolean;
-  cipher: boolean;
-  veil: boolean;
   sentry: boolean;
 }
 
@@ -21,7 +19,6 @@ export interface Tenant {
 export interface Room {
   id: string;
   name: string;
-  encryption_mode: string;
   meta?: Record<string, unknown>;
   created_at: number;
 }
@@ -251,7 +248,7 @@ export class HeraldClient {
   getRoom(id: string) {
     return this.request<Room>("GET", `/rooms/${enc(id)}`);
   }
-  createRoom(data: { id: string; name: string; encryption_mode?: string; meta?: Record<string, unknown> }) {
+  createRoom(data: { id: string; name: string; meta?: Record<string, unknown> }) {
     return this.request<Room>("POST", "/rooms", data);
   }
   updateRoom(id: string, data: { name?: string; meta?: Record<string, unknown> }) {

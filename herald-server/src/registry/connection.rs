@@ -38,6 +38,9 @@ type UserKey = (String, String);
 pub struct ConnectionRegistry {
     by_conn: DashMap<ConnId, ConnectionHandle>,
     by_user: DashMap<UserKey, HashSet<ConnId>>,
+    /// Generation counter per user — incremented on every connect.
+    /// Used by presence linger to detect reconnects during the linger window.
+    by_generation: DashMap<UserKey, u64>,
 }
 
 impl ConnectionRegistry {
@@ -98,9 +101,12 @@ impl ConnectionRegistry {
         }
     }
 
-    pub fn send_to_conn(&self, conn_id: ConnId, msg: &ServerMessage) {
+    /// Returns true if sent, false if dropped (channel full or conn not found).
+    pub fn send_to_conn(&self, conn_id: ConnId, msg: &ServerMessage) -> bool {
         if let Some(handle) = self.by_conn.get(&conn_id) {
-            let _ = handle.tx.try_send(msg.clone());
+            handle.tx.try_send(msg.clone()).is_ok()
+        } else {
+            false
         }
     }
 
@@ -119,5 +125,26 @@ impl ConnectionRegistry {
 
     pub fn total_connections(&self) -> usize {
         self.by_conn.len()
+    }
+
+    /// Increment and return the generation counter for a user.
+    pub fn increment_generation(&self, tenant_id: &str, user_id: &str) -> u64 {
+        let key = (tenant_id.to_string(), user_id.to_string());
+        let mut entry = self.by_generation.entry(key).or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    /// Send a message to all connected clients (used for shutdown notification).
+    pub fn broadcast_all(&self, msg: &ServerMessage) {
+        for entry in self.by_conn.iter() {
+            let _ = entry.value().tx.try_send(msg.clone());
+        }
+    }
+
+    /// Get the current generation for a user.
+    pub fn current_generation(&self, tenant_id: &str, user_id: &str) -> u64 {
+        let key = (tenant_id.to_string(), user_id.to_string());
+        self.by_generation.get(&key).map(|v| *v).unwrap_or(0)
     }
 }

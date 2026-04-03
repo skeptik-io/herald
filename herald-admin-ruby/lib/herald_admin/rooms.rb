@@ -6,9 +6,8 @@ module HeraldAdmin
       @t = transport
     end
 
-    def create(id, name, encryption_mode: nil, meta: nil)
+    def create(id, name, meta: nil)
       body = { id: id, name: name }
-      body[:encryption_mode] = encryption_mode if encryption_mode
       body[:meta] = meta if meta
       data = @t.request("POST", "/rooms", body)
       Room.new(**data.transform_keys(&:to_sym))
@@ -24,6 +23,11 @@ module HeraldAdmin
       body[:name] = name if name
       body[:meta] = meta if meta
       @t.request("PATCH", "/rooms/#{ERB::Util.url_encode(id)}", body)
+    end
+
+    def list
+      data = @t.request("GET", "/rooms")
+      data["rooms"].map { |r| Room.new(**r.transform_keys(&:to_sym)) }
     end
 
     def delete(id)

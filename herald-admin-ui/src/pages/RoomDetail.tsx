@@ -342,20 +342,38 @@ function MessagesTab({ roomId }: { roomId: string }) {
           {messages.map((m) => (
             <div
               key={m.id}
-              className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3"
+              className={`rounded-lg border px-4 py-3 overflow-hidden ${
+                m.sender === "system"
+                  ? "border-zinc-800/50 bg-zinc-900/50"
+                  : "border-zinc-800 bg-zinc-900"
+              }`}
             >
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-sm font-medium">{m.sender}</span>
-                <span className="text-xs text-zinc-500">seq {m.seq}</span>
-                <span className="text-xs text-zinc-600">{formatTime(m.sent_at)}</span>
-                <span className="text-xs text-zinc-700 font-mono ml-auto">{m.id}</span>
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <span
+                  className={`text-sm font-medium ${
+                    m.sender === "system" ? "text-zinc-500" : "text-zinc-200"
+                  }`}
+                >
+                  {m.sender}
+                </span>
+                <span className="text-xs text-zinc-600">seq {m.seq}</span>
+                <span className="text-xs text-zinc-600">
+                  {formatTime(m.sent_at)}
+                </span>
               </div>
-              <p className="text-sm text-zinc-300">{m.body}</p>
+              {m.body && (
+                <p className="text-sm text-zinc-300 break-words">{m.body}</p>
+              )}
               {m.meta && Object.keys(m.meta).length > 0 && (
-                <pre className="mt-1 text-xs text-zinc-500 font-mono">
+                <pre className="mt-1 text-xs text-zinc-500 font-mono overflow-x-auto max-w-full whitespace-pre-wrap break-all">
                   {JSON.stringify(m.meta)}
                 </pre>
               )}
+              <div className="mt-1">
+                <span className="text-[10px] text-zinc-700 font-mono break-all">
+                  {m.id}
+                </span>
+              </div>
             </div>
           ))}
 

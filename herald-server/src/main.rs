@@ -33,10 +33,6 @@ async fn main() -> anyhow::Result<()> {
     // Pull secrets from Keep if HERALD_KEEP_ADDR is set
     config.load_secrets_from_keep().await?;
 
-    if multi_tenant && config.auth.super_admin_token.is_none() {
-        anyhow::bail!("auth.super_admin_token is required in multi-tenant mode");
-    }
-
     // Open ShroudB storage engine
     let data_dir = &config.store.path;
     if let Some(parent) = data_dir.parent() {
@@ -202,16 +198,22 @@ async fn main() -> anyhow::Result<()> {
         chronicle,
     });
 
-    // Tenant setup
+    // Always hydrate all tenants from Store
+    state.hydrate_tenant_cache().await?;
+
+    // In single-tenant mode, ensure a default tenant exists
     if single_tenant {
         let tid = state.bootstrap_single_tenant().await?;
-        info!(tenant = %tid, "single-tenant mode — default tenant bootstrapped");
-    } else {
-        state.hydrate_tenant_cache().await?;
         info!(
+            tenant = %tid,
             tenants = state.tenant_cache.len(),
-            "multi-tenant mode — tenant cache hydrated"
+            "single-tenant mode — default tenant bootstrapped"
         );
+    } else {
+        if state.config.auth.super_admin_token.is_none() {
+            anyhow::bail!("auth.super_admin_token is required in multi-tenant mode");
+        }
+        info!(tenants = state.tenant_cache.len(), "multi-tenant mode");
     }
 
     // Hydrate rooms + members into memory

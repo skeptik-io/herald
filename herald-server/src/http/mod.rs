@@ -23,6 +23,7 @@ pub struct TenantId(pub String);
 pub fn router(state: Arc<AppState>) -> Router {
     let tenant_api = Router::new()
         .route("/rooms", post(rooms::create_room))
+        .route("/rooms", get(rooms::list_rooms))
         .route("/rooms/{id}", get(rooms::get_room))
         .route("/rooms/{id}", patch(rooms::update_room))
         .route("/rooms/{id}", delete(rooms::delete_room))
@@ -58,6 +59,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/admin/tenants/{id}", delete(admin::delete_tenant))
         .route("/admin/tenants/{id}/tokens", post(admin::create_api_token))
         .route("/admin/tenants/{id}/tokens", get(admin::list_api_tokens))
+        .route(
+            "/admin/tenants/{id}/tokens/{token}",
+            delete(admin::delete_api_token),
+        )
+        .route("/admin/tenants/{id}/rooms", get(admin::list_tenant_rooms))
+        .route("/admin/connections", get(admin::list_connections))
+        .route("/admin/events", get(admin::list_events))
+        .route("/admin/events/stream", get(admin::events_stream))
+        .route("/admin/errors", get(admin::list_errors))
+        .route("/admin/stats", get(admin::get_stats))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

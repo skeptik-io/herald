@@ -4,6 +4,11 @@ import type { Room } from "../types.js";
 export class RoomNamespace {
   constructor(private transport: HttpTransport) {}
 
+  async list(): Promise<Room[]> {
+    const res = await this.transport.request<{ rooms: Room[] }>("GET", "/rooms");
+    return res.rooms;
+  }
+
   async create(
     id: string,
     name: string,

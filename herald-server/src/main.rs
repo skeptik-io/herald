@@ -237,6 +237,27 @@ async fn main() -> anyhow::Result<()> {
 
     info!(rooms = all_rooms.len(), "hydrated room state");
 
+    // Stats snapshot collector — every 5 minutes
+    let stats_state = state.clone();
+    let stats_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            let connections = stats_state.connections.total_connections() as u64;
+            let messages = stats_state
+                .metrics
+                .messages_sent
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let rooms = stats_state.rooms.room_count() as u64;
+            let auth_failures = stats_state
+                .metrics
+                .ws_auth_failures
+                .load(std::sync::atomic::Ordering::Relaxed);
+            stats_state
+                .event_bus
+                .record_snapshot(connections, messages, rooms, auth_failures);
+        }
+    });
+
     // TTL cleanup
     let cleanup_db = state.db.clone();
     let cleanup_handle = tokio::spawn(async move {
@@ -307,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
         info!("shutdown signal received, draining...");
         let _ = shutdown_tx.send(true);
         cleanup_handle.abort();
+        stats_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
             let _ = ws_handle.await;
@@ -341,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
         info!("shutdown signal received, draining...");
         let _ = shutdown_tx.send(true);
         cleanup_handle.abort();
+        stats_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
             let _ = ws_handle.await;

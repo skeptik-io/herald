@@ -90,6 +90,20 @@ pub async fn create_room(
     (StatusCode::CREATED, Json(room)).into_response()
 }
 
+pub async fn list_rooms(
+    State(state): State<Arc<AppState>>,
+    Extension(tenant): Extension<TenantId>,
+) -> impl IntoResponse {
+    match store::rooms::list_by_tenant(&*state.db, &tenant.0).await {
+        Ok(rooms) => Json(serde_json::json!({ "rooms": rooms })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn get_room(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

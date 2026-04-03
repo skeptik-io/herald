@@ -250,6 +250,17 @@ async fn handle_send(
 
     state.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
 
+    state.event_bus.push_event(
+        crate::admin_events::EventKind::Message,
+        Some(tid.to_string()),
+        serde_json::json!({
+            "room": &room,
+            "sender": &ctx.user_id,
+            "msg_id": &msg_id,
+            "seq": seq,
+        }),
+    );
+
     // Index
     let index_start = std::time::Instant::now();
     state.index_message(tid, &room, &msg_id, &body).await;

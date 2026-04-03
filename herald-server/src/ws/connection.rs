@@ -77,6 +77,19 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 .metrics
                 .ws_auth_failures
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            state.event_bus.push_event(
+                crate::admin_events::EventKind::AuthFailure,
+                None,
+                serde_json::json!({
+                    "conn_id": conn_id.to_string(),
+                    "error": &e,
+                }),
+            );
+            state.event_bus.push_error(
+                crate::admin_events::ErrorCategory::Client,
+                format!("Auth failure: {e}"),
+                serde_json::json!({"conn_id": conn_id.to_string()}),
+            );
             let _ = msg_tx
                 .send(ServerMessage::AuthError {
                     ref_: auth_ref.clone(),
@@ -126,6 +139,15 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             },
         })
         .await;
+
+    state.event_bus.push_event(
+        crate::admin_events::EventKind::Connection,
+        Some(tenant_id.clone()),
+        serde_json::json!({
+            "conn_id": conn_id.to_string(),
+            "user_id": &user_id,
+        }),
+    );
 
     broadcast_presence_change(&state, &tenant_id, &user_id);
 
@@ -181,12 +203,22 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             handle_message(&state, &mut ctx, &msg_tx, client_msg).await;
                         }
                         Err(e) => {
+                            state.event_bus.push_error(
+                                crate::admin_events::ErrorCategory::Client,
+                                format!("Bad request: {e}"),
+                                serde_json::json!({"conn_id": conn_id.to_string(), "user_id": &ctx.user_id}),
+                            );
                             let _ = msg_tx
                                 .send(ServerMessage::error(None, ErrorCode::BadRequest, e))
                                 .await;
                         }
                     },
                     Err(e) => {
+                        state.event_bus.push_error(
+                            crate::admin_events::ErrorCategory::Client,
+                            format!("Invalid JSON: {e}"),
+                            serde_json::json!({"conn_id": conn_id.to_string(), "user_id": &ctx.user_id}),
+                        );
                         let _ = msg_tx
                             .send(ServerMessage::error(
                                 None,
@@ -203,6 +235,16 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     }
 
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "disconnected");
+
+    state.event_bus.push_event(
+        crate::admin_events::EventKind::Disconnection,
+        Some(tenant_id.clone()),
+        serde_json::json!({
+            "conn_id": conn_id.to_string(),
+            "user_id": &user_id,
+        }),
+    );
+
     state
         .rooms
         .unsubscribe_conn_from_all(conn_id, &tenant_id, &user_id);

@@ -1115,3 +1115,525 @@ async fn test_stress_rapid_messages() {
 
     assert_eq!(acks, count, "expected {count} acks, got {acks}");
 }
+
+// ---------------------------------------------------------------------------
+// Admin endpoint tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_admin_list_rooms() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_lr", TENANT_A_SECRET).await;
+
+    // List rooms when empty
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rooms"].as_array().unwrap().len(), 0);
+
+    // Create rooms then list
+    server.create_room(&token, "chat").await;
+    server.create_room(&token, "support").await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rooms"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_admin_tenant_rooms() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_tr", TENANT_A_SECRET).await;
+    server.create_room(&token, "room1").await;
+    server.create_room(&token, "room2").await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/tenants/tenant_tr/rooms"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rooms"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_admin_token_revocation() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_rev", TENANT_A_SECRET).await;
+
+    // Token should work
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Revoke the token
+    let resp = server
+        .http_client()
+        .delete(server.http_url(&format!(
+            "/admin/tenants/tenant_rev/tokens/{token}"
+        )))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Token should no longer work
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_admin_token_revocation_wrong_tenant() {
+    let server = TestServer::start().await;
+    let token_a = server.create_tenant("tenant_a_rev", TENANT_A_SECRET).await;
+    server.create_tenant("tenant_b_rev", TENANT_B_SECRET).await;
+
+    // Try to revoke tenant_a's token via tenant_b — should 404
+    let resp = server
+        .http_client()
+        .delete(server.http_url(&format!(
+            "/admin/tenants/tenant_b_rev/tokens/{token_a}"
+        )))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Original token should still work
+    let resp = server
+        .http_client()
+        .get(server.http_url("/rooms"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_admin_connections() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_conn", TENANT_A_SECRET).await;
+    server.create_room(&token, "room").await;
+    server.add_member(&token, "room", "alice").await;
+
+    // No connections initially
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/connections"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"].as_u64().unwrap(), 0);
+
+    // Connect a WebSocket client
+    let mut ws = server.ws_connect().await;
+    ws_auth(
+        &mut ws,
+        &mint_jwt("alice", "tenant_conn", &["room"], TENANT_A_SECRET),
+    )
+    .await;
+
+    // Now should have 1 connection
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/connections"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"].as_u64().unwrap(), 1);
+    let by_tenant = body["by_tenant"].as_array().unwrap();
+    assert_eq!(by_tenant.len(), 1);
+    assert_eq!(by_tenant[0]["tenant_id"], "tenant_conn");
+    assert_eq!(by_tenant[0]["connections"].as_u64().unwrap(), 1);
+
+    // Disconnect
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/connections"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_admin_events() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_ev", TENANT_A_SECRET).await;
+    server.create_room(&token, "room").await;
+    server.add_member(&token, "room", "bob").await;
+
+    // Connect and disconnect to generate events
+    let mut ws = server.ws_connect().await;
+    ws_auth(
+        &mut ws,
+        &mint_jwt("bob", "tenant_ev", &["room"], TENANT_A_SECRET),
+    )
+    .await;
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Fetch events
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/events?limit=10"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    let events = body["events"].as_array().unwrap();
+
+    // Should have at least connection + disconnection
+    assert!(events.len() >= 2, "expected at least 2 events, got {}", events.len());
+
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"disconnection"), "missing disconnection event");
+    assert!(kinds.contains(&"connection"), "missing connection event");
+
+    // Test after_id filtering — get events after the first one
+    let first_id = events.last().unwrap()["id"].as_u64().unwrap();
+    let resp = server
+        .http_client()
+        .get(server.http_url(&format!("/admin/events?after_id={first_id}")))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let filtered = body["events"].as_array().unwrap();
+    assert!(
+        filtered.len() < events.len(),
+        "after_id filter should return fewer events"
+    );
+}
+
+#[tokio::test]
+async fn test_admin_events_message() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_evm", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "carol").await;
+
+    // Connect, subscribe, and send a message
+    let mut ws = server.ws_connect().await;
+    ws_auth(
+        &mut ws,
+        &mint_jwt("carol", "tenant_evm", &["chat"], TENANT_A_SECRET),
+    )
+    .await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    ws_send(
+        &mut ws,
+        json!({"type": "message.send", "ref": "m1", "payload": {"room": "chat", "body": "hello"}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "message.ack").await;
+
+    // Check events include a message event
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/events?limit=20"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let events = body["events"].as_array().unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"message"), "expected message event in: {kinds:?}");
+
+    // Verify message event details
+    let msg_event = events.iter().find(|e| e["kind"] == "message").unwrap();
+    assert_eq!(msg_event["details"]["room"], "chat");
+    assert_eq!(msg_event["details"]["sender"], "carol");
+    assert_eq!(msg_event["tenant_id"], "tenant_evm");
+}
+
+#[tokio::test]
+async fn test_admin_errors_auth_failure() {
+    let server = TestServer::start().await;
+    server.create_tenant("tenant_err", TENANT_A_SECRET).await;
+
+    // Trigger auth failure with bad JWT
+    let bad_jwt = mint_jwt("hacker", "tenant_err", &["room"], "wrong-secret");
+    let mut ws = server.ws_connect().await;
+    ws_send(
+        &mut ws,
+        json!({"type": "auth", "payload": {"token": bad_jwt}}),
+    )
+    .await;
+    // Wait for connection to close/reject
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(ws);
+
+    // Check error logs
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/errors?category=client"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    let errors = body["errors"].as_array().unwrap();
+    assert!(
+        !errors.is_empty(),
+        "expected at least one client error after auth failure"
+    );
+    let err = &errors[0];
+    assert_eq!(err["category"], "client");
+    assert!(
+        err["message"].as_str().unwrap().contains("Auth failure"),
+        "error message should mention auth: {:?}",
+        err["message"]
+    );
+}
+
+#[tokio::test]
+async fn test_admin_errors_empty() {
+    let server = TestServer::start().await;
+
+    // All categories should be empty initially
+    for cat in &["client", "webhook", "http"] {
+        let resp = server
+            .http_client()
+            .get(server.http_url(&format!("/admin/errors?category={cat}")))
+            .bearer_auth(SUPER_ADMIN_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["errors"].as_array().unwrap().len(), 0);
+    }
+}
+
+#[tokio::test]
+async fn test_admin_stats() {
+    let server = TestServer::start().await;
+
+    // Stats should return valid structure even with no snapshots
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/stats"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+
+    // Today summary should be present
+    assert!(body["today"].is_object(), "missing today summary");
+    assert!(
+        body["today"]["peak_connections"].is_number(),
+        "missing peak_connections"
+    );
+    assert!(
+        body["today"]["messages_today"].is_number(),
+        "missing messages_today"
+    );
+    assert!(
+        body["today"]["webhooks_today"].is_number(),
+        "missing webhooks_today"
+    );
+
+    // Snapshots array should exist (may be empty if no snapshots recorded yet)
+    assert!(body["snapshots"].is_array(), "missing snapshots array");
+}
+
+#[tokio::test]
+async fn test_admin_stats_with_snapshot() {
+    let server = TestServer::start().await;
+
+    // Manually record a snapshot via the event bus
+    let messages_total = server
+        .state
+        .metrics
+        .messages_sent
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let auth_failures = server
+        .state
+        .metrics
+        .ws_auth_failures
+        .load(std::sync::atomic::Ordering::Relaxed);
+    server.state.event_bus.record_snapshot(
+        5,
+        messages_total,
+        2,
+        auth_failures,
+    );
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/admin/stats"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let snapshots = body["snapshots"].as_array().unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0]["connections"].as_u64().unwrap(), 5);
+    assert_eq!(snapshots[0]["rooms"].as_u64().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn test_admin_stats_time_range_filter() {
+    let server = TestServer::start().await;
+
+    // Record two snapshots
+    server.state.event_bus.record_snapshot(1, 0, 0, 0);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    server.state.event_bus.record_snapshot(2, 10, 1, 0);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    // Query all (wide range)
+    let resp = server
+        .http_client()
+        .get(server.http_url(&format!(
+            "/admin/stats?from={}&to={}",
+            now - 60_000,
+            now + 60_000
+        )))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["snapshots"].as_array().unwrap().len(), 2);
+
+    // Query with future range — should get 0
+    let resp = server
+        .http_client()
+        .get(server.http_url(&format!(
+            "/admin/stats?from={}&to={}",
+            now + 60_000,
+            now + 120_000
+        )))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["snapshots"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_admin_events_stream_sse() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("tenant_sse", TENANT_A_SECRET).await;
+    server.create_room(&token, "room").await;
+    server.add_member(&token, "room", "eve").await;
+
+    // Connect to SSE stream
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(server.http_url("/admin/events/stream"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The content type should be SSE
+    let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(
+        content_type.contains("text/event-stream"),
+        "expected SSE content type, got: {content_type}"
+    );
+}
+
+#[tokio::test]
+async fn test_admin_endpoints_require_auth() {
+    let server = TestServer::start().await;
+
+    let admin_paths = vec![
+        "/admin/events",
+        "/admin/errors",
+        "/admin/stats",
+        "/admin/connections",
+    ];
+
+    for path in admin_paths {
+        // No auth
+        let resp = server
+            .http_client()
+            .get(server.http_url(path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} should require auth"
+        );
+
+        // Wrong token
+        let resp = server
+            .http_client()
+            .get(server.http_url(path))
+            .bearer_auth("wrong-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} should reject wrong token"
+        );
+    }
+}

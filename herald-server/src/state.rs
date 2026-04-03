@@ -4,6 +4,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use jsonwebtoken::{DecodingKey, Validation};
 
+use crate::admin_events::EventBus;
 use crate::config::{HeraldConfig, WebhookConfig};
 use crate::integrations::{
     AuditEvent, ChronicleOps, CipherOps, CourierOps, SearchHit, SentryOps, VeilOps,
@@ -131,6 +132,7 @@ pub struct AppState {
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
     pub metrics: Metrics,
+    pub event_bus: Arc<EventBus>,
     webhook_config: Option<Arc<WebhookConfig>>,
     webhook_client: reqwest::Client,
 }
@@ -169,6 +171,7 @@ impl AppState {
             courier: b.courier,
             chronicle: b.chronicle,
             metrics: Metrics::default(),
+            event_bus: EventBus::new(),
             webhook_config,
             webhook_client: reqwest::Client::new(),
         })
@@ -284,7 +287,13 @@ impl AppState {
 
     pub fn fire_webhook(&self, event: WebhookEvent) {
         if let Some(ref config) = self.webhook_config {
-            crate::webhook::deliver(config.clone(), self.webhook_client.clone(), event);
+            self.event_bus.increment_webhooks();
+            crate::webhook::deliver(
+                config.clone(),
+                self.webhook_client.clone(),
+                event,
+                self.event_bus.clone(),
+            );
         }
     }
 

@@ -5,6 +5,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tracing::{debug, warn};
 
+use crate::admin_events::EventBus;
 use crate::config::WebhookConfig;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -41,7 +42,12 @@ fn sign(secret: &str, timestamp: i64, body: &str) -> String {
     format!("sha256={}", hex::encode(result.into_bytes()))
 }
 
-pub fn deliver(config: Arc<WebhookConfig>, client: reqwest::Client, event: WebhookEvent) {
+pub fn deliver(
+    config: Arc<WebhookConfig>,
+    client: reqwest::Client,
+    event: WebhookEvent,
+    event_bus: Arc<EventBus>,
+) {
     tokio::spawn(async move {
         let body = match serde_json::to_string(&event) {
             Ok(b) => b,
@@ -99,6 +105,15 @@ pub fn deliver(config: Arc<WebhookConfig>, client: reqwest::Client, event: Webho
             }
         }
 
+        event_bus.push_error(
+            crate::admin_events::ErrorCategory::Webhook,
+            format!("Webhook delivery failed after {} retries: {}", config.retries, event.event),
+            serde_json::json!({
+                "event": &event.event,
+                "room": &event.room,
+                "url": &config.url,
+            }),
+        );
         warn!(
             event = %event.event,
             room = %event.room,

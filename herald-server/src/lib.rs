@@ -1,3 +1,4 @@
+pub mod admin_events;
 pub mod config;
 pub mod http;
 pub mod integrations;

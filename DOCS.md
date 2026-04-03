@@ -160,6 +160,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | Method | Path | Description |
 |---|---|---|
 | `POST /rooms` | Create room | `{id, name, encryption_mode?, meta?}` |
+| `GET /rooms` | List rooms | Returns `{rooms: [...]}` |
 | `GET /rooms/:id` | Get room | |
 | `PATCH /rooms/:id` | Update room | `{name?, meta?}` |
 | `DELETE /rooms/:id` | Delete room | |

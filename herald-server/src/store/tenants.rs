@@ -109,6 +109,25 @@ pub async fn validate_token<S: Store>(
     }
 }
 
+pub async fn delete_token<S: Store>(
+    store: &S,
+    token: &str,
+    tenant_id: &str,
+) -> Result<bool, anyhow::Error> {
+    // Verify token belongs to this tenant
+    match store.get(NS_API_TOKENS, token.as_bytes(), None).await {
+        Ok(entry) => {
+            if entry.value != tenant_id.as_bytes() {
+                return Ok(false);
+            }
+            store.delete(NS_API_TOKENS, token.as_bytes()).await?;
+            Ok(true)
+        }
+        Err(shroudb_store::StoreError::NotFound) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub async fn list_tokens<S: Store>(
     store: &S,
     tenant_id: &str,

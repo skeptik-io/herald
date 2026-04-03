@@ -5789,3 +5789,115 @@ async fn test_http_trigger_with_exclude() {
     let timeout = tokio::time::timeout(Duration::from_millis(500), ws_alice.next()).await;
     assert!(timeout.is_err(), "alice should not receive excluded event");
 }
+
+#[tokio::test]
+async fn test_reconnect_reauth_and_resubscribe() {
+    // Tests that the server correctly handles a client that disconnects,
+    // reconnects, re-authenticates, and re-subscribes.
+    // This validates the server-side behavior that the SDK fix depends on.
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+
+    // Connect alice, authenticate, subscribe
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &alice_jwt).await;
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws, "subscribed").await;
+
+    // Drain extra messages (subscriber count, etc.)
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+            Ok(Some(Ok(Message::Text(_)))) => continue,
+            _ => break,
+        }
+    }
+
+    // Send a message to confirm subscription works
+    ws_send(
+        &mut ws,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "before disconnect"}}),
+    )
+    .await;
+    let ack = ws_recv_type(&mut ws, "message.ack").await;
+    assert!(ack["payload"]["id"].is_string());
+
+    // --- Disconnect (simulate connection drop) ---
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // --- Reconnect: new WebSocket, re-authenticate, re-subscribe ---
+    let mut ws2 = server.ws_connect().await;
+
+    // Re-authenticate with the same JWT
+    let auth_ok = ws_auth(&mut ws2, &alice_jwt).await;
+    assert_eq!(auth_ok["payload"]["user_id"], "alice");
+    // New connection should get a new connection_id
+    assert!(auth_ok["payload"]["connection_id"].is_number());
+
+    // Re-subscribe
+    ws_send(
+        &mut ws2,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    let sub = ws_recv_type(&mut ws2, "subscribed").await;
+    assert_eq!(sub["payload"]["room"], "chat");
+
+    // Drain extra
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), ws2.next()).await {
+            Ok(Some(Ok(Message::Text(_)))) => continue,
+            _ => break,
+        }
+    }
+
+    // Verify subscription works after reconnect — send a message
+    ws_send(
+        &mut ws2,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "after reconnect"}}),
+    )
+    .await;
+    let ack2 = ws_recv_type(&mut ws2, "message.ack").await;
+    assert!(ack2["payload"]["id"].is_string());
+
+    // Connect bob and verify he can receive alice's messages (fanout works)
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Drain
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await {
+            Ok(Some(Ok(Message::Text(_)))) => continue,
+            _ => break,
+        }
+    }
+
+    // Alice sends via reconnected connection
+    ws_send(
+        &mut ws2,
+        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello from reconnected alice"}}),
+    )
+    .await;
+    ws_recv_type(&mut ws2, "message.ack").await;
+
+    // Bob receives it
+    let msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    assert_eq!(msg["payload"]["body"], "hello from reconnected alice");
+    assert_eq!(msg["payload"]["sender"], "alice");
+}

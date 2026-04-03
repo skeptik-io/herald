@@ -43,6 +43,10 @@ export class HeraldClient {
   private lastSeenAt: number | null = null;
   private seenMessageIds = new Set<string>();
   private _connectionId: number | null = null;
+  private _initialConnectDone = false;
+
+  // Track subscribed rooms for re-subscribe on reconnect
+  private subscribedRooms = new Set<string>();
 
   // Pending request/response correlation
   private pending = new Map<
@@ -88,9 +92,12 @@ export class HeraldClient {
   async connect(): Promise<void> {
     await this.connection.connect();
     await this.authenticate();
+    this._initialConnectDone = true;
   }
 
   disconnect(): void {
+    this._initialConnectDone = false;
+    this.subscribedRooms.clear();
     this.connection.close();
     this.pending.clear();
     this.pendingSubscribes.clear();
@@ -107,6 +114,10 @@ export class HeraldClient {
         ref,
         payload: { rooms },
       });
+      // Track for re-subscribe on reconnect
+      for (const room of rooms) {
+        this.subscribedRooms.add(room);
+      }
       // Timeout after 10 seconds
       setTimeout(() => {
         if (this.pendingSubscribes.has(ref)) {
@@ -118,6 +129,9 @@ export class HeraldClient {
   }
 
   unsubscribe(rooms: string[]): void {
+    for (const room of rooms) {
+      this.subscribedRooms.delete(room);
+    }
     this.connection.send({
       type: "unsubscribe",
       payload: { rooms },
@@ -449,10 +463,20 @@ export class HeraldClient {
     // Emit specific state events
     switch (state) {
       case "connected":
+        // On reconnect (not initial connect), re-authenticate and re-subscribe
+        if (this._initialConnectDone) {
+          this.handleReconnect();
+        }
         this.emit("connected", undefined as never);
         break;
       case "disconnected":
         this._connectionId = null;
+        // Clear pending requests — they'll never resolve on a dead connection
+        for (const [, p] of this.pending) {
+          p.reject(new HeraldError("DISCONNECTED", "connection lost"));
+        }
+        this.pending.clear();
+        this.pendingSubscribes.clear();
         this.emit("disconnected", undefined as never);
         break;
       case "connecting":
@@ -465,6 +489,28 @@ export class HeraldClient {
       try {
         handler("state_change", { previous, current: state });
       } catch { }
+    }
+  }
+
+  private async handleReconnect(): Promise<void> {
+    try {
+      // Re-authenticate with the current token
+      await this.authenticate();
+
+      // Re-subscribe to all previously subscribed rooms
+      if (this.subscribedRooms.size > 0) {
+        const rooms = Array.from(this.subscribedRooms);
+        // Fire-and-forget subscribe — don't block on it, just send the frame.
+        // The subscribed responses will come through handleFrame normally.
+        this.connection.send({
+          type: "subscribe",
+          payload: { rooms },
+        });
+      }
+    } catch {
+      // Auth failed on reconnect — the server will close the connection,
+      // triggering another reconnect attempt. Don't emit error here to
+      // avoid confusing the consumer; the connection state machine handles it.
     }
   }
 

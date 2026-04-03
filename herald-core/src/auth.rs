@@ -9,4 +9,6 @@ pub struct JwtClaims {
     pub exp: u64,
     pub iat: u64,
     pub iss: String,
+    #[serde(default)]
+    pub watchlist: Vec<String>,
 }

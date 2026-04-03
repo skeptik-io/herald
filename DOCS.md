@@ -99,6 +99,7 @@ When `[shroudb]` is absent, engines run embedded (in-process) using the same sto
 | `exp` | number | yes | Expiration (Unix seconds) |
 | `iat` | number | yes | Issued-at |
 | `iss` | string | no | Issuer (validated against tenant config) |
+| `watchlist` | string[] | no | User IDs to track online/offline status |
 
 ---
 
@@ -142,6 +143,9 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `member.joined` / `member.left` | `{room, user_id, role}` | Membership |
 | `typing` | `{room, user_id, active}` | Typing indicator |
 | `event.received` | `{room, event, sender, data?}` | Ephemeral event from another client |
+| `watchlist.online` | `{user_ids: []}` | Watched users came online |
+| `watchlist.offline` | `{user_ids: []}` | Watched users went offline |
+| `room.subscriber_count` | `{room, count}` | Room subscriber count changed |
 | `system.token_expiring` | `{expires_at}` | JWT expiring in 60s |
 | `error` | `{code, message}` | Error |
 
@@ -307,3 +311,45 @@ Sentry initializes **embedded by default** — no configuration needed. It share
 | **Chronicle** | Disabled | `chronicle_addr` in `[shroudb]` | Audit trail |
 
 Remote wrappers add circuit breaker (5 failures → open, 30s cooldown) + 10s request timeout. Sentry is fail-open when circuit trips.
+
+---
+
+## Watchlist (Friend Online/Offline Tracking)
+
+Track online/offline status of specific users across the entire tenant, regardless of shared rooms. Add a `watchlist` array to the JWT claims containing user IDs to watch.
+
+On connect, the server sends `watchlist.online` with any watched users who are already online. When a watched user connects (first connection) or disconnects (last connection, after linger), the server sends `watchlist.online` or `watchlist.offline` to all watchers.
+
+Watchlist tracking is per-tenant and respects the presence linger period -- quick reconnects do not produce spurious offline events.
+
+Example JWT claims:
+```json
+{
+  "sub": "alice",
+  "tenant": "acme",
+  "rooms": ["chat"],
+  "watchlist": ["bob", "charlie"],
+  "exp": 1700000000,
+  "iat": 1699996400,
+  "iss": "myapp"
+}
+```
+
+Example server events:
+```json
+{"type": "watchlist.online", "payload": {"user_ids": ["bob"]}}
+{"type": "watchlist.offline", "payload": {"user_ids": ["charlie"]}}
+```
+
+---
+
+## Subscription Count Broadcasts
+
+When the subscriber count for a room changes (subscribe, unsubscribe, or disconnect), the server broadcasts a `room.subscriber_count` event to all current subscribers of that room.
+
+Example server event:
+```json
+{"type": "room.subscriber_count", "payload": {"room": "chat", "count": 5}}
+```
+
+This fires on explicit subscribe/unsubscribe and on disconnect (after connection cleanup). The count reflects the number of active WebSocket connections subscribed to the room.

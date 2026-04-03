@@ -92,19 +92,39 @@ impl RoomRegistry {
         }
     }
 
-    pub fn unsubscribe_conn_from_all(&self, conn_id: ConnId, tenant_id: &str, user_id: &str) {
+    /// Unsubscribe a connection from all rooms. Returns the list of affected room IDs.
+    pub fn unsubscribe_conn_from_all(
+        &self,
+        conn_id: ConnId,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Vec<String> {
+        let mut affected = Vec::new();
         for mut entry in self.rooms.iter_mut() {
-            let (tid, _) = entry.key();
+            let (tid, rid) = entry.key();
             if tid != tenant_id {
                 continue;
             }
+            let rid = rid.clone();
             if let Some(conns) = entry.subscribers.get_mut(user_id) {
-                conns.remove(&conn_id);
+                if conns.remove(&conn_id) {
+                    affected.push(rid);
+                }
                 if conns.is_empty() {
                     entry.subscribers.remove(user_id);
                 }
             }
         }
+        affected
+    }
+
+    /// Get the total number of subscriber connections for a room.
+    pub fn subscriber_count(&self, tenant_id: &str, room_id: &str) -> usize {
+        let key = (tenant_id.to_string(), room_id.to_string());
+        self.rooms
+            .get(&key)
+            .map(|s| s.subscribers.values().map(|c| c.len()).sum())
+            .unwrap_or(0)
     }
 
     pub fn next_seq(&self, tenant_id: &str, room_id: &str) -> u64 {

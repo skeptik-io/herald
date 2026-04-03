@@ -166,6 +166,7 @@ fn mint_jwt(user_id: &str, rooms: &[&str]) -> String {
             exp: now + 3600,
             iat: now,
             iss: "test".to_string(),
+            watchlist: vec![],
         },
         &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
     )

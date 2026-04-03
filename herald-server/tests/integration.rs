@@ -194,6 +194,16 @@ impl TestServer {
 }
 
 fn mint_jwt(user_id: &str, tenant: &str, rooms: &[&str], secret: &str) -> String {
+    mint_jwt_with_watchlist(user_id, tenant, rooms, &[], secret)
+}
+
+fn mint_jwt_with_watchlist(
+    user_id: &str,
+    tenant: &str,
+    rooms: &[&str],
+    watchlist: &[&str],
+    secret: &str,
+) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -207,6 +217,7 @@ fn mint_jwt(user_id: &str, tenant: &str, rooms: &[&str], secret: &str) -> String
             exp: now + 3600,
             iat: now,
             iss: "test".to_string(),
+            watchlist: watchlist.iter().map(|s| s.to_string()).collect(),
         },
         &EncodingKey::from_secret(secret.as_bytes()),
     )
@@ -3537,6 +3548,7 @@ async fn test_jwt_expired_token_rejected() {
             exp: now - 3600, // Expired 1 hour ago
             iat: now - 7200,
             iss: "test".to_string(),
+            watchlist: vec![],
         },
         &EncodingKey::from_secret(TENANT_A_SECRET.as_bytes()),
     )
@@ -3582,6 +3594,7 @@ async fn test_jwt_missing_tenant_claim() {
             exp: now + 3600,
             iat: now,
             iss: "test".to_string(),
+            watchlist: vec![],
         },
         &EncodingKey::from_secret(b"any-secret"),
     )
@@ -4340,9 +4353,10 @@ async fn test_ws_subscribe_multiple_rooms_partial_auth() {
     .await;
 
     // Should get error for forbidden, subscribed for allowed (order may vary)
+    // Also may receive room.subscriber_count after subscribe
     let mut got_subscribed = false;
     let mut got_error = false;
-    for _ in 0..2 {
+    for _ in 0..5 {
         let timeout = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
         if let Ok(Some(Ok(Message::Text(text)))) = timeout {
             let msg: Value = serde_json::from_str(&text).unwrap();
@@ -4350,6 +4364,9 @@ async fn test_ws_subscribe_multiple_rooms_partial_auth() {
                 got_subscribed = true;
             } else if msg["type"] == "error" && msg["payload"]["code"] == "UNAUTHORIZED" {
                 got_error = true;
+            }
+            if got_subscribed && got_error {
+                break;
             }
         }
     }
@@ -4458,12 +4475,25 @@ async fn test_cache_channel_empty_on_new_room() {
     .await;
     let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
 
-    // No cached event — next message should timeout
-    let timeout = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
-    assert!(
-        timeout.is_err(),
-        "should not receive any cached event for empty room"
-    );
+    // No cached event — next message should timeout (skip room.subscriber_count)
+    for _ in 0..5 {
+        let timeout = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                assert_ne!(
+                    msg["type"], "message.new",
+                    "should not receive any cached event for empty room"
+                );
+                // room.subscriber_count is expected — keep draining
+                if msg["type"] != "room.subscriber_count" {
+                    panic!("unexpected message type for empty room: {}", msg["type"]);
+                }
+            }
+            Err(_) => break, // timeout — good, no more messages
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -4848,4 +4878,164 @@ async fn test_ephemeral_event_requires_membership() {
 
     let msg = ws_recv_type(&mut ws, "error").await;
     assert_eq!(msg["payload"]["code"], "NOT_SUBSCRIBED");
+}
+
+// ---------------------------------------------------------------------------
+// Feature D: Watchlist tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_watchlist_online_offline() {
+    let server = TestServer::start().await;
+    let _token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Alice watches bob
+    let alice_jwt = mint_jwt_with_watchlist("alice", "acme", &[], &["bob"], TENANT_A_SECRET);
+
+    // Connect alice first
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+
+    // Bob is not online yet — alice should not get watchlist.online
+    let timeout = tokio::time::timeout(Duration::from_millis(300), ws_alice.next()).await;
+    assert!(
+        timeout.is_err()
+            || matches!(timeout, Ok(Some(Ok(Message::Text(ref t)))) if !t.contains("watchlist")),
+        "should not get watchlist event when bob is offline"
+    );
+
+    // Now bob connects
+    let bob_jwt = mint_jwt("bob", "acme", &[], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+
+    // Alice should receive watchlist.online
+    let msg = ws_recv_type(&mut ws_alice, "watchlist.online").await;
+    assert_eq!(
+        msg["payload"]["user_ids"].as_array().unwrap(),
+        &[json!("bob")]
+    );
+
+    // Bob disconnects
+    drop(ws_bob);
+
+    // Wait for linger (0 in test config) + processing
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Alice should receive watchlist.offline
+    let msg = ws_recv_type(&mut ws_alice, "watchlist.offline").await;
+    assert_eq!(
+        msg["payload"]["user_ids"].as_array().unwrap(),
+        &[json!("bob")]
+    );
+}
+
+#[tokio::test]
+async fn test_watchlist_initial_online_status() {
+    let server = TestServer::start().await;
+    let _token = server.create_tenant("acme", TENANT_A_SECRET).await;
+
+    // Bob connects first
+    let bob_jwt = mint_jwt("bob", "acme", &[], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+
+    // Alice connects with bob in watchlist — should get immediate online notification
+    let alice_jwt = mint_jwt_with_watchlist("alice", "acme", &[], &["bob"], TENANT_A_SECRET);
+
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+
+    // Alice should receive watchlist.online immediately (bob is already connected)
+    let msg = ws_recv_type(&mut ws_alice, "watchlist.online").await;
+    assert_eq!(
+        msg["payload"]["user_ids"].as_array().unwrap(),
+        &[json!("bob")]
+    );
+
+    drop(ws_bob);
+}
+
+// ---------------------------------------------------------------------------
+// Feature E: Subscriber count broadcast tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_subscriber_count_broadcast() {
+    let server = TestServer::start().await;
+    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    server.create_room(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Alice subscribes
+    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_alice = server.ws_connect().await;
+    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    // Alice should get subscriber count (1)
+    let count_msg = ws_recv_type(&mut ws_alice, "room.subscriber_count").await;
+    assert_eq!(count_msg["payload"]["room"], "chat");
+    assert_eq!(count_msg["payload"]["count"], 1);
+
+    // Bob subscribes
+    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
+    let mut ws_bob = server.ws_connect().await;
+    ws_auth(&mut ws_bob, &bob_jwt).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Both should get count update (2) — drain other messages to find it
+    let mut found_count_2 = false;
+    for _ in 0..10 {
+        let timeout = tokio::time::timeout(Duration::from_secs(2), ws_alice.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                if msg["type"] == "room.subscriber_count" && msg["payload"]["count"] == 2 {
+                    found_count_2 = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        found_count_2,
+        "alice should see subscriber count update to 2"
+    );
+
+    // Bob disconnects
+    drop(ws_bob);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Alice should get count back to 1
+    let mut found_count_1 = false;
+    for _ in 0..10 {
+        let timeout = tokio::time::timeout(Duration::from_secs(2), ws_alice.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                if msg["type"] == "room.subscriber_count" && msg["payload"]["count"] == 1 {
+                    found_count_1 = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        found_count_1,
+        "alice should see subscriber count drop to 1 after bob disconnects"
+    );
 }

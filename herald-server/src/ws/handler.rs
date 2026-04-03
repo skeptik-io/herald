@@ -169,6 +169,16 @@ async fn handle_subscribe(
             })
             .await;
 
+        // Broadcast subscriber count update
+        let count = state.rooms.subscriber_count(tid, &room_id_ref);
+        let count_msg = ServerMessage::RoomSubscriberCount {
+            payload: RoomSubscriberCountPayload {
+                room: room_id_ref.clone(),
+                count,
+            },
+        };
+        fanout_to_room(state, tid, &room_id_ref, &count_msg, None);
+
         // Cache channel: deliver last event to new subscriber
         if let Some(cached) = state.rooms.get_last_event(tid, &room_id_ref) {
             let _ = tx.send(cached).await;
@@ -189,6 +199,16 @@ fn handle_unsubscribe(
         state
             .connections
             .remove_room_subscription(ctx.conn_id, &room_id);
+
+        // Broadcast subscriber count update
+        let count = state.rooms.subscriber_count(&ctx.tenant_id, &room_id);
+        let count_msg = ServerMessage::RoomSubscriberCount {
+            payload: RoomSubscriberCountPayload {
+                room: room_id.clone(),
+                count,
+            },
+        };
+        fanout_to_room(state, &ctx.tenant_id, &room_id, &count_msg, None);
     }
 }
 

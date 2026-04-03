@@ -41,6 +41,10 @@ pub struct ConnectionRegistry {
     /// Generation counter per user — incremented on every connect.
     /// Used by presence linger to detect reconnects during the linger window.
     by_generation: DashMap<UserKey, u64>,
+    /// Maps (tenant_id, user_id) -> list of user_ids they are watching.
+    watchlists: DashMap<UserKey, Vec<String>>,
+    /// Reverse index: (tenant_id, watched_user_id) -> set of watcher user_ids.
+    watchers: DashMap<UserKey, HashSet<String>>,
 }
 
 impl ConnectionRegistry {
@@ -146,5 +150,65 @@ impl ConnectionRegistry {
     pub fn current_generation(&self, tenant_id: &str, user_id: &str) -> u64 {
         let key = (tenant_id.to_string(), user_id.to_string());
         self.by_generation.get(&key).map(|v| *v).unwrap_or(0)
+    }
+
+    /// Set the watchlist for a user, updating the reverse index.
+    pub fn set_watchlist(&self, tenant_id: &str, user_id: &str, watchlist: Vec<String>) {
+        let key = (tenant_id.to_string(), user_id.to_string());
+        // Remove from old reverse index
+        if let Some((_, old)) = self.watchlists.remove(&key) {
+            for watched in &old {
+                let wkey = (tenant_id.to_string(), watched.clone());
+                if let Some(mut watchers) = self.watchers.get_mut(&wkey) {
+                    watchers.remove(user_id);
+                }
+            }
+        }
+        // Add to new reverse index
+        for watched in &watchlist {
+            let wkey = (tenant_id.to_string(), watched.clone());
+            self.watchers
+                .entry(wkey)
+                .or_default()
+                .insert(user_id.to_string());
+        }
+        self.watchlists.insert(key, watchlist);
+    }
+
+    /// Get all user_ids that are watching this user.
+    pub fn get_watchers(&self, tenant_id: &str, user_id: &str) -> Vec<String> {
+        let key = (tenant_id.to_string(), user_id.to_string());
+        self.watchers
+            .get(&key)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Check if a user is online (has at least one connection).
+    pub fn is_user_online(&self, tenant_id: &str, user_id: &str) -> bool {
+        self.user_connection_count(tenant_id, user_id) > 0
+    }
+
+    /// Clean up watchlist entries for a user (call when last connection drops).
+    pub fn cleanup_watchlist(&self, tenant_id: &str, user_id: &str) {
+        let key = (tenant_id.to_string(), user_id.to_string());
+        if let Some((_, watchlist)) = self.watchlists.remove(&key) {
+            for watched in watchlist {
+                let wkey = (tenant_id.to_string(), watched);
+                if let Some(mut watchers) = self.watchers.get_mut(&wkey) {
+                    watchers.remove(user_id);
+                }
+            }
+        }
+    }
+
+    /// Send a message to all connections of a given user.
+    pub fn send_to_user(&self, tenant_id: &str, user_id: &str, msg: &ServerMessage) {
+        let key = (tenant_id.to_string(), user_id.to_string());
+        if let Some(conn_ids) = self.by_user.get(&key) {
+            for conn_id in conn_ids.iter() {
+                self.send_to_conn(*conn_id, msg);
+            }
+        }
     }
 }

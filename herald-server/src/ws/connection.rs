@@ -8,7 +8,8 @@ use tracing::{debug, info};
 use herald_core::error::ErrorCode;
 use herald_core::protocol::{
     AuthOkPayload, ClientMessage, MemberPresence, MessageNewPayload, MessagesBatchPayload,
-    PresenceChangedPayload, RawFrame, ServerMessage, SubscribedPayload,
+    PresenceChangedPayload, RawFrame, RoomSubscriberCountPayload, ServerMessage, SubscribedPayload,
+    WatchlistPayload,
 };
 
 use crate::registry::connection::ConnId;
@@ -25,6 +26,7 @@ pub struct ConnContext {
     pub tenant_id: String,
     pub user_id: String,
     pub rooms_claim: Vec<String>,
+    pub watchlist: Vec<String>,
 }
 
 pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
@@ -152,6 +154,49 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     broadcast_presence_change(&state, &tenant_id, &user_id);
 
+    // Set up watchlist from JWT claims and send initial online status
+    if !claims.watchlist.is_empty() {
+        state
+            .connections
+            .set_watchlist(&tenant_id, &user_id, claims.watchlist.clone());
+
+        // Send initial online status for watched users who are already connected
+        let online_ids: Vec<String> = claims
+            .watchlist
+            .iter()
+            .filter(|uid| state.connections.is_user_online(&tenant_id, uid))
+            .cloned()
+            .collect();
+        if !online_ids.is_empty() {
+            let _ = msg_tx
+                .send(ServerMessage::WatchlistOnline {
+                    payload: WatchlistPayload {
+                        user_ids: online_ids,
+                    },
+                })
+                .await;
+        }
+    }
+
+    // Notify users who have this user in their watchlist (only on first connection)
+    if state
+        .connections
+        .user_connection_count(&tenant_id, &user_id)
+        == 1
+    {
+        let watchers = state.connections.get_watchers(&tenant_id, &user_id);
+        if !watchers.is_empty() {
+            let msg = ServerMessage::WatchlistOnline {
+                payload: WatchlistPayload {
+                    user_ids: vec![user_id.clone()],
+                },
+            };
+            for watcher_id in &watchers {
+                state.connections.send_to_user(&tenant_id, watcher_id, &msg);
+            }
+        }
+    }
+
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "authenticated");
 
     if let Some(since) = last_seen_at {
@@ -172,6 +217,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
         rooms_claim,
+        watchlist: claims.watchlist.clone(),
     };
 
     let max_msg_per_sec = state.config.server.max_messages_per_sec;
@@ -259,10 +305,22 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         }),
     );
 
-    state
+    let affected_rooms = state
         .rooms
         .unsubscribe_conn_from_all(conn_id, &tenant_id, &user_id);
     state.connections.unregister(conn_id);
+
+    // Broadcast subscriber count updates for affected rooms
+    for room_id in &affected_rooms {
+        let count = state.rooms.subscriber_count(&tenant_id, room_id);
+        let count_msg = ServerMessage::RoomSubscriberCount {
+            payload: RoomSubscriberCountPayload {
+                room: room_id.clone(),
+                count,
+            },
+        };
+        crate::ws::fanout::fanout_to_room(&state, &tenant_id, room_id, &count_msg, None);
+    }
 
     if state
         .connections
@@ -288,6 +346,28 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     == 0
             {
                 broadcast_presence_change(&linger_state, &linger_tenant, &linger_user);
+
+                // Notify watchlist watchers
+                let watchers = linger_state
+                    .connections
+                    .get_watchers(&linger_tenant, &linger_user);
+                if !watchers.is_empty() {
+                    let msg = ServerMessage::WatchlistOffline {
+                        payload: WatchlistPayload {
+                            user_ids: vec![linger_user.clone()],
+                        },
+                    };
+                    for watcher_id in &watchers {
+                        linger_state
+                            .connections
+                            .send_to_user(&linger_tenant, watcher_id, &msg);
+                    }
+                }
+
+                // Clean up watchlist entries for the disconnected user
+                linger_state
+                    .connections
+                    .cleanup_watchlist(&linger_tenant, &linger_user);
             }
         });
     }

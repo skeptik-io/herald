@@ -216,6 +216,12 @@ pub enum ServerMessage {
     Typing { payload: TypingPayload },
     #[serde(rename = "event.received")]
     EventReceived { payload: EventReceivedPayload },
+    #[serde(rename = "watchlist.online")]
+    WatchlistOnline { payload: WatchlistPayload },
+    #[serde(rename = "watchlist.offline")]
+    WatchlistOffline { payload: WatchlistPayload },
+    #[serde(rename = "room.subscriber_count")]
+    RoomSubscriberCount { payload: RoomSubscriberCountPayload },
     #[serde(rename = "error")]
     Error {
         #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -357,6 +363,17 @@ pub struct EventReceivedPayload {
     pub sender: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchlistPayload {
+    pub user_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomSubscriberCountPayload {
+    pub room: String,
+    pub count: usize,
 }
 
 // ---------------------------------------------------------------------------

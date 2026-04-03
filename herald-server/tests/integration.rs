@@ -1190,9 +1190,7 @@ async fn test_admin_token_revocation() {
     // Revoke the token
     let resp = server
         .http_client()
-        .delete(server.http_url(&format!(
-            "/admin/tenants/tenant_rev/tokens/{token}"
-        )))
+        .delete(server.http_url(&format!("/admin/tenants/tenant_rev/tokens/{token}")))
         .bearer_auth(SUPER_ADMIN_TOKEN)
         .send()
         .await
@@ -1219,9 +1217,7 @@ async fn test_admin_token_revocation_wrong_tenant() {
     // Try to revoke tenant_a's token via tenant_b — should 404
     let resp = server
         .http_client()
-        .delete(server.http_url(&format!(
-            "/admin/tenants/tenant_b_rev/tokens/{token_a}"
-        )))
+        .delete(server.http_url(&format!("/admin/tenants/tenant_b_rev/tokens/{token_a}")))
         .bearer_auth(SUPER_ADMIN_TOKEN)
         .send()
         .await
@@ -1326,10 +1322,17 @@ async fn test_admin_events() {
     let events = body["events"].as_array().unwrap();
 
     // Should have at least connection + disconnection
-    assert!(events.len() >= 2, "expected at least 2 events, got {}", events.len());
+    assert!(
+        events.len() >= 2,
+        "expected at least 2 events, got {}",
+        events.len()
+    );
 
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    assert!(kinds.contains(&"disconnection"), "missing disconnection event");
+    assert!(
+        kinds.contains(&"disconnection"),
+        "missing disconnection event"
+    );
     assert!(kinds.contains(&"connection"), "missing connection event");
 
     // Test after_id filtering — get events after the first one
@@ -1388,7 +1391,10 @@ async fn test_admin_events_message() {
     let body: Value = resp.json().await.unwrap();
     let events = body["events"].as_array().unwrap();
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    assert!(kinds.contains(&"message"), "expected message event in: {kinds:?}");
+    assert!(
+        kinds.contains(&"message"),
+        "expected message event in: {kinds:?}"
+    );
 
     // Verify message event details
     let msg_event = events.iter().find(|e| e["kind"] == "message").unwrap();
@@ -1506,12 +1512,10 @@ async fn test_admin_stats_with_snapshot() {
         .metrics
         .ws_auth_failures
         .load(std::sync::atomic::Ordering::Relaxed);
-    server.state.event_bus.record_snapshot(
-        5,
-        messages_total,
-        2,
-        auth_failures,
-    );
+    server
+        .state
+        .event_bus
+        .record_snapshot(5, messages_total, 2, auth_failures);
 
     let resp = server
         .http_client()
@@ -1590,7 +1594,12 @@ async fn test_admin_events_stream_sse() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // The content type should be SSE
-    let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(
         content_type.contains("text/event-stream"),
         "expected SSE content type, got: {content_type}"

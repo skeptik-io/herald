@@ -107,7 +107,10 @@ pub fn deliver(
 
         event_bus.push_error(
             crate::admin_events::ErrorCategory::Webhook,
-            format!("Webhook delivery failed after {} retries: {}", config.retries, event.event),
+            format!(
+                "Webhook delivery failed after {} retries: {}",
+                config.retries, event.event
+            ),
             serde_json::json!({
                 "event": &event.event,
                 "room": &event.room,

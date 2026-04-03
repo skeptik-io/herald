@@ -186,7 +186,13 @@ impl EventBus {
     }
 
     /// Record a stats snapshot. Called periodically (every 5 minutes).
-    pub fn record_snapshot(&self, connections: u64, messages_total: u64, rooms: u64, auth_failures: u64) {
+    pub fn record_snapshot(
+        &self,
+        connections: u64,
+        messages_total: u64,
+        rooms: u64,
+        auth_failures: u64,
+    ) {
         let now = now_millis();
         let today = (now / 86_400_000) as u32;
 
@@ -198,8 +204,10 @@ impl EventBus {
                 self.peak_connections_today.store(0, Ordering::Relaxed);
                 self.day_start_messages
                     .store(messages_total, Ordering::Relaxed);
-                self.day_start_webhooks
-                    .store(self.webhooks_sent.load(Ordering::Relaxed), Ordering::Relaxed);
+                self.day_start_webhooks.store(
+                    self.webhooks_sent.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
             }
         }
 
@@ -207,9 +215,13 @@ impl EventBus {
         self.peak_connections_today
             .fetch_max(connections, Ordering::Relaxed);
 
-        let prev_messages = self.last_messages_total.swap(messages_total, Ordering::Relaxed);
+        let prev_messages = self
+            .last_messages_total
+            .swap(messages_total, Ordering::Relaxed);
         let webhooks_total = self.webhooks_sent.load(Ordering::Relaxed);
-        let prev_webhooks = self.last_webhooks_total.swap(webhooks_total, Ordering::Relaxed);
+        let prev_webhooks = self
+            .last_webhooks_total
+            .swap(webhooks_total, Ordering::Relaxed);
 
         let snapshot = StatsSnapshot {
             timestamp: now,

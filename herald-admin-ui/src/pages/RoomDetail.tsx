@@ -263,10 +263,11 @@ function MessagesTab({ roomId }: { roomId: string }) {
     client
       .listMessages(roomId, { before, limit: 50 })
       .then((r) => {
+        const sorted = [...r.messages].reverse();
         if (before) {
-          setMessages((prev) => [...prev, ...r.messages]);
+          setMessages((prev) => [...prev, ...sorted]);
         } else {
-          setMessages(r.messages);
+          setMessages(sorted);
         }
         setHasMore(r.has_more);
       })
@@ -284,7 +285,7 @@ function MessagesTab({ roomId }: { roomId: string }) {
     setSearching(true);
     try {
       const r = await client.searchMessages(roomId, search);
-      setMessages(r.messages);
+      setMessages([...r.messages].reverse());
       setHasMore(false);
     } catch {
       /* search unavailable */

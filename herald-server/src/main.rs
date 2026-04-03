@@ -237,11 +237,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!(rooms = all_rooms.len(), "hydrated room state");
 
-    // Stats snapshot collector — every 5 minutes
+    // Stats snapshot collector — every 60 seconds
     let stats_state = state.clone();
     let stats_handle = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(300)).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
             let connections = stats_state.connections.total_connections() as u64;
             let messages = stats_state
                 .metrics

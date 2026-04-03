@@ -5814,12 +5814,9 @@ async fn test_reconnect_reauth_and_resubscribe() {
     ws_recv_type(&mut ws, "subscribed").await;
 
     // Drain extra messages (subscriber count, etc.)
-    loop {
-        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
-            Ok(Some(Ok(Message::Text(_)))) => continue,
-            _ => break,
-        }
-    }
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+    {}
 
     // Send a message to confirm subscription works
     ws_send(
@@ -5853,12 +5850,9 @@ async fn test_reconnect_reauth_and_resubscribe() {
     assert_eq!(sub["payload"]["room"], "chat");
 
     // Drain extra
-    loop {
-        match tokio::time::timeout(Duration::from_millis(200), ws2.next()).await {
-            Ok(Some(Ok(Message::Text(_)))) => continue,
-            _ => break,
-        }
-    }
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(200), ws2.next()).await
+    {}
 
     // Verify subscription works after reconnect — send a message
     ws_send(
@@ -5881,12 +5875,9 @@ async fn test_reconnect_reauth_and_resubscribe() {
     ws_recv_type(&mut ws_bob, "subscribed").await;
 
     // Drain
-    loop {
-        match tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await {
-            Ok(Some(Ok(Message::Text(_)))) => continue,
-            _ => break,
-        }
-    }
+    while let Ok(Some(Ok(Message::Text(_)))) =
+        tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await
+    {}
 
     // Alice sends via reconnected connection
     ws_send(

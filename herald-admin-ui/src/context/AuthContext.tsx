@@ -23,8 +23,15 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+declare global {
+  interface Window {
+    __HERALD_URL__?: string;
+  }
+}
+
 const STORAGE_KEY = "herald_admin_auth";
-const BASE_URL = import.meta.env.VITE_HERALD_URL || "/api";
+const BASE_URL =
+  window.__HERALD_URL__ || import.meta.env.VITE_HERALD_URL || "http://localhost:6201";
 
 function loadAuth(): Auth | null {
   try {

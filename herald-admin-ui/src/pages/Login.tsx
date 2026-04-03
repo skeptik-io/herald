@@ -14,7 +14,8 @@ export default function Login() {
     setLoading(true);
 
     try {
-      const baseUrl = import.meta.env.VITE_HERALD_URL || "/api";
+      const baseUrl =
+        window.__HERALD_URL__ || import.meta.env.VITE_HERALD_URL || "http://localhost:6201";
       const res = await fetch(`${baseUrl}/health`, {
         headers: { Authorization: `Bearer ${token}` },
       });

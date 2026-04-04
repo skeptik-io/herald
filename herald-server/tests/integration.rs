@@ -69,7 +69,7 @@ impl TestServer {
             },
             store: StoreConfig {
                 path: "/tmp/herald-test".into(),
-                message_ttl_days: 7,
+                event_ttl_days: 7,
             },
             auth: AuthConfig {
                 jwt_secret: Some(TENANT_A_SECRET.to_string()),
@@ -168,22 +168,26 @@ impl TestServer {
         body["token"].as_str().unwrap().to_string()
     }
 
-    async fn create_room(&self, api_token: &str, room_id: &str) {
+    async fn create_stream(&self, api_token: &str, stream_id: &str) {
         let resp = self
             .http_client()
-            .post(self.http_url("/rooms"))
+            .post(self.http_url("/streams"))
             .bearer_auth(api_token)
-            .json(&json!({"id": room_id, "name": room_id}))
+            .json(&json!({"id": stream_id, "name": stream_id}))
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED, "create room {room_id}");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "create stream {stream_id}"
+        );
     }
 
-    async fn add_member(&self, api_token: &str, room_id: &str, user_id: &str) {
+    async fn add_member(&self, api_token: &str, stream_id: &str, user_id: &str) {
         let resp = self
             .http_client()
-            .post(self.http_url(&format!("/rooms/{room_id}/members")))
+            .post(self.http_url(&format!("/streams/{stream_id}/members")))
             .bearer_auth(api_token)
             .json(&json!({"user_id": user_id}))
             .send()
@@ -193,14 +197,14 @@ impl TestServer {
     }
 }
 
-fn mint_jwt(user_id: &str, tenant: &str, rooms: &[&str], secret: &str) -> String {
-    mint_jwt_with_watchlist(user_id, tenant, rooms, &[], secret)
+fn mint_jwt(user_id: &str, tenant: &str, streams: &[&str], secret: &str) -> String {
+    mint_jwt_with_watchlist(user_id, tenant, streams, &[], secret)
 }
 
 fn mint_jwt_with_watchlist(
     user_id: &str,
     tenant: &str,
-    rooms: &[&str],
+    streams: &[&str],
     watchlist: &[&str],
     secret: &str,
 ) -> String {
@@ -213,7 +217,7 @@ fn mint_jwt_with_watchlist(
         &JwtClaims {
             sub: user_id.to_string(),
             tenant: tenant.to_string(),
-            rooms: rooms.iter().map(|s| s.to_string()).collect(),
+            streams: streams.iter().map(|s| s.to_string()).collect(),
             exp: now + 3600,
             iat: now,
             iss: "test".to_string(),
@@ -271,26 +275,26 @@ async fn ws_auth(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_tenant_creation_and_room_isolation() {
+async fn test_tenant_creation_and_stream_isolation() {
     let server = TestServer::start().await;
 
     let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
     let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
 
-    server.create_room(&token_a, "chat").await;
+    server.create_stream(&token_a, "chat").await;
 
-    // Tenant B can't see tenant A's room
+    // Tenant B can't see tenant A's stream
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat"))
+        .get(server.http_url("/streams/chat"))
         .bearer_auth(&token_b)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    // Tenant B can create same-named room — independent namespace
-    server.create_room(&token_b, "chat").await;
+    // Tenant B can create same-named stream — independent namespace
+    server.create_stream(&token_b, "chat").await;
 }
 
 #[tokio::test]
@@ -300,9 +304,9 @@ async fn test_ws_tenant_isolation() {
     let token_a = server.create_tenant("ws-a", TENANT_A_SECRET).await;
     let token_b = server.create_tenant("ws-b", TENANT_B_SECRET).await;
 
-    server.create_room(&token_a, "room").await;
+    server.create_stream(&token_a, "room").await;
     server.add_member(&token_a, "room", "alice").await;
-    server.create_room(&token_b, "room").await;
+    server.create_stream(&token_b, "room").await;
     server.add_member(&token_b, "room", "bob").await;
 
     let mut ws_a = server.ws_connect().await;
@@ -313,7 +317,7 @@ async fn test_ws_tenant_isolation() {
     .await;
     ws_send(
         &mut ws_a,
-        json!({"type": "subscribe", "payload": {"rooms": ["room"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
@@ -326,7 +330,7 @@ async fn test_ws_tenant_isolation() {
     .await;
     ws_send(
         &mut ws_b,
-        json!({"type": "subscribe", "payload": {"rooms": ["room"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws_b, "subscribed").await;
@@ -334,19 +338,19 @@ async fn test_ws_tenant_isolation() {
     // Alice sends — seq=1 in tenant A
     ws_send(
         &mut ws_a,
-        json!({"type": "message.send", "ref": "m1", "payload": {"room": "room", "body": "from A"}}),
+        json!({"type": "event.publish", "ref": "m1", "payload": {"stream": "room", "body": "from A"}}),
     )
     .await;
-    let ack_a = ws_recv_type(&mut ws_a, "message.ack").await;
+    let ack_a = ws_recv_type(&mut ws_a, "event.ack").await;
     assert_eq!(ack_a["payload"]["seq"], 1);
 
     // Bob sends — seq=1 in tenant B (independent)
     ws_send(
         &mut ws_b,
-        json!({"type": "message.send", "ref": "m2", "payload": {"room": "room", "body": "from B"}}),
+        json!({"type": "event.publish", "ref": "m2", "payload": {"stream": "room", "body": "from B"}}),
     )
     .await;
-    let ack_b = ws_recv_type(&mut ws_b, "message.ack").await;
+    let ack_b = ws_recv_type(&mut ws_b, "event.ack").await;
     assert_eq!(ack_b["payload"]["seq"], 1);
 }
 
@@ -394,7 +398,7 @@ async fn test_subscribe_send_fanout() {
     let server = TestServer::start().await;
     let token = server.create_tenant("fanout", TENANT_A_SECRET).await;
 
-    server.create_room(&token, "general").await;
+    server.create_stream(&token, "general").await;
     server.add_member(&token, "general", "alice").await;
     server.add_member(&token, "general", "bob").await;
 
@@ -406,7 +410,7 @@ async fn test_subscribe_send_fanout() {
     .await;
     ws_send(
         &mut ws_a,
-        json!({"type": "subscribe", "payload": {"rooms": ["general"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["general"]}}),
     )
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
@@ -419,7 +423,7 @@ async fn test_subscribe_send_fanout() {
     .await;
     ws_send(
         &mut ws_b,
-        json!({"type": "subscribe", "payload": {"rooms": ["general"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["general"]}}),
     )
     .await;
     ws_recv_type(&mut ws_b, "subscribed").await;
@@ -427,18 +431,18 @@ async fn test_subscribe_send_fanout() {
     ws_send(
         &mut ws_a,
         json!({
-            "type": "message.send",
+            "type": "event.publish",
             "ref": "m1",
-            "payload": {"room": "general", "body": "hello!"}
+            "payload": {"stream": "general", "body": "hello!"}
         }),
     )
     .await;
 
-    ws_recv_type(&mut ws_a, "message.ack").await;
-    let msg_a = ws_recv_type(&mut ws_a, "message.new").await;
+    ws_recv_type(&mut ws_a, "event.ack").await;
+    let msg_a = ws_recv_type(&mut ws_a, "event.new").await;
     assert_eq!(msg_a["payload"]["body"], "hello!");
 
-    let msg_b = ws_recv_type(&mut ws_b, "message.new").await;
+    let msg_b = ws_recv_type(&mut ws_b, "event.new").await;
     assert_eq!(msg_b["payload"]["body"], "hello!");
 }
 
@@ -463,7 +467,7 @@ async fn test_health_and_metrics() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.text().await.unwrap();
     assert!(body.contains("herald_connections_total"));
-    assert!(body.contains("herald_message_total_seconds"));
+    assert!(body.contains("herald_event_total_seconds"));
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +579,7 @@ async fn test_admin_api_token_management() {
     // Token works for tenant API
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(token)
         .json(&json!({"id": "tok-room", "name": "Token Room"}))
         .send()
@@ -585,38 +589,38 @@ async fn test_admin_api_token_management() {
 }
 
 // ---------------------------------------------------------------------------
-// Room edge cases
+// Stream edge cases
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_duplicate_room_creation() {
+async fn test_duplicate_stream_creation() {
     let server = TestServer::start().await;
     let token = server.create_tenant("dup", TENANT_A_SECRET).await;
 
-    server.create_room(&token, "room1").await;
+    server.create_stream(&token, "room1").await;
 
     // Duplicate should fail
     let _resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "room1", "name": "Duplicate"}))
         .send()
         .await
         .unwrap();
-    // Store upserts — room exists, verify it
+    // Store upserts — stream exists, verify it
 }
 
 #[tokio::test]
-async fn test_room_update_and_delete() {
+async fn test_stream_update_and_delete() {
     let server = TestServer::start().await;
     let token = server.create_tenant("rud", TENANT_A_SECRET).await;
-    server.create_room(&token, "updatable").await;
+    server.create_stream(&token, "updatable").await;
 
     // Update
     let resp = server
         .http_client()
-        .patch(server.http_url("/rooms/updatable"))
+        .patch(server.http_url("/streams/updatable"))
         .bearer_auth(&token)
         .json(&json!({"name": "Updated Name", "meta": {"custom": true}}))
         .send()
@@ -627,7 +631,7 @@ async fn test_room_update_and_delete() {
     // Verify
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/updatable"))
+        .get(server.http_url("/streams/updatable"))
         .bearer_auth(&token)
         .send()
         .await
@@ -638,7 +642,7 @@ async fn test_room_update_and_delete() {
     // Delete
     let resp = server
         .http_client()
-        .delete(server.http_url("/rooms/updatable"))
+        .delete(server.http_url("/streams/updatable"))
         .bearer_auth(&token)
         .send()
         .await
@@ -648,7 +652,7 @@ async fn test_room_update_and_delete() {
     // Verify gone
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/updatable"))
+        .get(server.http_url("/streams/updatable"))
         .bearer_auth(&token)
         .send()
         .await
@@ -657,13 +661,13 @@ async fn test_room_update_and_delete() {
 }
 
 #[tokio::test]
-async fn test_nonexistent_room() {
+async fn test_nonexistent_stream() {
     let server = TestServer::start().await;
     let token = server.create_tenant("noroom", TENANT_A_SECRET).await;
 
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/does-not-exist"))
+        .get(server.http_url("/streams/does-not-exist"))
         .bearer_auth(&token)
         .send()
         .await
@@ -679,13 +683,13 @@ async fn test_nonexistent_room() {
 async fn test_member_role_update() {
     let server = TestServer::start().await;
     let token = server.create_tenant("role", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
     // Update role
     let resp = server
         .http_client()
-        .patch(server.http_url("/rooms/room/members/alice"))
+        .patch(server.http_url("/streams/room/members/alice"))
         .bearer_auth(&token)
         .json(&json!({"role": "admin"}))
         .send()
@@ -696,7 +700,7 @@ async fn test_member_role_update() {
     // Verify
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/room/members"))
+        .get(server.http_url("/streams/room/members"))
         .bearer_auth(&token)
         .send()
         .await
@@ -715,12 +719,12 @@ async fn test_member_role_update() {
 async fn test_member_remove() {
     let server = TestServer::start().await;
     let token = server.create_tenant("rem", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
     let resp = server
         .http_client()
-        .delete(server.http_url("/rooms/room/members/alice"))
+        .delete(server.http_url("/streams/room/members/alice"))
         .bearer_auth(&token)
         .send()
         .await
@@ -730,7 +734,7 @@ async fn test_member_remove() {
     // Verify removed
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/room/members"))
+        .get(server.http_url("/streams/room/members"))
         .bearer_auth(&token)
         .send()
         .await
@@ -747,7 +751,7 @@ async fn test_member_remove() {
 async fn test_ws_presence_cursor_typing() {
     let server = TestServer::start().await;
     let token = server.create_tenant("pct", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
     server.add_member(&token, "room", "bob").await;
 
@@ -759,7 +763,7 @@ async fn test_ws_presence_cursor_typing() {
     .await;
     ws_send(
         &mut ws_a,
-        json!({"type":"subscribe","payload":{"rooms":["room"]}}),
+        json!({"type":"subscribe","payload":{"streams":["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
@@ -772,7 +776,7 @@ async fn test_ws_presence_cursor_typing() {
     .await;
     ws_send(
         &mut ws_b,
-        json!({"type":"subscribe","payload":{"rooms":["room"]}}),
+        json!({"type":"subscribe","payload":{"streams":["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws_b, "subscribed").await;
@@ -790,17 +794,17 @@ async fn test_ws_presence_cursor_typing() {
     // Send a message so we have a seq for cursor
     ws_send(
         &mut ws_a,
-        json!({"type":"message.send","ref":"m1","payload":{"room":"room","body":"msg"}}),
+        json!({"type":"event.publish","ref":"m1","payload":{"stream":"room","body":"msg"}}),
     )
     .await;
-    let ack = ws_recv_type(&mut ws_a, "message.ack").await;
-    ws_recv_type(&mut ws_a, "message.new").await;
-    ws_recv_type(&mut ws_b, "message.new").await;
+    let ack = ws_recv_type(&mut ws_a, "event.ack").await;
+    ws_recv_type(&mut ws_a, "event.new").await;
+    ws_recv_type(&mut ws_b, "event.new").await;
 
     // Cursor
     ws_send(
         &mut ws_a,
-        json!({"type":"cursor.update","payload":{"room":"room","seq":ack["payload"]["seq"]}}),
+        json!({"type":"cursor.update","payload":{"stream":"room","seq":ack["payload"]["seq"]}}),
     )
     .await;
     let r = ws_recv_type(&mut ws_b, "cursor.moved").await;
@@ -809,7 +813,7 @@ async fn test_ws_presence_cursor_typing() {
     // Typing
     ws_send(
         &mut ws_a,
-        json!({"type":"typing.start","payload":{"room":"room"}}),
+        json!({"type":"typing.start","payload":{"stream":"room"}}),
     )
     .await;
     let r = ws_recv_type(&mut ws_b, "typing").await;
@@ -818,10 +822,10 @@ async fn test_ws_presence_cursor_typing() {
 }
 
 #[tokio::test]
-async fn test_ws_message_history() {
+async fn test_ws_event_history() {
     let server = TestServer::start().await;
     let token = server.create_tenant("hist", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
     let mut ws = server.ws_connect().await;
@@ -832,26 +836,26 @@ async fn test_ws_message_history() {
     .await;
     ws_send(
         &mut ws,
-        json!({"type":"subscribe","payload":{"rooms":["room"]}}),
+        json!({"type":"subscribe","payload":{"streams":["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
 
     // Send 5 messages
     for i in 1..=5 {
-        ws_send(&mut ws, json!({"type":"message.send","ref":format!("m{i}"),"payload":{"room":"room","body":format!("msg {i}")}})).await;
-        ws_recv_type(&mut ws, "message.ack").await;
-        ws_recv_type(&mut ws, "message.new").await;
+        ws_send(&mut ws, json!({"type":"event.publish","ref":format!("m{i}"),"payload":{"stream":"room","body":format!("msg {i}")}})).await;
+        ws_recv_type(&mut ws, "event.ack").await;
+        ws_recv_type(&mut ws, "event.new").await;
     }
 
     // Fetch before seq 4
     ws_send(
         &mut ws,
-        json!({"type":"messages.fetch","ref":"f1","payload":{"room":"room","before":4,"limit":10}}),
+        json!({"type":"events.fetch","ref":"f1","payload":{"stream":"room","before":4,"limit":10}}),
     )
     .await;
-    let r = ws_recv_type(&mut ws, "messages.batch").await;
-    let msgs = r["payload"]["messages"].as_array().unwrap();
+    let r = ws_recv_type(&mut ws, "events.batch").await;
+    let msgs = r["payload"]["events"].as_array().unwrap();
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[0]["seq"], 1);
     assert_eq!(msgs[2]["seq"], 3);
@@ -861,7 +865,7 @@ async fn test_ws_message_history() {
 async fn test_ws_reconnect_catchup() {
     let server = TestServer::start().await;
     let token = server.create_tenant("recon", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
     server.add_member(&token, "room", "bob").await;
 
@@ -874,7 +878,7 @@ async fn test_ws_reconnect_catchup() {
     .await;
     ws_send(
         &mut ws_a,
-        json!({"type":"subscribe","payload":{"rooms":["room"]}}),
+        json!({"type":"subscribe","payload":{"streams":["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
@@ -883,9 +887,9 @@ async fn test_ws_reconnect_catchup() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 1..=3 {
-        ws_send(&mut ws_a, json!({"type":"message.send","ref":format!("m{i}"),"payload":{"room":"room","body":format!("catch {i}")}})).await;
-        ws_recv_type(&mut ws_a, "message.ack").await;
-        ws_recv_type(&mut ws_a, "message.new").await;
+        ws_send(&mut ws_a, json!({"type":"event.publish","ref":format!("m{i}"),"payload":{"stream":"room","body":format!("catch {i}")}})).await;
+        ws_recv_type(&mut ws_a, "event.ack").await;
+        ws_recv_type(&mut ws_a, "event.new").await;
     }
 
     // Bob connects with last_seen_at
@@ -893,10 +897,10 @@ async fn test_ws_reconnect_catchup() {
     ws_send(&mut ws_b, json!({"type":"auth","payload":{"token":mint_jwt("bob","recon",&["room"],TENANT_A_SECRET),"last_seen_at":before}})).await;
     ws_recv_type(&mut ws_b, "auth_ok").await;
     let sub = ws_recv_type(&mut ws_b, "subscribed").await;
-    assert_eq!(sub["payload"]["room"], "room");
+    assert_eq!(sub["payload"]["stream"], "room");
 
-    let batch = ws_recv_type(&mut ws_b, "messages.batch").await;
-    let msgs = batch["payload"]["messages"].as_array().unwrap();
+    let batch = ws_recv_type(&mut ws_b, "events.batch").await;
+    let msgs = batch["payload"]["events"].as_array().unwrap();
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[0]["body"], "catch 1");
     assert_eq!(msgs[2]["body"], "catch 3");
@@ -906,7 +910,7 @@ async fn test_ws_reconnect_catchup() {
 async fn test_ws_http_inject_fanout() {
     let server = TestServer::start().await;
     let token = server.create_tenant("inject", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
     let mut ws = server.ws_connect().await;
@@ -917,7 +921,7 @@ async fn test_ws_http_inject_fanout() {
     .await;
     ws_send(
         &mut ws,
-        json!({"type":"subscribe","payload":{"rooms":["room"]}}),
+        json!({"type":"subscribe","payload":{"streams":["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -925,7 +929,7 @@ async fn test_ws_http_inject_fanout() {
     // Inject via HTTP
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/room/messages"))
+        .post(server.http_url("/streams/room/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "system", "body": "injected!", "meta": {"system": true}}))
         .send()
@@ -934,7 +938,7 @@ async fn test_ws_http_inject_fanout() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // WS subscriber receives it
-    let msg = ws_recv_type(&mut ws, "message.new").await;
+    let msg = ws_recv_type(&mut ws, "event.new").await;
     assert_eq!(msg["payload"]["sender"], "system");
     assert_eq!(msg["payload"]["body"], "injected!");
     assert_eq!(msg["payload"]["meta"]["system"], true);
@@ -978,7 +982,7 @@ async fn test_ws_ping_pong() {
 async fn test_http_presence_query() {
     let server = TestServer::start().await;
     let token = server.create_tenant("pres", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
     // No connections — offline
@@ -1012,10 +1016,10 @@ async fn test_http_presence_query() {
     assert_eq!(body["status"], "online");
     assert_eq!(body["connections"], 1);
 
-    // Room presence
+    // Stream presence
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/room/presence"))
+        .get(server.http_url("/streams/room/presence"))
         .bearer_auth(&token)
         .send()
         .await
@@ -1034,7 +1038,7 @@ async fn test_http_presence_query() {
 async fn test_stress_concurrent_connections() {
     let server = TestServer::start().await;
     let token = server.create_tenant("stress", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
 
     let num = 20;
     for i in 0..num {
@@ -1086,10 +1090,10 @@ async fn test_stress_concurrent_connections() {
 }
 
 #[tokio::test]
-async fn test_stress_rapid_messages() {
+async fn test_stress_rapid_events() {
     let server = TestServer::start().await;
     let token = server.create_tenant("rapid", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "sender").await;
 
     let mut ws = server.ws_connect().await;
@@ -1100,14 +1104,14 @@ async fn test_stress_rapid_messages() {
     .await;
     ws_send(
         &mut ws,
-        json!({"type":"subscribe","payload":{"rooms":["room"]}}),
+        json!({"type":"subscribe","payload":{"streams":["room"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
 
     let count = 50u64;
     for i in 0..count {
-        ws_send(&mut ws, json!({"type":"message.send","ref":format!("r{i}"),"payload":{"room":"room","body":format!("rapid {i}")}})).await;
+        ws_send(&mut ws, json!({"type":"event.publish","ref":format!("r{i}"),"payload":{"stream":"room","body":format!("rapid {i}")}})).await;
     }
 
     let mut acks = 0u64;
@@ -1117,7 +1121,7 @@ async fn test_stress_rapid_messages() {
             tokio::time::timeout(Duration::from_secs(3), ws.next()).await
         {
             let r: Value = serde_json::from_str(&text).unwrap();
-            if r["type"] == "message.ack" {
+            if r["type"] == "event.ack" {
                 acks += 1;
             }
         } else {
@@ -1133,55 +1137,55 @@ async fn test_stress_rapid_messages() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_admin_list_rooms() {
+async fn test_admin_list_streams() {
     let server = TestServer::start().await;
     let token = server.create_tenant("tenant_lr", TENANT_A_SECRET).await;
 
-    // List rooms when empty
+    // List streams when empty
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["rooms"].as_array().unwrap().len(), 0);
+    assert_eq!(body["streams"].as_array().unwrap().len(), 0);
 
-    // Create rooms then list
-    server.create_room(&token, "chat").await;
-    server.create_room(&token, "support").await;
+    // Create streams then list
+    server.create_stream(&token, "chat").await;
+    server.create_stream(&token, "support").await;
 
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["rooms"].as_array().unwrap().len(), 2);
+    assert_eq!(body["streams"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn test_admin_tenant_rooms() {
+async fn test_admin_tenant_streams() {
     let server = TestServer::start().await;
     let token = server.create_tenant("tenant_tr", TENANT_A_SECRET).await;
-    server.create_room(&token, "room1").await;
-    server.create_room(&token, "room2").await;
+    server.create_stream(&token, "room1").await;
+    server.create_stream(&token, "room2").await;
 
     let resp = server
         .http_client()
-        .get(server.http_url("/admin/tenants/tenant_tr/rooms"))
+        .get(server.http_url("/admin/tenants/tenant_tr/streams"))
         .bearer_auth(SUPER_ADMIN_TOKEN)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["rooms"].as_array().unwrap().len(), 2);
+    assert_eq!(body["streams"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1192,7 +1196,7 @@ async fn test_admin_token_revocation() {
     // Token should work
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth(&token)
         .send()
         .await
@@ -1212,7 +1216,7 @@ async fn test_admin_token_revocation() {
     // Token should no longer work
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth(&token)
         .send()
         .await
@@ -1239,7 +1243,7 @@ async fn test_admin_token_revocation_wrong_tenant() {
     // Original token should still work
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth(&token_a)
         .send()
         .await
@@ -1251,7 +1255,7 @@ async fn test_admin_token_revocation_wrong_tenant() {
 async fn test_admin_connections() {
     let server = TestServer::start().await;
     let token = server.create_tenant("tenant_conn", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
     // No connections initially
@@ -1308,7 +1312,7 @@ async fn test_admin_connections() {
 async fn test_admin_events() {
     let server = TestServer::start().await;
     let token = server.create_tenant("tenant_ev", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "bob").await;
 
     // Connect and disconnect to generate events
@@ -1368,7 +1372,7 @@ async fn test_admin_events() {
 async fn test_admin_events_message() {
     let server = TestServer::start().await;
     let token = server.create_tenant("tenant_evm", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "carol").await;
 
     // Connect, subscribe, and send a message
@@ -1380,17 +1384,17 @@ async fn test_admin_events_message() {
     .await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
 
     ws_send(
         &mut ws,
-        json!({"type": "message.send", "ref": "m1", "payload": {"room": "chat", "body": "hello"}}),
+        json!({"type": "event.publish", "ref": "m1", "payload": {"stream": "chat", "body": "hello"}}),
     )
     .await;
-    ws_recv_type(&mut ws, "message.ack").await;
+    ws_recv_type(&mut ws, "event.ack").await;
 
     // Check events include a message event
     let resp = server
@@ -1410,7 +1414,7 @@ async fn test_admin_events_message() {
 
     // Verify message event details
     let msg_event = events.iter().find(|e| e["kind"] == "message").unwrap();
-    assert_eq!(msg_event["details"]["room"], "chat");
+    assert_eq!(msg_event["details"]["stream"], "chat");
     assert_eq!(msg_event["details"]["sender"], "carol");
     assert_eq!(msg_event["tenant_id"], "tenant_evm");
 }
@@ -1497,8 +1501,8 @@ async fn test_admin_stats() {
         "missing peak_connections"
     );
     assert!(
-        body["today"]["messages_today"].is_number(),
-        "missing messages_today"
+        body["today"]["events_today"].is_number(),
+        "missing events_today"
     );
     assert!(
         body["today"]["webhooks_today"].is_number(),
@@ -1517,7 +1521,7 @@ async fn test_admin_stats_with_snapshot() {
     let messages_total = server
         .state
         .metrics
-        .messages_sent
+        .events_published
         .load(std::sync::atomic::Ordering::Relaxed);
     let auth_failures = server
         .state
@@ -1540,7 +1544,7 @@ async fn test_admin_stats_with_snapshot() {
     let snapshots = body["snapshots"].as_array().unwrap();
     assert_eq!(snapshots.len(), 1);
     assert_eq!(snapshots[0]["connections"].as_u64().unwrap(), 5);
-    assert_eq!(snapshots[0]["rooms"].as_u64().unwrap(), 2);
+    assert_eq!(snapshots[0]["streams"].as_u64().unwrap(), 2);
 }
 
 #[tokio::test]
@@ -1592,7 +1596,7 @@ async fn test_admin_stats_time_range_filter() {
 async fn test_admin_events_stream_sse() {
     let server = TestServer::start().await;
     let token = server.create_tenant("tenant_sse", TENANT_A_SECRET).await;
-    server.create_room(&token, "room").await;
+    server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "eve").await;
 
     // Connect to SSE stream
@@ -1663,14 +1667,14 @@ async fn test_admin_endpoints_require_auth() {
 async fn test_tenant_stats_endpoint() {
     let server = TestServer::start().await;
     let token = server.create_tenant("tenant_ts", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Send some messages via HTTP inject to generate tenant metrics
     for i in 0..3 {
         let resp = server
             .http_client()
-            .post(server.http_url("/rooms/chat/messages"))
+            .post(server.http_url("/streams/chat/events"))
             .bearer_auth(&token)
             .json(&json!({"sender": "alice", "body": format!("msg {i}")}))
             .send()
@@ -1693,14 +1697,14 @@ async fn test_tenant_stats_endpoint() {
     // Current should reflect tenant-specific data
     assert!(body["current"].is_object(), "missing current summary");
     assert_eq!(
-        body["current"]["messages_sent"].as_u64().unwrap(),
+        body["current"]["events_published"].as_u64().unwrap(),
         3,
         "expected 3 tenant messages"
     );
     assert_eq!(
-        body["current"]["rooms"].as_u64().unwrap(),
+        body["current"]["streams"].as_u64().unwrap(),
         1,
-        "expected 1 room"
+        "expected 1 stream"
     );
 
     // Snapshots array should exist (may be empty if no snapshot cycle yet)
@@ -1712,14 +1716,14 @@ async fn test_tenant_stats_isolated() {
     let server = TestServer::start().await;
     let token_a = server.create_tenant("tenant_sa", TENANT_A_SECRET).await;
     let token_b = server.create_tenant("tenant_sb", TENANT_B_SECRET).await;
-    server.create_room(&token_a, "room_a").await;
-    server.create_room(&token_b, "room_b").await;
+    server.create_stream(&token_a, "room_a").await;
+    server.create_stream(&token_b, "room_b").await;
 
     // Send 5 messages on tenant A
     for i in 0..5 {
         server
             .http_client()
-            .post(server.http_url("/rooms/room_a/messages"))
+            .post(server.http_url("/streams/room_a/events"))
             .bearer_auth(&token_a)
             .json(&json!({"sender": "sys", "body": format!("a{i}")}))
             .send()
@@ -1731,7 +1735,7 @@ async fn test_tenant_stats_isolated() {
     for i in 0..2 {
         server
             .http_client()
-            .post(server.http_url("/rooms/room_b/messages"))
+            .post(server.http_url("/streams/room_b/events"))
             .bearer_auth(&token_b)
             .json(&json!({"sender": "sys", "body": format!("b{i}")}))
             .send()
@@ -1748,8 +1752,8 @@ async fn test_tenant_stats_isolated() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["current"]["messages_sent"].as_u64().unwrap(), 5);
-    assert_eq!(body["current"]["rooms"].as_u64().unwrap(), 1);
+    assert_eq!(body["current"]["events_published"].as_u64().unwrap(), 5);
+    assert_eq!(body["current"]["streams"].as_u64().unwrap(), 1);
 
     // Tenant B should see 2 messages
     let resp = server
@@ -1760,8 +1764,8 @@ async fn test_tenant_stats_isolated() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["current"]["messages_sent"].as_u64().unwrap(), 2);
-    assert_eq!(body["current"]["rooms"].as_u64().unwrap(), 1);
+    assert_eq!(body["current"]["events_published"].as_u64().unwrap(), 2);
+    assert_eq!(body["current"]["streams"].as_u64().unwrap(), 1);
 }
 
 #[tokio::test]
@@ -1826,7 +1830,7 @@ async fn test_http_body_size_limit() {
     let huge_body = "x".repeat(2 * 1024 * 1024);
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .header("content-type", "application/json")
         .body(format!(r#"{{"id":"room","name":"{huge_body}"}}"#))
@@ -1842,48 +1846,48 @@ async fn test_http_body_size_limit() {
 }
 
 #[tokio::test]
-async fn test_input_validation_room_id() {
+async fn test_input_validation_stream_id() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
-    // Path traversal in room ID
+    // Path traversal in stream ID
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
-        .json(&json!({"id": "../etc/passwd", "name": "bad room"}))
+        .json(&json!({"id": "../etc/passwd", "name": "bad stream"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Null bytes in room ID
+    // Null bytes in stream ID
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
-        .json(&json!({"id": "room\0evil", "name": "bad room"}))
+        .json(&json!({"id": "room\0evil", "name": "bad stream"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Overly long room ID
+    // Overly long stream ID
     let long_id = "a".repeat(300);
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
-        .json(&json!({"id": long_id, "name": "bad room"}))
+        .json(&json!({"id": long_id, "name": "bad stream"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Valid room ID works
+    // Valid stream ID works
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "valid-room_123", "name": "Good Room"}))
         .send()
@@ -1893,17 +1897,17 @@ async fn test_input_validation_room_id() {
 }
 
 #[tokio::test]
-async fn test_input_validation_message_body_size() {
+async fn test_input_validation_event_body_size() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Message body over 64KB should be rejected
     let huge_body = "x".repeat(70_000);
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": huge_body}))
         .send()
@@ -1914,7 +1918,7 @@ async fn test_input_validation_message_body_size() {
     // Normal message works
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "hello"}))
         .send()
@@ -1965,7 +1969,7 @@ async fn test_http_api_rate_limiting() {
         },
         store: StoreConfig {
             path: "/tmp/herald-test-rate".into(),
-            message_ttl_days: 7,
+            event_ttl_days: 7,
         },
         auth: AuthConfig {
             jwt_secret: Some(TENANT_A_SECRET.to_string()),
@@ -2010,7 +2014,7 @@ async fn test_http_api_rate_limiting() {
     let mut statuses = Vec::new();
     for _ in 0..6 {
         let resp = client
-            .get(format!("{base}/rooms"))
+            .get(format!("{base}/streams"))
             .bearer_auth("rate-test-token")
             .send()
             .await
@@ -2043,7 +2047,7 @@ async fn test_ws_sliding_window_rate_limit() {
         },
         store: StoreConfig {
             path: "/tmp/herald-test-wsrate".into(),
-            message_ttl_days: 7,
+            event_ttl_days: 7,
         },
         auth: AuthConfig {
             jwt_secret: Some(TENANT_A_SECRET.to_string()),
@@ -2095,18 +2099,18 @@ async fn test_ws_sliding_window_rate_limit() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Setup: create room and member
+    // Setup: create stream and member
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}");
     client
-        .post(format!("{base}/rooms"))
+        .post(format!("{base}/streams"))
         .bearer_auth("ws-rate-token")
         .json(&json!({"id": "chat", "name": "Chat"}))
         .send()
         .await
         .unwrap();
     client
-        .post(format!("{base}/rooms/chat/members"))
+        .post(format!("{base}/streams/chat/members"))
         .bearer_auth("ws-rate-token")
         .json(&json!({"user_id": "alice"}))
         .send()
@@ -2120,7 +2124,7 @@ async fn test_ws_sliding_window_rate_limit() {
     ws_auth(&mut ws, &token).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -2130,8 +2134,8 @@ async fn test_ws_sliding_window_rate_limit() {
         ws_send(
             &mut ws,
             json!({
-                "type": "message.send",
-                "payload": {"room": "chat", "body": format!("msg {i}")}
+                "type": "event.publish",
+                "payload": {"stream": "chat", "body": format!("msg {i}")}
             }),
         )
         .await;
@@ -2148,7 +2152,7 @@ async fn test_ws_sliding_window_rate_limit() {
                 if msg["type"] == "error" && msg["payload"]["code"] == "RATE_LIMITED" {
                     got_rate_limited = true;
                 }
-                if msg["type"] == "message.ack" {
+                if msg["type"] == "event.ack" {
                     got_ack = true;
                 }
                 if got_rate_limited && got_ack {
@@ -2169,7 +2173,7 @@ async fn test_backpressure_increments_dropped_metric() {
 
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Register a connection with a tiny channel that will fill immediately
@@ -2182,10 +2186,10 @@ async fn test_backpressure_increments_dropped_metric() {
     server
         .state
         .connections
-        .add_room_subscription(conn_id, "chat");
+        .add_stream_subscription(conn_id, "chat");
     server
         .state
-        .rooms
+        .streams
         .subscribe("acme", "chat", "alice", conn_id);
 
     // Fill the channel capacity (1 slot) then the next send should drop
@@ -2200,26 +2204,18 @@ async fn test_backpressure_increments_dropped_metric() {
     // Second send should fail (channel full)
     assert!(!server.state.connections.send_to_conn(conn_id, &msg));
 
-    // Now test via fanout — send a few messages that fanout to the room
-    let dropped_before = server
-        .state
-        .metrics
-        .messages_dropped
-        .load(Ordering::Relaxed);
+    // Now test via fanout — send a few events that fanout to the stream
+    let dropped_before = server.state.metrics.events_dropped.load(Ordering::Relaxed);
 
     for _ in 0..5 {
-        herald_server::ws::fanout::fanout_to_room(&server.state, "acme", "chat", &msg, None);
+        herald_server::ws::fanout::fanout_to_stream(&server.state, "acme", "chat", &msg, None);
     }
 
-    let dropped_after = server
-        .state
-        .metrics
-        .messages_dropped
-        .load(Ordering::Relaxed);
+    let dropped_after = server.state.metrics.events_dropped.load(Ordering::Relaxed);
 
     assert!(
         dropped_after > dropped_before,
-        "expected messages_dropped to increase via fanout, before={dropped_before} after={dropped_after}"
+        "expected events_dropped to increase via fanout, before={dropped_before} after={dropped_after}"
     );
 
     // Also verify the metric is exposed via /metrics endpoint
@@ -2233,8 +2229,8 @@ async fn test_backpressure_increments_dropped_metric() {
 
     let dropped_line = body
         .lines()
-        .find(|l| l.starts_with("herald_messages_dropped_total"))
-        .expect("should have messages_dropped metric");
+        .find(|l| l.starts_with("herald_events_dropped_total"))
+        .expect("should have events_dropped metric");
     let dropped: u64 = dropped_line
         .split_whitespace()
         .last()
@@ -2305,7 +2301,7 @@ async fn test_presence_linger_reconnect_no_offline() {
         },
         store: StoreConfig {
             path: "/tmp/herald-test-linger".into(),
-            message_ttl_days: 7,
+            event_ttl_days: 7,
         },
         auth: AuthConfig {
             jwt_secret: Some(TENANT_A_SECRET.to_string()),
@@ -2356,23 +2352,23 @@ async fn test_presence_linger_reconnect_no_offline() {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}");
 
-    // Setup room and members
+    // Setup stream and members
     client
-        .post(format!("{base}/rooms"))
+        .post(format!("{base}/streams"))
         .bearer_auth("linger-token")
         .json(&json!({"id": "chat", "name": "Chat"}))
         .send()
         .await
         .unwrap();
     client
-        .post(format!("{base}/rooms/chat/members"))
+        .post(format!("{base}/streams/chat/members"))
         .bearer_auth("linger-token")
         .json(&json!({"user_id": "alice"}))
         .send()
         .await
         .unwrap();
     client
-        .post(format!("{base}/rooms/chat/members"))
+        .post(format!("{base}/streams/chat/members"))
         .bearer_auth("linger-token")
         .json(&json!({"user_id": "bob"}))
         .send()
@@ -2387,7 +2383,7 @@ async fn test_presence_linger_reconnect_no_offline() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -2398,7 +2394,7 @@ async fn test_presence_linger_reconnect_no_offline() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -2417,7 +2413,7 @@ async fn test_presence_linger_reconnect_no_offline() {
     ws_auth(&mut ws_alice2, &alice_jwt).await;
     ws_send(
         &mut ws_alice2,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice2, "subscribed").await;
@@ -2495,12 +2491,12 @@ async fn test_cors_headers_present() {
 async fn test_error_responses_do_not_leak_internals() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
 
-    // Try to create a duplicate room — triggers store conflict error
+    // Try to create a duplicate stream — triggers store conflict error
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "chat", "name": "Chat Again"}))
         .send()
@@ -2517,7 +2513,7 @@ async fn test_error_responses_do_not_leak_internals() {
             && !error_msg.contains("constraint"),
         "error message should not contain internal details: {error_msg}"
     );
-    assert_eq!(error_msg, "failed to create room");
+    assert_eq!(error_msg, "failed to create stream");
 
     // Try to create a duplicate tenant
     let resp = server
@@ -2808,19 +2804,19 @@ async fn test_structured_json_logging() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_pagination_on_list_rooms() {
+async fn test_pagination_on_list_streams() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
-    // Create 10 rooms
+    // Create 10 streams
     for i in 0..10 {
-        server.create_room(&token, &format!("room-{i:02}")).await;
+        server.create_stream(&token, &format!("room-{i:02}")).await;
     }
 
     // Default pagination
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth(&token)
         .send()
         .await
@@ -2828,18 +2824,18 @@ async fn test_pagination_on_list_rooms() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["total"], 10);
-    assert_eq!(body["rooms"].as_array().unwrap().len(), 10);
+    assert_eq!(body["streams"].as_array().unwrap().len(), 10);
 
     // With limit
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms?limit=3"))
+        .get(server.http_url("/streams?limit=3"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["rooms"].as_array().unwrap().len(), 3);
+    assert_eq!(body["streams"].as_array().unwrap().len(), 3);
     assert_eq!(body["total"], 10);
     assert_eq!(body["limit"], 3);
     assert_eq!(body["offset"], 0);
@@ -2847,13 +2843,13 @@ async fn test_pagination_on_list_rooms() {
     // With offset
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms?limit=3&offset=8"))
+        .get(server.http_url("/streams?limit=3&offset=8"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["rooms"].as_array().unwrap().len(), 2); // only 2 remaining
+    assert_eq!(body["streams"].as_array().unwrap().len(), 2); // only 2 remaining
     assert_eq!(body["total"], 10);
     assert_eq!(body["offset"], 8);
 }
@@ -2978,7 +2974,7 @@ async fn test_tenant_cache_refresh_on_update() {
 async fn test_typing_cleanup_on_disconnect() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -2988,7 +2984,7 @@ async fn test_typing_cleanup_on_disconnect() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -2999,7 +2995,7 @@ async fn test_typing_cleanup_on_disconnect() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -3016,7 +3012,7 @@ async fn test_typing_cleanup_on_disconnect() {
     // Alice starts typing
     ws_send(
         &mut ws_alice,
-        json!({"type": "typing.start", "payload": {"room": "chat"}}),
+        json!({"type": "typing.start", "payload": {"stream": "chat"}}),
     )
     .await;
 
@@ -3039,14 +3035,14 @@ async fn test_typing_cleanup_on_disconnect() {
 async fn test_reconnect_catchup_has_more() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Send 210 messages (more than CATCHUP_LIMIT=200)
     let client = server.http_client();
     for i in 0..210 {
         let resp = client
-            .post(server.http_url("/rooms/chat/messages"))
+            .post(server.http_url("/streams/chat/events"))
             .bearer_auth(&token)
             .json(&json!({"sender": "bot", "body": format!("msg {i}")}))
             .send()
@@ -3074,9 +3070,9 @@ async fn test_reconnect_catchup_has_more() {
 
     // Should receive subscribed + messages.batch
     let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
-    let batch = ws_recv_type(&mut ws, "messages.batch").await;
+    let batch = ws_recv_type(&mut ws, "events.batch").await;
 
-    let messages = batch["payload"]["messages"].as_array().unwrap();
+    let messages = batch["payload"]["events"].as_array().unwrap();
     let has_more = batch["payload"]["has_more"].as_bool().unwrap();
 
     assert!(messages.len() <= 200, "should return at most 200 messages");
@@ -3090,7 +3086,7 @@ async fn test_reconnect_catchup_has_more() {
 async fn test_graceful_shutdown_notifies_clients() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Connect alice
@@ -3099,7 +3095,7 @@ async fn test_graceful_shutdown_notifies_clients() {
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -3120,20 +3116,20 @@ async fn test_graceful_shutdown_notifies_clients() {
 }
 
 // ---------------------------------------------------------------------------
-// Message deletion tests
+// Event deletion tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_message_deletion_http() {
+async fn test_event_deletion_http() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Send a message
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "to be deleted"}))
         .send()
@@ -3146,7 +3142,7 @@ async fn test_message_deletion_http() {
     // Delete the message
     let resp = server
         .http_client()
-        .delete(server.http_url(&format!("/rooms/chat/messages/{msg_id}")))
+        .delete(server.http_url(&format!("/streams/chat/events/{msg_id}")))
         .bearer_auth(&token)
         .send()
         .await
@@ -3156,23 +3152,23 @@ async fn test_message_deletion_http() {
     // Verify message body is empty in history
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat/messages"))
+        .get(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    let messages = body["messages"].as_array().unwrap();
+    let messages = body["events"].as_array().unwrap();
     let deleted_msg = messages.iter().find(|m| m["id"] == msg_id).unwrap();
     assert_eq!(deleted_msg["body"], "");
     assert_eq!(deleted_msg["meta"]["deleted"], true);
 }
 
 #[tokio::test]
-async fn test_message_deletion_ws() {
+async fn test_event_deletion_ws() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -3182,7 +3178,7 @@ async fn test_message_deletion_ws() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -3193,7 +3189,7 @@ async fn test_message_deletion_ws() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -3205,44 +3201,44 @@ async fn test_message_deletion_ws() {
 
     ws_send(
         &mut ws_alice,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "hello"}}),
     )
     .await;
-    let ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+    let ack = ws_recv_type(&mut ws_alice, "event.ack").await;
     let msg_id = ack["payload"]["id"].as_str().unwrap().to_string();
 
     // Bob receives the message
-    let _new_msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    let _new_msg = ws_recv_type(&mut ws_bob, "event.new").await;
 
     // Alice deletes the message
     ws_send(
         &mut ws_alice,
-        json!({"type": "message.delete", "payload": {"room": "chat", "id": &msg_id}}),
+        json!({"type": "event.delete", "payload": {"stream": "chat", "id": &msg_id}}),
     )
     .await;
-    let _delete_ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+    let _delete_ack = ws_recv_type(&mut ws_alice, "event.ack").await;
 
     // Bob should receive message.deleted
-    let deleted = ws_recv_type(&mut ws_bob, "message.deleted").await;
+    let deleted = ws_recv_type(&mut ws_bob, "event.deleted").await;
     assert_eq!(deleted["payload"]["id"], msg_id);
-    assert_eq!(deleted["payload"]["room"], "chat");
+    assert_eq!(deleted["payload"]["stream"], "chat");
 }
 
 // ---------------------------------------------------------------------------
-// Room archival tests
+// Stream archival tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_room_archival() {
+async fn test_stream_archival() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Send a message — should work
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "before archive"}))
         .send()
@@ -3250,10 +3246,10 @@ async fn test_room_archival() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    // Archive the room
+    // Archive the stream
     let resp = server
         .http_client()
-        .patch(server.http_url("/rooms/chat"))
+        .patch(server.http_url("/streams/chat"))
         .bearer_auth(&token)
         .json(&json!({"archived": true}))
         .send()
@@ -3261,10 +3257,10 @@ async fn test_room_archival() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Verify room shows archived
+    // Verify stream shows archived
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat"))
+        .get(server.http_url("/streams/chat"))
         .bearer_auth(&token)
         .send()
         .await
@@ -3275,7 +3271,7 @@ async fn test_room_archival() {
     // Send a message — should fail
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "after archive"}))
         .send()
@@ -3286,19 +3282,19 @@ async fn test_room_archival() {
     // History still readable
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat/messages"))
+        .get(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["messages"].as_array().unwrap().is_empty());
+    assert!(!body["events"].as_array().unwrap().is_empty());
 
     // Unarchive
     let resp = server
         .http_client()
-        .patch(server.http_url("/rooms/chat"))
+        .patch(server.http_url("/streams/chat"))
         .bearer_auth(&token)
         .json(&json!({"archived": false}))
         .send()
@@ -3309,7 +3305,7 @@ async fn test_room_archival() {
     // Send a message — should work again
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "after unarchive"}))
         .send()
@@ -3355,7 +3351,7 @@ async fn test_webhook_event_filtering() {
         },
         store: StoreConfig {
             path: "/tmp/herald-test-whfilter".into(),
-            message_ttl_days: 7,
+            event_ttl_days: 7,
         },
         auth: AuthConfig {
             jwt_secret: Some(TENANT_A_SECRET.to_string()),
@@ -3373,7 +3369,7 @@ async fn test_webhook_event_filtering() {
             url: format!("http://127.0.0.1:{webhook_port}/hook"),
             secret: "test-webhook-secret-1234567890".to_string(),
             retries: 0,
-            events: Some(vec!["message.new".to_string()]),
+            events: Some(vec!["event.new".to_string()]),
         }),
         shroudb: None,
         tls: None,
@@ -3399,16 +3395,16 @@ async fn test_webhook_event_filtering() {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}");
 
-    // Create room + member (triggers member.joined webhook — should be filtered out)
+    // Create stream + member (triggers member.joined webhook — should be filtered out)
     client
-        .post(format!("{base}/rooms"))
+        .post(format!("{base}/streams"))
         .bearer_auth("wh-token")
         .json(&json!({"id": "chat", "name": "Chat"}))
         .send()
         .await
         .unwrap();
     client
-        .post(format!("{base}/rooms/chat/members"))
+        .post(format!("{base}/streams/chat/members"))
         .bearer_auth("wh-token")
         .json(&json!({"user_id": "alice"}))
         .send()
@@ -3424,7 +3420,7 @@ async fn test_webhook_event_filtering() {
 
     // Send a message — should trigger webhook
     client
-        .post(format!("{base}/rooms/chat/messages"))
+        .post(format!("{base}/streams/chat/events"))
         .bearer_auth("wh-token")
         .json(&json!({"sender": "alice", "body": "hello"}))
         .send()
@@ -3436,7 +3432,7 @@ async fn test_webhook_event_filtering() {
         .expect("webhook timeout")
         .expect("webhook channel closed");
     let parsed: Value = serde_json::from_str(&webhook_body).unwrap();
-    assert_eq!(parsed["event"], "message.new");
+    assert_eq!(parsed["event"], "event.new");
 }
 
 // ---------------------------------------------------------------------------
@@ -3464,7 +3460,7 @@ async fn test_api_key_scoping_read_only() {
     // GET should work with read-only token
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth(&read_token)
         .send()
         .await
@@ -3474,7 +3470,7 @@ async fn test_api_key_scoping_read_only() {
     // POST should be forbidden with read-only token
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&read_token)
         .json(&json!({"id": "test", "name": "Test"}))
         .send()
@@ -3484,18 +3480,18 @@ async fn test_api_key_scoping_read_only() {
 }
 
 #[tokio::test]
-async fn test_api_key_scoping_room() {
+async fn test_api_key_scoping_stream() {
     let server = TestServer::start().await;
     let full_token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&full_token, "allowed").await;
-    server.create_room(&full_token, "forbidden").await;
+    server.create_stream(&full_token, "allowed").await;
+    server.create_stream(&full_token, "forbidden").await;
 
-    // Create a room-scoped token
+    // Create a stream-scoped token
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants/acme/tokens"))
         .bearer_auth(SUPER_ADMIN_TOKEN)
-        .json(&json!({"scope": "room:allowed"}))
+        .json(&json!({"scope": "stream:allowed"}))
         .send()
         .await
         .unwrap();
@@ -3503,20 +3499,20 @@ async fn test_api_key_scoping_room() {
     let body: Value = resp.json().await.unwrap();
     let room_token = body["token"].as_str().unwrap().to_string();
 
-    // Access to allowed room should work
+    // Access to allowed stream should work
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/allowed"))
+        .get(server.http_url("/streams/allowed"))
         .bearer_auth(&room_token)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Access to forbidden room should fail
+    // Access to forbidden stream should fail
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/forbidden"))
+        .get(server.http_url("/streams/forbidden"))
         .bearer_auth(&room_token)
         .send()
         .await
@@ -3544,7 +3540,7 @@ async fn test_jwt_expired_token_rejected() {
         &JwtClaims {
             sub: "alice".to_string(),
             tenant: "acme".to_string(),
-            rooms: vec!["chat".to_string()],
+            streams: vec!["chat".to_string()],
             exp: now - 3600, // Expired 1 hour ago
             iat: now - 7200,
             iss: "test".to_string(),
@@ -3590,7 +3586,7 @@ async fn test_jwt_missing_tenant_claim() {
         &JwtClaims {
             sub: "alice".to_string(),
             tenant: "".to_string(), // Empty tenant
-            rooms: vec![],
+            streams: vec![],
             exp: now + 3600,
             iat: now,
             iss: "test".to_string(),
@@ -3630,7 +3626,7 @@ async fn test_jwt_missing_sub_claim() {
         .as_secs();
     let claims = serde_json::json!({
         "tenant": "acme",
-        "rooms": ["chat"],
+        "streams": ["chat"],
         "exp": now + 3600,
         "iat": now,
         "iss": "test",
@@ -3651,10 +3647,10 @@ async fn test_jwt_missing_sub_claim() {
 // --- Authorization ---
 
 #[tokio::test]
-async fn test_subscribe_to_room_not_in_jwt() {
+async fn test_subscribe_to_stream_not_in_jwt() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "secret-room").await;
+    server.create_stream(&token, "secret-room").await;
     server.add_member(&token, "secret-room", "alice").await;
 
     // JWT only authorizes "other-room", not "secret-room"
@@ -3664,7 +3660,7 @@ async fn test_subscribe_to_room_not_in_jwt() {
 
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["secret-room"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["secret-room"]}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
@@ -3672,10 +3668,10 @@ async fn test_subscribe_to_room_not_in_jwt() {
 }
 
 #[tokio::test]
-async fn test_subscribe_to_room_not_a_member() {
+async fn test_subscribe_to_stream_not_a_member() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     // alice is NOT added as a member
 
     let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
@@ -3684,18 +3680,18 @@ async fn test_subscribe_to_room_not_a_member() {
 
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
-    assert_eq!(msg["payload"]["code"], "ROOM_NOT_FOUND");
+    assert_eq!(msg["payload"]["code"], "STREAM_NOT_FOUND");
 }
 
 #[tokio::test]
-async fn test_send_message_to_unsubscribed_room() {
+async fn test_send_event_to_unsubscribed_stream() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     // alice is not a member
 
     let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
@@ -3704,7 +3700,7 @@ async fn test_send_message_to_unsubscribed_room() {
 
     ws_send(
         &mut ws,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "hello"}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
@@ -3712,29 +3708,29 @@ async fn test_send_message_to_unsubscribed_room() {
 }
 
 #[tokio::test]
-async fn test_cross_tenant_room_access_blocked() {
+async fn test_cross_tenant_stream_access_blocked() {
     let server = TestServer::start().await;
     let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
     let _token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
 
-    server.create_room(&token_a, "acme-chat").await;
+    server.create_stream(&token_a, "acme-chat").await;
     server.add_member(&token_a, "acme-chat", "alice").await;
 
-    // Try to access acme's room with beta's JWT
+    // Try to access acme's stream with beta's JWT
     let jwt = mint_jwt("alice", "beta", &["acme-chat"], TENANT_B_SECRET);
     let mut ws = server.ws_connect().await;
     ws_auth(&mut ws, &jwt).await;
 
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["acme-chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["acme-chat"]}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
-    // Should fail — room doesn't exist in beta tenant
+    // Should fail — stream doesn't exist in beta tenant
     assert!(
-        msg["payload"]["code"] == "ROOM_NOT_FOUND" || msg["payload"]["code"] == "UNAUTHORIZED",
-        "expected room not found or unauthorized, got: {:?}",
+        msg["payload"]["code"] == "STREAM_NOT_FOUND" || msg["payload"]["code"] == "UNAUTHORIZED",
+        "expected stream not found or unauthorized, got: {:?}",
         msg["payload"]["code"]
     );
 }
@@ -3746,7 +3742,7 @@ async fn test_http_api_requires_auth() {
     // No auth header
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .send()
         .await
         .unwrap();
@@ -3755,7 +3751,7 @@ async fn test_http_api_requires_auth() {
     // Invalid token
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms"))
+        .get(server.http_url("/streams"))
         .bearer_auth("bogus-token")
         .send()
         .await
@@ -3803,12 +3799,12 @@ async fn test_tenant_api_token_cross_tenant_blocked() {
     let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
     let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
 
-    server.create_room(&token_a, "acme-room").await;
+    server.create_stream(&token_a, "acme-room").await;
 
-    // Try to access acme-room with beta's token — should get 404 (room not in beta's scope)
+    // Try to access acme-room with beta's token — should get 404 (stream not in beta's scope)
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/acme-room"))
+        .get(server.http_url("/streams/acme-room"))
         .bearer_auth(&token_b)
         .send()
         .await
@@ -3819,13 +3815,13 @@ async fn test_tenant_api_token_cross_tenant_blocked() {
 // --- Input validation edge cases ---
 
 #[tokio::test]
-async fn test_empty_room_id_rejected() {
+async fn test_empty_stream_id_rejected() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "", "name": "Empty ID Room"}))
         .send()
@@ -3835,7 +3831,7 @@ async fn test_empty_room_id_rejected() {
 }
 
 #[tokio::test]
-async fn test_special_chars_in_room_id_rejected() {
+async fn test_special_chars_in_stream_id_rejected() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
@@ -3848,7 +3844,7 @@ async fn test_special_chars_in_room_id_rejected() {
     ] {
         let resp = server
             .http_client()
-            .post(server.http_url("/rooms"))
+            .post(server.http_url("/streams"))
             .bearer_auth(&token)
             .json(&json!({"id": bad_id, "name": "Bad Room"}))
             .send()
@@ -3871,7 +3867,7 @@ async fn test_oversized_meta_rejected() {
     let big_meta = serde_json::json!({"data": "x".repeat(20_000)});
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "room1", "name": "Room", "meta": big_meta}))
         .send()
@@ -3881,10 +3877,10 @@ async fn test_oversized_meta_rejected() {
 }
 
 #[tokio::test]
-async fn test_ws_message_body_too_large() {
+async fn test_ws_event_body_too_large() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
@@ -3892,7 +3888,7 @@ async fn test_ws_message_body_too_large() {
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -3901,7 +3897,7 @@ async fn test_ws_message_body_too_large() {
     let big_body = "x".repeat(70_000);
     ws_send(
         &mut ws,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": big_body}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": big_body}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
@@ -3942,13 +3938,13 @@ async fn test_unknown_message_type_rejected() {
 // --- Error paths ---
 
 #[tokio::test]
-async fn test_get_nonexistent_room() {
+async fn test_get_nonexistent_stream() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/does-not-exist"))
+        .get(server.http_url("/streams/does-not-exist"))
         .bearer_auth(&token)
         .send()
         .await
@@ -3957,13 +3953,13 @@ async fn test_get_nonexistent_room() {
 }
 
 #[tokio::test]
-async fn test_delete_nonexistent_room() {
+async fn test_delete_nonexistent_stream() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
     let resp = server
         .http_client()
-        .delete(server.http_url("/rooms/nope"))
+        .delete(server.http_url("/streams/nope"))
         .bearer_auth(&token)
         .send()
         .await
@@ -3975,11 +3971,11 @@ async fn test_delete_nonexistent_room() {
 async fn test_remove_nonexistent_member() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
 
     let resp = server
         .http_client()
-        .delete(server.http_url("/rooms/chat/members/nobody"))
+        .delete(server.http_url("/streams/chat/members/nobody"))
         .bearer_auth(&token)
         .send()
         .await
@@ -3988,13 +3984,13 @@ async fn test_remove_nonexistent_member() {
 }
 
 #[tokio::test]
-async fn test_send_to_nonexistent_room_http() {
+async fn test_send_to_nonexistent_stream_http() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/nope/messages"))
+        .post(server.http_url("/streams/nope/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "hello"}))
         .send()
@@ -4021,12 +4017,12 @@ async fn test_delete_nonexistent_tenant() {
 async fn test_invalid_role_rejected() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     let resp = server
         .http_client()
-        .patch(server.http_url("/rooms/chat/members/alice"))
+        .patch(server.http_url("/streams/chat/members/alice"))
         .bearer_auth(&token)
         .json(&json!({"role": "superadmin"}))
         .send()
@@ -4073,17 +4069,17 @@ async fn test_double_auth_rejected() {
 }
 
 #[tokio::test]
-async fn test_ws_delete_message_non_member_blocked() {
+async fn test_ws_delete_event_non_member_blocked() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     // Bob is NOT a member
 
     // Alice sends a message via HTTP
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "alice's message"}))
         .send()
@@ -4099,7 +4095,7 @@ async fn test_ws_delete_message_non_member_blocked() {
 
     ws_send(
         &mut ws,
-        json!({"type": "message.delete", "payload": {"room": "chat", "id": &msg_id}}),
+        json!({"type": "event.delete", "payload": {"stream": "chat", "id": &msg_id}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
@@ -4107,10 +4103,10 @@ async fn test_ws_delete_message_non_member_blocked() {
 }
 
 #[tokio::test]
-async fn test_ws_send_to_archived_room() {
+async fn test_ws_send_to_archived_stream() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Alice subscribes first before archiving
@@ -4119,7 +4115,7 @@ async fn test_ws_send_to_archived_room() {
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -4127,7 +4123,7 @@ async fn test_ws_send_to_archived_room() {
     // Archive the room
     let resp = server
         .http_client()
-        .patch(server.http_url("/rooms/chat"))
+        .patch(server.http_url("/streams/chat"))
         .bearer_auth(&token)
         .json(&json!({"archived": true}))
         .send()
@@ -4138,7 +4134,7 @@ async fn test_ws_send_to_archived_room() {
     // Alice tries to send via WS
     ws_send(
         &mut ws,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "hello"}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
@@ -4173,7 +4169,7 @@ async fn test_empty_name_rejected() {
 
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "room1", "name": ""}))
         .send()
@@ -4183,20 +4179,20 @@ async fn test_empty_name_rejected() {
 }
 
 #[tokio::test]
-async fn test_tenant_isolation_messages() {
+async fn test_tenant_isolation_events() {
     let server = TestServer::start().await;
     let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
     let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
 
-    server.create_room(&token_a, "chat").await;
-    server.create_room(&token_b, "chat").await; // Same room name, different tenant
+    server.create_stream(&token_a, "chat").await;
+    server.create_stream(&token_b, "chat").await; // Same stream name, different tenant
     server.add_member(&token_a, "chat", "alice").await;
     server.add_member(&token_b, "chat", "bob").await;
 
     // Send message in acme's chat
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token_a)
         .json(&json!({"sender": "alice", "body": "acme message"}))
         .send()
@@ -4207,13 +4203,13 @@ async fn test_tenant_isolation_messages() {
     // List messages in beta's chat — should be empty
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat/messages"))
+        .get(server.http_url("/streams/chat/events"))
         .bearer_auth(&token_b)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    let messages = body["messages"].as_array().unwrap();
+    let messages = body["events"].as_array().unwrap();
     assert!(
         messages.is_empty(),
         "beta's chat should have no messages from acme"
@@ -4221,10 +4217,10 @@ async fn test_tenant_isolation_messages() {
 }
 
 #[tokio::test]
-async fn test_ws_fetch_messages_non_member_blocked() {
+async fn test_ws_fetch_events_non_member_blocked() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     // alice is NOT a member
 
     let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
@@ -4233,7 +4229,7 @@ async fn test_ws_fetch_messages_non_member_blocked() {
 
     ws_send(
         &mut ws,
-        json!({"type": "messages.fetch", "payload": {"room": "chat"}}),
+        json!({"type": "events.fetch", "payload": {"stream": "chat"}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws, "error").await;
@@ -4241,15 +4237,15 @@ async fn test_ws_fetch_messages_non_member_blocked() {
 }
 
 #[tokio::test]
-async fn test_duplicate_room_creation_rejected() {
+async fn test_duplicate_stream_creation_rejected() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
 
-    // Try to create the same room again
+    // Try to create the same stream again
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "chat", "name": "Chat Again"}))
         .send()
@@ -4258,7 +4254,7 @@ async fn test_duplicate_room_creation_rejected() {
     // Should get conflict or bad request
     assert!(
         resp.status() == StatusCode::CONFLICT || resp.status() == StatusCode::BAD_REQUEST,
-        "expected 409 or 400 for duplicate room, got: {}",
+        "expected 409 or 400 for duplicate stream, got: {}",
         resp.status()
     );
 }
@@ -4285,15 +4281,15 @@ async fn test_duplicate_tenant_creation_rejected() {
 }
 
 #[tokio::test]
-async fn test_http_send_to_archived_room() {
+async fn test_http_send_to_archived_stream() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
 
-    // Archive the room
+    // Archive the stream
     let resp = server
         .http_client()
-        .patch(server.http_url("/rooms/chat"))
+        .patch(server.http_url("/streams/chat"))
         .bearer_auth(&token)
         .json(&json!({"archived": true}))
         .send()
@@ -4304,7 +4300,7 @@ async fn test_http_send_to_archived_room() {
     // Try to inject a message
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "hello"}))
         .send()
@@ -4317,12 +4313,12 @@ async fn test_http_send_to_archived_room() {
 async fn test_http_body_too_large() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
 
     let big_body = "x".repeat(70_000);
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": big_body}))
         .send()
@@ -4332,11 +4328,11 @@ async fn test_http_body_too_large() {
 }
 
 #[tokio::test]
-async fn test_ws_subscribe_multiple_rooms_partial_auth() {
+async fn test_ws_subscribe_multiple_streams_partial_auth() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "allowed").await;
-    server.create_room(&token, "forbidden").await;
+    server.create_stream(&token, "allowed").await;
+    server.create_stream(&token, "forbidden").await;
     server.add_member(&token, "allowed", "alice").await;
     server.add_member(&token, "forbidden", "alice").await;
 
@@ -4348,12 +4344,12 @@ async fn test_ws_subscribe_multiple_rooms_partial_auth() {
     // Subscribe to both
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["allowed", "forbidden"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["allowed", "forbidden"]}}),
     )
     .await;
 
     // Should get error for forbidden, subscribed for allowed (order may vary)
-    // Also may receive room.subscriber_count after subscribe
+    // Also may receive stream.subscriber_count after subscribe
     let mut got_subscribed = false;
     let mut got_error = false;
     for _ in 0..5 {
@@ -4370,8 +4366,8 @@ async fn test_ws_subscribe_multiple_rooms_partial_auth() {
             }
         }
     }
-    assert!(got_subscribed, "should have subscribed to allowed room");
-    assert!(got_error, "should have gotten error for forbidden room");
+    assert!(got_subscribed, "should have subscribed to allowed stream");
+    assert!(got_error, "should have gotten error for forbidden stream");
 }
 
 // ---------------------------------------------------------------------------
@@ -4382,14 +4378,14 @@ async fn test_ws_subscribe_multiple_rooms_partial_auth() {
 async fn test_cache_channel_delivers_last_event() {
     let server = TestServer::start().await;
     let token = server.create_tenant("cc1", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Send a message via HTTP to populate the cache
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "cached message"}))
         .send()
@@ -4403,29 +4399,29 @@ async fn test_cache_channel_delivers_last_event() {
     ws_auth(&mut ws, &bob_jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
 
     // Should immediately receive the cached message
-    let cached = ws_recv_type(&mut ws, "message.new").await;
+    let cached = ws_recv_type(&mut ws, "event.new").await;
     assert_eq!(cached["payload"]["body"], "cached message");
     assert_eq!(cached["payload"]["sender"], "alice");
 }
 
 #[tokio::test]
-async fn test_cache_channel_updates_on_new_message() {
+async fn test_cache_channel_updates_on_new_event() {
     let server = TestServer::start().await;
     let token = server.create_tenant("cc2", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Send first message
     server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "first"}))
         .send()
@@ -4435,7 +4431,7 @@ async fn test_cache_channel_updates_on_new_message() {
     // Send second message — this should replace the cache
     server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "second"}))
         .send()
@@ -4448,46 +4444,46 @@ async fn test_cache_channel_updates_on_new_message() {
     ws_auth(&mut ws, &bob_jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
 
-    let cached = ws_recv_type(&mut ws, "message.new").await;
+    let cached = ws_recv_type(&mut ws, "event.new").await;
     assert_eq!(cached["payload"]["body"], "second");
 }
 
 #[tokio::test]
-async fn test_cache_channel_empty_on_new_room() {
+async fn test_cache_channel_empty_on_new_stream() {
     let server = TestServer::start().await;
     let token = server.create_tenant("cc3", TENANT_A_SECRET).await;
-    server.create_room(&token, "empty-chat").await;
+    server.create_stream(&token, "empty-chat").await;
     server.add_member(&token, "empty-chat", "alice").await;
 
-    // Subscribe to a room with no messages — should get subscribed but no cached event
+    // Subscribe to a stream with no events — should get subscribed but no cached event
     let jwt = mint_jwt("alice", "cc3", &["empty-chat"], TENANT_A_SECRET);
     let mut ws = server.ws_connect().await;
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["empty-chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["empty-chat"]}}),
     )
     .await;
     let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
 
-    // No cached event — next message should timeout (skip room.subscriber_count)
+    // No cached event — next event should timeout (skip stream.subscriber_count)
     for _ in 0..5 {
         let timeout = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
         match timeout {
             Ok(Some(Ok(Message::Text(text)))) => {
                 let msg: Value = serde_json::from_str(&text).unwrap();
                 assert_ne!(
-                    msg["type"], "message.new",
-                    "should not receive any cached event for empty room"
+                    msg["type"], "event.new",
+                    "should not receive any cached event for empty stream"
                 );
-                // room.subscriber_count is expected — keep draining
-                if msg["type"] != "room.subscriber_count" {
-                    panic!("unexpected message type for empty room: {}", msg["type"]);
+                // stream.subscriber_count is expected — keep draining
+                if msg["type"] != "stream.subscriber_count" {
+                    panic!("unexpected message type for empty stream: {}", msg["type"]);
                 }
             }
             Err(_) => break, // timeout — good, no more messages
@@ -4500,7 +4496,7 @@ async fn test_cache_channel_empty_on_new_room() {
 async fn test_cache_channel_ws_send_updates_cache() {
     let server = TestServer::start().await;
     let token = server.create_tenant("cc4", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -4510,17 +4506,17 @@ async fn test_cache_channel_ws_send_updates_cache() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
     ws_send(
         &mut ws_alice,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "ws cached"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "ws cached"}}),
     )
     .await;
-    ws_recv_type(&mut ws_alice, "message.ack").await;
+    ws_recv_type(&mut ws_alice, "event.ack").await;
 
     // Small delay to ensure fan-out and cache update complete
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4531,28 +4527,28 @@ async fn test_cache_channel_ws_send_updates_cache() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
 
-    let cached = ws_recv_type(&mut ws_bob, "message.new").await;
+    let cached = ws_recv_type(&mut ws_bob, "event.new").await;
     assert_eq!(cached["payload"]["body"], "ws cached");
 }
 
 // ---------------------------------------------------------------------------
-// Public rooms
+// Public streams
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_public_room_subscribe_without_membership() {
+async fn test_public_stream_subscribe_without_membership() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
-    // Create a public room
+    // Create a public stream
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "public-chat", "name": "Public Chat", "public": true}))
         .send()
@@ -4568,31 +4564,31 @@ async fn test_public_room_subscribe_without_membership() {
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["public-chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["public-chat"]}}),
     )
     .await;
 
     // Should succeed (auto-joined)
     let msg = ws_recv_type(&mut ws, "subscribed").await;
-    assert_eq!(msg["payload"]["room"], "public-chat");
+    assert_eq!(msg["payload"]["stream"], "public-chat");
 
     // Should be able to send messages
     ws_send(
         &mut ws,
-        json!({"type": "message.send", "payload": {"room": "public-chat", "body": "hello public"}}),
+        json!({"type": "event.publish", "payload": {"stream": "public-chat", "body": "hello public"}}),
     )
     .await;
-    let ack = ws_recv_type(&mut ws, "message.ack").await;
+    let ack = ws_recv_type(&mut ws, "event.ack").await;
     assert!(ack["payload"]["id"].is_string());
 }
 
 #[tokio::test]
-async fn test_private_room_still_requires_membership() {
+async fn test_private_stream_still_requires_membership() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
-    // Create a private room (default)
-    server.create_room(&token, "private-chat").await;
+    // Create a private stream (default)
+    server.create_stream(&token, "private-chat").await;
     // Do NOT add alice as member
 
     let jwt = mint_jwt("alice", "acme", &["private-chat"], TENANT_A_SECRET);
@@ -4600,23 +4596,23 @@ async fn test_private_room_still_requires_membership() {
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["private-chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["private-chat"]}}),
     )
     .await;
 
     // Should fail — not a member
     let msg = ws_recv_type(&mut ws, "error").await;
-    assert_eq!(msg["payload"]["code"], "ROOM_NOT_FOUND");
+    assert_eq!(msg["payload"]["code"], "STREAM_NOT_FOUND");
 }
 
 #[tokio::test]
-async fn test_public_room_fanout_to_auto_joined() {
+async fn test_public_stream_fanout_to_auto_joined() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "pub", "name": "Public", "public": true}))
         .send()
@@ -4630,7 +4626,7 @@ async fn test_public_room_fanout_to_auto_joined() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["pub"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["pub"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -4641,7 +4637,7 @@ async fn test_public_room_fanout_to_auto_joined() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["pub"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["pub"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -4654,41 +4650,41 @@ async fn test_public_room_fanout_to_auto_joined() {
     // Alice sends, bob should receive
     ws_send(
         &mut ws_alice,
-        json!({"type": "message.send", "payload": {"room": "pub", "body": "hello bob"}}),
+        json!({"type": "event.publish", "payload": {"stream": "pub", "body": "hello bob"}}),
     )
     .await;
-    let _ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+    let _ack = ws_recv_type(&mut ws_alice, "event.ack").await;
 
-    let msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    let msg = ws_recv_type(&mut ws_bob, "event.new").await;
     assert_eq!(msg["payload"]["body"], "hello bob");
     assert_eq!(msg["payload"]["sender"], "alice");
 }
 
 #[tokio::test]
-async fn test_public_room_still_requires_jwt_claim() {
+async fn test_public_stream_still_requires_jwt_claim() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
 
     server
         .http_client()
-        .post(server.http_url("/rooms"))
+        .post(server.http_url("/streams"))
         .bearer_auth(&token)
         .json(&json!({"id": "pub2", "name": "Public 2", "public": true}))
         .send()
         .await
         .unwrap();
 
-    // JWT does NOT include "pub2" in rooms claim
+    // JWT does NOT include "pub2" in streams claim
     let jwt = mint_jwt("alice", "acme", &["other-room"], TENANT_A_SECRET);
     let mut ws = server.ws_connect().await;
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["pub2"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["pub2"]}}),
     )
     .await;
 
-    // Should fail — not authorized (not in JWT rooms claim)
+    // Should fail — not authorized (not in JWT streams claim)
     let msg = ws_recv_type(&mut ws, "error").await;
     assert_eq!(msg["payload"]["code"], "UNAUTHORIZED");
 }
@@ -4701,7 +4697,7 @@ async fn test_public_room_still_requires_jwt_claim() {
 async fn test_ephemeral_event_fanout() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -4711,7 +4707,7 @@ async fn test_ephemeral_event_fanout() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -4721,7 +4717,7 @@ async fn test_ephemeral_event_fanout() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -4736,14 +4732,14 @@ async fn test_ephemeral_event_fanout() {
         &mut ws_alice,
         json!({
             "type": "event.trigger",
-            "payload": {"room": "chat", "event": "cursor-move", "data": {"x": 100, "y": 200}}
+            "payload": {"stream": "chat", "event": "cursor-move", "data": {"x": 100, "y": 200}}
         }),
     )
     .await;
 
     // Bob should receive it
     let msg = ws_recv_type(&mut ws_bob, "event.received").await;
-    assert_eq!(msg["payload"]["room"], "chat");
+    assert_eq!(msg["payload"]["stream"], "chat");
     assert_eq!(msg["payload"]["event"], "cursor-move");
     assert_eq!(msg["payload"]["sender"], "alice");
     assert_eq!(msg["payload"]["data"]["x"], 100);
@@ -4754,7 +4750,7 @@ async fn test_ephemeral_event_fanout() {
 async fn test_ephemeral_event_not_persisted() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Alice sends an ephemeral event
@@ -4763,7 +4759,7 @@ async fn test_ephemeral_event_not_persisted() {
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -4772,7 +4768,7 @@ async fn test_ephemeral_event_not_persisted() {
         &mut ws,
         json!({
             "type": "event.trigger",
-            "payload": {"room": "chat", "event": "custom-event", "data": {"key": "value"}}
+            "payload": {"stream": "chat", "event": "custom-event", "data": {"key": "value"}}
         }),
     )
     .await;
@@ -4783,13 +4779,13 @@ async fn test_ephemeral_event_not_persisted() {
     // Check message history — ephemeral events should NOT appear
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat/messages"))
+        .get(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    let messages = body["messages"].as_array().unwrap();
+    let messages = body["events"].as_array().unwrap();
     assert!(
         messages.is_empty(),
         "ephemeral events should not appear in message history"
@@ -4800,7 +4796,7 @@ async fn test_ephemeral_event_not_persisted() {
 async fn test_ephemeral_event_not_sent_to_sender() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -4809,7 +4805,7 @@ async fn test_ephemeral_event_not_sent_to_sender() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -4819,7 +4815,7 @@ async fn test_ephemeral_event_not_sent_to_sender() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -4835,7 +4831,7 @@ async fn test_ephemeral_event_not_sent_to_sender() {
         json!({
             "type": "event.trigger",
             "ref": "evt1",
-            "payload": {"room": "chat", "event": "test-event", "data": null}
+            "payload": {"stream": "chat", "event": "test-event", "data": null}
         }),
     )
     .await;
@@ -4860,7 +4856,7 @@ async fn test_ephemeral_event_not_sent_to_sender() {
 async fn test_ephemeral_event_requires_membership() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     // alice NOT added as member
 
     let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
@@ -4871,7 +4867,7 @@ async fn test_ephemeral_event_requires_membership() {
         &mut ws,
         json!({
             "type": "event.trigger",
-            "payload": {"room": "chat", "event": "test", "data": null}
+            "payload": {"stream": "chat", "event": "test", "data": null}
         }),
     )
     .await;
@@ -4964,7 +4960,7 @@ async fn test_watchlist_initial_online_status() {
 async fn test_subscriber_count_broadcast() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -4974,14 +4970,14 @@ async fn test_subscriber_count_broadcast() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
     // Alice should get subscriber count (1)
-    let count_msg = ws_recv_type(&mut ws_alice, "room.subscriber_count").await;
-    assert_eq!(count_msg["payload"]["room"], "chat");
+    let count_msg = ws_recv_type(&mut ws_alice, "stream.subscriber_count").await;
+    assert_eq!(count_msg["payload"]["stream"], "chat");
     assert_eq!(count_msg["payload"]["count"], 1);
 
     // Bob subscribes
@@ -4990,7 +4986,7 @@ async fn test_subscriber_count_broadcast() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -5002,7 +4998,7 @@ async fn test_subscriber_count_broadcast() {
         match timeout {
             Ok(Some(Ok(Message::Text(text)))) => {
                 let msg: Value = serde_json::from_str(&text).unwrap();
-                if msg["type"] == "room.subscriber_count" && msg["payload"]["count"] == 2 {
+                if msg["type"] == "stream.subscriber_count" && msg["payload"]["count"] == 2 {
                     found_count_2 = true;
                     break;
                 }
@@ -5026,7 +5022,7 @@ async fn test_subscriber_count_broadcast() {
         match timeout {
             Ok(Some(Ok(Message::Text(text)))) => {
                 let msg: Value = serde_json::from_str(&text).unwrap();
-                if msg["type"] == "room.subscriber_count" && msg["payload"]["count"] == 1 {
+                if msg["type"] == "stream.subscriber_count" && msg["payload"]["count"] == 1 {
                     found_count_1 = true;
                     break;
                 }
@@ -5044,7 +5040,7 @@ async fn test_subscriber_count_broadcast() {
 async fn test_http_inject_exclude_connection() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -5054,7 +5050,7 @@ async fn test_http_inject_exclude_connection() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -5064,7 +5060,7 @@ async fn test_http_inject_exclude_connection() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -5080,7 +5076,7 @@ async fn test_http_inject_exclude_connection() {
     // Inject message via HTTP WITHOUT exclude — both should receive
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "system", "body": "broadcast"}))
         .send()
@@ -5089,15 +5085,15 @@ async fn test_http_inject_exclude_connection() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Both receive
-    let msg_alice = ws_recv_type(&mut ws_alice, "message.new").await;
+    let msg_alice = ws_recv_type(&mut ws_alice, "event.new").await;
     assert_eq!(msg_alice["payload"]["body"], "broadcast");
-    let msg_bob = ws_recv_type(&mut ws_bob, "message.new").await;
+    let msg_bob = ws_recv_type(&mut ws_bob, "event.new").await;
     assert_eq!(msg_bob["payload"]["body"], "broadcast");
 
     // Now inject WITH exclude_connection — exclude conn_id 0 (no real connection has this)
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "system", "body": "targeted", "exclude_connection": 0}))
         .send()
@@ -5106,9 +5102,9 @@ async fn test_http_inject_exclude_connection() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Both should still receive (since conn 0 doesn't match anyone)
-    let msg_alice = ws_recv_type(&mut ws_alice, "message.new").await;
+    let msg_alice = ws_recv_type(&mut ws_alice, "event.new").await;
     assert_eq!(msg_alice["payload"]["body"], "targeted");
-    let msg_bob = ws_recv_type(&mut ws_bob, "message.new").await;
+    let msg_bob = ws_recv_type(&mut ws_bob, "event.new").await;
     assert_eq!(msg_bob["payload"]["body"], "targeted");
 }
 
@@ -5126,7 +5122,7 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
         },
         store: StoreConfig {
             path: "/tmp/herald-test-quota".into(),
-            message_ttl_days: 7,
+            event_ttl_days: 7,
         },
         auth: AuthConfig {
             jwt_secret: Some(TENANT_A_SECRET.to_string()),
@@ -5145,7 +5141,7 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
         tls: None,
         tenant_limits: TenantLimitsConfig {
             max_connections_per_tenant: 2, // Very low limit
-            max_rooms_per_tenant: 10000,
+            max_streams_per_tenant: 10000,
         },
         cors: None,
     };
@@ -5209,14 +5205,14 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
 }
 
 // ---------------------------------------------------------------------------
-// Message editing & thread/reply tests
+// Event editing & thread/reply tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_message_edit_ws() {
+async fn test_event_edit_ws() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -5225,7 +5221,7 @@ async fn test_message_edit_ws() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -5235,7 +5231,7 @@ async fn test_message_edit_ws() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -5248,23 +5244,23 @@ async fn test_message_edit_ws() {
     // Alice sends
     ws_send(
         &mut ws_alice,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "original"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "original"}}),
     )
     .await;
-    let ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+    let ack = ws_recv_type(&mut ws_alice, "event.ack").await;
     let msg_id = ack["payload"]["id"].as_str().unwrap().to_string();
-    let _new = ws_recv_type(&mut ws_bob, "message.new").await;
+    let _new = ws_recv_type(&mut ws_bob, "event.new").await;
 
     // Alice edits
     ws_send(
         &mut ws_alice,
-        json!({"type": "message.edit", "payload": {"room": "chat", "id": &msg_id, "body": "edited"}}),
+        json!({"type": "event.edit", "payload": {"stream": "chat", "id": &msg_id, "body": "edited"}}),
     )
     .await;
-    let _edit_ack = ws_recv_type(&mut ws_alice, "message.ack").await;
+    let _edit_ack = ws_recv_type(&mut ws_alice, "event.ack").await;
 
     // Bob receives edit
-    let edited = ws_recv_type(&mut ws_bob, "message.edited").await;
+    let edited = ws_recv_type(&mut ws_bob, "event.edited").await;
     assert_eq!(edited["payload"]["id"], msg_id);
     assert_eq!(edited["payload"]["body"], "edited");
     assert!(edited["payload"]["edited_at"].is_number());
@@ -5272,27 +5268,27 @@ async fn test_message_edit_ws() {
     // Verify in history
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat/messages"))
+        .get(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    let msg = &body["messages"].as_array().unwrap()[0];
+    let msg = &body["events"].as_array().unwrap()[0];
     assert_eq!(msg["body"], "edited");
     assert!(msg["edited_at"].is_number());
 }
 
 #[tokio::test]
-async fn test_message_edit_http() {
+async fn test_event_edit_http() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "original"}))
         .send()
@@ -5303,7 +5299,7 @@ async fn test_message_edit_http() {
 
     let resp = server
         .http_client()
-        .patch(server.http_url(&format!("/rooms/chat/messages/{msg_id}")))
+        .patch(server.http_url(&format!("/streams/chat/events/{msg_id}")))
         .bearer_auth(&token)
         .json(&json!({"body": "updated via http"}))
         .send()
@@ -5313,27 +5309,27 @@ async fn test_message_edit_http() {
 
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat/messages"))
+        .get(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["messages"][0]["body"], "updated via http");
+    assert_eq!(body["events"][0]["body"], "updated via http");
 }
 
 #[tokio::test]
 async fn test_thread_reply() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Send parent message
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "parent message"}))
         .send()
@@ -5345,7 +5341,7 @@ async fn test_thread_reply() {
     // Send reply with parent_id
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "bob", "body": "reply to parent", "parent_id": &parent_id}))
         .send()
@@ -5356,7 +5352,7 @@ async fn test_thread_reply() {
     // Send another non-threaded message
     server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "unrelated message"}))
         .send()
@@ -5366,13 +5362,13 @@ async fn test_thread_reply() {
     // Fetch thread - should only return the reply
     let resp = server
         .http_client()
-        .get(server.http_url(&format!("/rooms/chat/messages?thread={parent_id}")))
+        .get(server.http_url(&format!("/streams/chat/events?thread={parent_id}")))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    let messages = body["messages"].as_array().unwrap();
+    let messages = body["events"].as_array().unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["body"], "reply to parent");
     assert_eq!(messages[0]["parent_id"], parent_id);
@@ -5382,7 +5378,7 @@ async fn test_thread_reply() {
 async fn test_thread_reply_ws() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -5391,7 +5387,7 @@ async fn test_thread_reply_ws() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -5404,7 +5400,7 @@ async fn test_thread_reply_ws() {
     // Alice sends parent via HTTP
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "parent"}))
         .send()
@@ -5414,13 +5410,13 @@ async fn test_thread_reply_ws() {
     let parent_id = body["id"].as_str().unwrap().to_string();
 
     // Bob receives parent
-    let parent_msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    let parent_msg = ws_recv_type(&mut ws_bob, "event.new").await;
     assert!(parent_msg["payload"]["parent_id"].is_null());
 
     // Alice sends reply via HTTP
     server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "reply", "parent_id": &parent_id}))
         .send()
@@ -5428,7 +5424,7 @@ async fn test_thread_reply_ws() {
         .unwrap();
 
     // Bob receives reply with parent_id
-    let reply_msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    let reply_msg = ws_recv_type(&mut ws_bob, "event.new").await;
     assert_eq!(reply_msg["payload"]["parent_id"], parent_id);
     assert_eq!(reply_msg["payload"]["body"], "reply");
 }
@@ -5441,14 +5437,14 @@ async fn test_thread_reply_ws() {
 async fn test_reaction_add_remove_ws() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Send a message
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "react to this"}))
         .send()
@@ -5463,7 +5459,7 @@ async fn test_reaction_add_remove_ws() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -5478,14 +5474,14 @@ async fn test_reaction_add_remove_ws() {
     ws_auth(&mut ws_alice, &alice_jwt).await;
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
     ws_send(
         &mut ws_alice,
-        json!({"type": "reaction.add", "payload": {"room": "chat", "message_id": &msg_id, "emoji": "thumbsup"}}),
+        json!({"type": "reaction.add", "payload": {"stream": "chat", "event_id": &msg_id, "emoji": "thumbsup"}}),
     )
     .await;
 
@@ -5498,7 +5494,7 @@ async fn test_reaction_add_remove_ws() {
     // Get reactions via HTTP
     let resp = server
         .http_client()
-        .get(server.http_url(&format!("/rooms/chat/messages/{msg_id}/reactions")))
+        .get(server.http_url(&format!("/streams/chat/events/{msg_id}/reactions")))
         .bearer_auth(&token)
         .send()
         .await
@@ -5513,7 +5509,7 @@ async fn test_reaction_add_remove_ws() {
     // Alice removes reaction
     ws_send(
         &mut ws_alice,
-        json!({"type": "reaction.remove", "payload": {"room": "chat", "message_id": &msg_id, "emoji": "thumbsup"}}),
+        json!({"type": "reaction.remove", "payload": {"stream": "chat", "event_id": &msg_id, "emoji": "thumbsup"}}),
     )
     .await;
     let msg = ws_recv_type(&mut ws_bob, "reaction.changed").await;
@@ -5528,13 +5524,13 @@ async fn test_reaction_add_remove_ws() {
 async fn test_attachment_validation() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Valid attachment
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({
             "sender": "alice",
@@ -5551,7 +5547,7 @@ async fn test_attachment_validation() {
     // Invalid attachment (missing url)
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({
             "sender": "alice",
@@ -5571,7 +5567,7 @@ async fn test_attachment_validation() {
         .collect();
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/messages"))
+        .post(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .json(&json!({"sender": "alice", "body": "too many", "meta": {"attachments": attachments}}))
         .send()
@@ -5660,7 +5656,7 @@ async fn test_auth_ok_includes_connection_id() {
 async fn test_http_trigger_ephemeral_event() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Connect alice
@@ -5669,7 +5665,7 @@ async fn test_http_trigger_ephemeral_event() {
     ws_auth(&mut ws, &jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -5682,7 +5678,7 @@ async fn test_http_trigger_ephemeral_event() {
     // Trigger ephemeral event from server via HTTP
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/trigger"))
+        .post(server.http_url("/streams/chat/trigger"))
         .bearer_auth(&token)
         .json(&json!({"event": "session.started", "data": {"session_id": "abc123"}}))
         .send()
@@ -5701,12 +5697,12 @@ async fn test_http_trigger_ephemeral_event() {
 async fn test_http_trigger_not_persisted() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
 
     // Trigger an event
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/trigger"))
+        .post(server.http_url("/streams/chat/trigger"))
         .bearer_auth(&token)
         .json(&json!({"event": "test", "data": null}))
         .send()
@@ -5717,20 +5713,20 @@ async fn test_http_trigger_not_persisted() {
     // Message history should be empty (ephemeral events not stored)
     let resp = server
         .http_client()
-        .get(server.http_url("/rooms/chat/messages"))
+        .get(server.http_url("/streams/chat/events"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert!(body["messages"].as_array().unwrap().is_empty());
+    assert!(body["events"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn test_http_trigger_with_exclude() {
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -5746,7 +5742,7 @@ async fn test_http_trigger_with_exclude() {
     let alice_conn = auth["payload"]["connection_id"].as_u64().unwrap();
     ws_send(
         &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
@@ -5757,7 +5753,7 @@ async fn test_http_trigger_with_exclude() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -5773,7 +5769,7 @@ async fn test_http_trigger_with_exclude() {
     // Trigger event excluding alice's connection
     let resp = server
         .http_client()
-        .post(server.http_url("/rooms/chat/trigger"))
+        .post(server.http_url("/streams/chat/trigger"))
         .bearer_auth(&token)
         .json(&json!({"event": "update", "data": {"v": 1}, "exclude_connection": alice_conn}))
         .send()
@@ -5797,7 +5793,7 @@ async fn test_reconnect_reauth_and_resubscribe() {
     // This validates the server-side behavior that the SDK fix depends on.
     let server = TestServer::start().await;
     let token = server.create_tenant("acme", TENANT_A_SECRET).await;
-    server.create_room(&token, "chat").await;
+    server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
@@ -5808,7 +5804,7 @@ async fn test_reconnect_reauth_and_resubscribe() {
     ws_auth(&mut ws, &alice_jwt).await;
     ws_send(
         &mut ws,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws, "subscribed").await;
@@ -5821,10 +5817,10 @@ async fn test_reconnect_reauth_and_resubscribe() {
     // Send a message to confirm subscription works
     ws_send(
         &mut ws,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "before disconnect"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "before disconnect"}}),
     )
     .await;
-    let ack = ws_recv_type(&mut ws, "message.ack").await;
+    let ack = ws_recv_type(&mut ws, "event.ack").await;
     assert!(ack["payload"]["id"].is_string());
 
     // --- Disconnect (simulate connection drop) ---
@@ -5843,11 +5839,11 @@ async fn test_reconnect_reauth_and_resubscribe() {
     // Re-subscribe
     ws_send(
         &mut ws2,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     let sub = ws_recv_type(&mut ws2, "subscribed").await;
-    assert_eq!(sub["payload"]["room"], "chat");
+    assert_eq!(sub["payload"]["stream"], "chat");
 
     // Drain extra
     while let Ok(Some(Ok(Message::Text(_)))) =
@@ -5857,10 +5853,10 @@ async fn test_reconnect_reauth_and_resubscribe() {
     // Verify subscription works after reconnect — send a message
     ws_send(
         &mut ws2,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "after reconnect"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "after reconnect"}}),
     )
     .await;
-    let ack2 = ws_recv_type(&mut ws2, "message.ack").await;
+    let ack2 = ws_recv_type(&mut ws2, "event.ack").await;
     assert!(ack2["payload"]["id"].is_string());
 
     // Connect bob and verify he can receive alice's messages (fanout works)
@@ -5869,7 +5865,7 @@ async fn test_reconnect_reauth_and_resubscribe() {
     ws_auth(&mut ws_bob, &bob_jwt).await;
     ws_send(
         &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"rooms": ["chat"]}}),
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
     )
     .await;
     ws_recv_type(&mut ws_bob, "subscribed").await;
@@ -5882,13 +5878,13 @@ async fn test_reconnect_reauth_and_resubscribe() {
     // Alice sends via reconnected connection
     ws_send(
         &mut ws2,
-        json!({"type": "message.send", "payload": {"room": "chat", "body": "hello from reconnected alice"}}),
+        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "hello from reconnected alice"}}),
     )
     .await;
-    ws_recv_type(&mut ws2, "message.ack").await;
+    ws_recv_type(&mut ws2, "event.ack").await;
 
     // Bob receives it
-    let msg = ws_recv_type(&mut ws_bob, "message.new").await;
+    let msg = ws_recv_type(&mut ws_bob, "event.new").await;
     assert_eq!(msg["payload"]["body"], "hello from reconnected alice");
     assert_eq!(msg["payload"]["sender"], "alice");
 }

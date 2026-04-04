@@ -28,7 +28,7 @@ pub struct ConnectionHandle {
     pub tenant_id: String,
     pub user_id: String,
     pub tx: mpsc::Sender<ServerMessage>,
-    pub rooms: HashSet<String>,
+    pub streams: HashSet<String>,
 }
 
 /// Key for per-tenant user tracking: (tenant_id, user_id)
@@ -66,7 +66,7 @@ impl ConnectionRegistry {
                 tenant_id: tenant_id.clone(),
                 user_id: user_id.clone(),
                 tx,
-                rooms: HashSet::new(),
+                streams: HashSet::new(),
             },
         );
         self.by_user
@@ -93,15 +93,15 @@ impl ConnectionRegistry {
         }
     }
 
-    pub fn add_room_subscription(&self, conn_id: ConnId, room_id: &str) {
+    pub fn add_stream_subscription(&self, conn_id: ConnId, stream_id: &str) {
         if let Some(mut handle) = self.by_conn.get_mut(&conn_id) {
-            handle.rooms.insert(room_id.to_string());
+            handle.streams.insert(stream_id.to_string());
         }
     }
 
-    pub fn remove_room_subscription(&self, conn_id: ConnId, room_id: &str) {
+    pub fn remove_stream_subscription(&self, conn_id: ConnId, stream_id: &str) {
         if let Some(mut handle) = self.by_conn.get_mut(&conn_id) {
-            handle.rooms.remove(room_id);
+            handle.streams.remove(stream_id);
         }
     }
 

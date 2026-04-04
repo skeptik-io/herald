@@ -1,5 +1,5 @@
 /**
- * E2EE manager — maps rooms to sessions, handles encrypt/decrypt lifecycle.
+ * E2EE manager — maps streams to sessions, handles encrypt/decrypt lifecycle.
  */
 
 import type { E2EESession } from "./crypto.js";
@@ -7,31 +7,31 @@ import type { E2EESession } from "./crypto.js";
 export class E2EEManager {
   private sessions = new Map<string, E2EESession>();
 
-  setSession(room: string, session: E2EESession): void {
-    this.sessions.set(room, session);
+  setSession(stream: string, session: E2EESession): void {
+    this.sessions.set(stream, session);
   }
 
-  getSession(room: string): E2EESession | undefined {
-    return this.sessions.get(room);
+  getSession(stream: string): E2EESession | undefined {
+    return this.sessions.get(stream);
   }
 
-  removeSession(room: string): void {
-    const session = this.sessions.get(room);
+  removeSession(stream: string): void {
+    const session = this.sessions.get(stream);
     if (session) {
       session.destroy();
-      this.sessions.delete(room);
+      this.sessions.delete(stream);
     }
   }
 
   encryptOutgoing(
-    room: string,
+    stream: string,
     body: string,
     meta?: unknown,
   ): { body: string; meta?: unknown } {
-    const session = this.sessions.get(room);
+    const session = this.sessions.get(stream);
     if (!session) return { body, meta };
 
-    const encrypted = session.encrypt(body, room);
+    const encrypted = session.encrypt(body, stream);
     const blindTokens = session.blind(body);
     const merged =
       meta && typeof meta === "object"
@@ -42,15 +42,15 @@ export class E2EEManager {
   }
 
   decryptIncoming(
-    room: string,
+    stream: string,
     body: string,
     meta?: unknown,
   ): { body: string; meta?: unknown; error?: boolean } {
-    const session = this.sessions.get(room);
+    const session = this.sessions.get(stream);
     if (!session) return { body, meta };
 
     try {
-      const decrypted = session.decrypt(body, room);
+      const decrypted = session.decrypt(body, stream);
       // Strip __blind from meta before exposing to consumer
       let cleanMeta = meta;
       if (meta && typeof meta === "object" && "__blind" in (meta as Record<string, unknown>)) {

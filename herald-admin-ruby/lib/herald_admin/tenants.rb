@@ -48,9 +48,9 @@ module HeraldAdmin
       data["tokens"]
     end
 
-    def list_rooms(tenant_id)
-      data = @t.request("GET", "/admin/tenants/#{ERB::Util.url_encode(tenant_id)}/rooms")
-      data["rooms"]
+    def list_streams(tenant_id)
+      data = @t.request("GET", "/admin/tenants/#{ERB::Util.url_encode(tenant_id)}/streams")
+      data["streams"]
     end
   end
 end

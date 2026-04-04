@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 
-use herald_core::message::{Message, MessageId};
+use herald_core::event::{Event, EventId};
 use herald_core::protocol::*;
 
 use crate::http::validation;
@@ -14,10 +14,10 @@ use crate::http::TenantId;
 use crate::state::AppState;
 use crate::store;
 use crate::ws::connection::now_millis;
-use crate::ws::fanout::fanout_to_room;
+use crate::ws::fanout::fanout_to_stream;
 
 #[derive(Deserialize)]
-pub struct InjectMessageRequest {
+pub struct InjectEventRequest {
     pub sender: String,
     pub body: String,
     #[serde(default)]
@@ -29,21 +29,21 @@ pub struct InjectMessageRequest {
 }
 
 #[derive(Deserialize)]
-pub struct ListMessagesQuery {
+pub struct ListEventsQuery {
     pub before: Option<u64>,
     pub after: Option<u64>,
     pub limit: Option<u32>,
     pub thread: Option<String>,
 }
 
-const MESSAGE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_LIMIT: u32 = 100;
 
-pub async fn inject_message(
+pub async fn inject_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path(room_id): Path<String>,
-    Json(req): Json<InjectMessageRequest>,
+    Path(stream_id): Path<String>,
+    Json(req): Json<InjectEventRequest>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
 
@@ -60,29 +60,29 @@ pub async fn inject_message(
         return (*e).into_response();
     }
 
-    if !state.rooms.room_exists(tid, &room_id) {
+    if !state.streams.stream_exists(tid, &stream_id) {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "room not found"})),
+            Json(serde_json::json!({"error": "stream not found"})),
         )
             .into_response();
     }
 
-    if state.rooms.is_archived(tid, &room_id) {
+    if state.streams.is_archived(tid, &stream_id) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "room is archived"})),
+            Json(serde_json::json!({"error": "stream is archived"})),
         )
             .into_response();
     }
 
-    let seq = state.rooms.next_seq(tid, &room_id);
+    let seq = state.streams.next_seq(tid, &stream_id);
     let now = now_millis();
-    let msg_id = uuid::Uuid::new_v4().to_string();
+    let event_id = uuid::Uuid::new_v4().to_string();
 
-    let message = Message {
-        id: MessageId(msg_id.clone()),
-        room_id: room_id.clone(),
+    let event = Event {
+        id: EventId(event_id.clone()),
+        stream_id: stream_id.clone(),
         seq,
         sender: req.sender.clone(),
         body: req.body.clone(),
@@ -92,8 +92,8 @@ pub async fn inject_message(
         sent_at: now,
     };
 
-    if let Err(e) = store::messages::insert(&*state.db, tid, &message, now + MESSAGE_TTL_MS).await {
-        tracing::error!(tenant = tid, room = %room_id, "failed to insert message: {e}");
+    if let Err(e) = store::events::insert(&*state.db, tid, &event, now + EVENT_TTL_MS).await {
+        tracing::error!(tenant = tid, stream = %stream_id, "failed to insert event: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
@@ -101,12 +101,12 @@ pub async fn inject_message(
             .into_response();
     }
 
-    state.increment_tenant_messages(tid);
+    state.increment_tenant_events(tid);
 
-    let new_msg = ServerMessage::MessageNew {
-        payload: MessageNewPayload {
-            room: room_id.clone(),
-            id: msg_id.clone(),
+    let new_event = ServerMessage::EventNew {
+        payload: EventNewPayload {
+            stream: stream_id.clone(),
+            id: event_id.clone(),
             seq,
             sender: req.sender.clone(),
             body: req.body.clone(),
@@ -118,17 +118,17 @@ pub async fn inject_message(
     let exclude = req
         .exclude_connection
         .map(crate::registry::connection::ConnId);
-    fanout_to_room(&state, tid, &room_id, &new_msg, exclude);
+    fanout_to_stream(&state, tid, &stream_id, &new_event, exclude);
 
     // Cache channel: update last event for new subscribers
-    state.rooms.set_last_event(tid, &room_id, new_msg);
+    state.streams.set_last_event(tid, &stream_id, new_event);
 
     state.fire_webhook(
         tid,
         crate::webhook::WebhookEvent {
-            event: "message.new".to_string(),
-            room: room_id.clone(),
-            id: Some(msg_id.clone()),
+            event: "event.new".to_string(),
+            stream: stream_id.clone(),
+            id: Some(event_id.clone()),
             seq: Some(seq),
             sender: Some(req.sender),
             body: Some(req.body),
@@ -141,48 +141,48 @@ pub async fn inject_message(
 
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({"id": msg_id, "seq": seq, "sent_at": now})),
+        Json(serde_json::json!({"id": event_id, "seq": seq, "sent_at": now})),
     )
         .into_response()
 }
 
-pub async fn list_messages(
+pub async fn list_events(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path(room_id): Path<String>,
-    Query(q): Query<ListMessagesQuery>,
+    Path(stream_id): Path<String>,
+    Query(q): Query<ListEventsQuery>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
     let limit = q.limit.unwrap_or(50).min(MAX_LIMIT);
 
-    let messages = if let Some(after) = q.after {
-        store::messages::list_after(&*state.db, tid, &room_id, after, limit + 1)
+    let events = if let Some(after) = q.after {
+        store::events::list_after(&*state.db, tid, &stream_id, after, limit + 1)
             .await
             .unwrap_or_default()
     } else {
         let before = q.before.unwrap_or(i64::MAX as u64);
-        store::messages::list_before(&*state.db, tid, &room_id, before, limit + 1)
+        store::events::list_before(&*state.db, tid, &stream_id, before, limit + 1)
             .await
             .unwrap_or_default()
     };
 
-    let messages = if let Some(ref thread_id) = q.thread {
-        messages
+    let events = if let Some(ref thread_id) = q.thread {
+        events
             .into_iter()
             .filter(|m| m.parent_id.as_deref() == Some(thread_id.as_str()))
             .collect()
     } else {
-        messages
+        events
     };
 
-    let has_more = messages.len() > limit as usize;
-    let result: Vec<serde_json::Value> = messages
+    let has_more = events.len() > limit as usize;
+    let result: Vec<serde_json::Value> = events
         .into_iter()
         .take(limit as usize)
         .map(|m| {
             let mut obj = serde_json::json!({
                 "id": m.id.0,
-                "room": m.room_id,
+                "stream": m.stream_id,
                 "seq": m.seq,
                 "sender": m.sender,
                 "body": m.body,
@@ -200,7 +200,7 @@ pub async fn list_messages(
         .collect();
 
     Json(serde_json::json!({
-        "messages": result,
+        "events": result,
         "has_more": has_more,
     }))
     .into_response()
@@ -209,9 +209,9 @@ pub async fn list_messages(
 pub async fn list_cursors(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path(room_id): Path<String>,
+    Path(stream_id): Path<String>,
 ) -> impl IntoResponse {
-    match store::cursors::list_by_room(&*state.db, &tenant.0, &room_id).await {
+    match store::cursors::list_by_stream(&*state.db, &tenant.0, &stream_id).await {
         Ok(cursors) => {
             let cursors: Vec<serde_json::Value> = cursors
                 .into_iter()
@@ -225,7 +225,7 @@ pub async fn list_cursors(
             Json(serde_json::json!({"cursors": cursors})).into_response()
         }
         Err(e) => {
-            tracing::error!(tenant = %tenant.0, room = %room_id, "failed to list cursors: {e}");
+            tracing::error!(tenant = %tenant.0, stream = %stream_id, "failed to list cursors: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -236,15 +236,15 @@ pub async fn list_cursors(
 }
 
 #[derive(Deserialize)]
-pub struct EditMessageRequest {
+pub struct EditEventRequest {
     pub body: String,
 }
 
-pub async fn edit_message(
+pub async fn edit_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path((room_id, msg_id)): Path<(String, String)>,
-    Json(req): Json<EditMessageRequest>,
+    Path((stream_id, event_id)): Path<(String, String)>,
+    Json(req): Json<EditEventRequest>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
 
@@ -253,27 +253,27 @@ pub async fn edit_message(
     }
 
     let now = now_millis();
-    match store::messages::edit_message(&*state.db, tid, &msg_id, &req.body, now).await {
+    match store::events::edit_event(&*state.db, tid, &event_id, &req.body, now).await {
         Ok(Some(updated)) => {
-            let edited_msg = ServerMessage::MessageEdited {
-                payload: herald_core::protocol::MessageEditedPayload {
-                    room: room_id.clone(),
-                    id: msg_id.clone(),
+            let edited_event = ServerMessage::EventEdited {
+                payload: herald_core::protocol::EventEditedPayload {
+                    stream: stream_id.clone(),
+                    id: event_id.clone(),
                     seq: updated.seq,
                     body: req.body,
                     edited_at: now,
                 },
             };
-            fanout_to_room(&state, tid, &room_id, &edited_msg, None);
+            fanout_to_stream(&state, tid, &stream_id, &edited_event, None);
             StatusCode::OK.into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "message not found"})),
+            Json(serde_json::json!({"error": "event not found"})),
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(tenant = tid, msg = %msg_id, "failed to edit message: {e}");
+            tracing::error!(tenant = tid, event = %event_id, "failed to edit event: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -286,13 +286,13 @@ pub async fn edit_message(
 pub async fn get_reactions(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path((room_id, msg_id)): Path<(String, String)>,
+    Path((stream_id, event_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    match store::reactions::list_for_message(&*state.db, tid, &room_id, &msg_id).await {
+    match store::reactions::list_for_event(&*state.db, tid, &stream_id, &event_id).await {
         Ok(reactions) => Json(serde_json::json!({"reactions": reactions})).into_response(),
         Err(e) => {
-            tracing::error!(tenant = tid, msg = %msg_id, "failed to list reactions: {e}");
+            tracing::error!(tenant = tid, event = %event_id, "failed to list reactions: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -303,7 +303,7 @@ pub async fn get_reactions(
 }
 
 #[derive(Deserialize)]
-pub struct TriggerEventRequest {
+pub struct TriggerEphemeralRequest {
     pub event: String,
     #[serde(default)]
     pub data: Option<serde_json::Value>,
@@ -311,18 +311,18 @@ pub struct TriggerEventRequest {
     pub exclude_connection: Option<u64>,
 }
 
-pub async fn trigger_event(
+pub async fn trigger_ephemeral(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path(room_id): Path<String>,
-    Json(req): Json<TriggerEventRequest>,
+    Path(stream_id): Path<String>,
+    Json(req): Json<TriggerEphemeralRequest>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
 
-    if !state.rooms.room_exists(tid, &room_id) {
+    if !state.streams.stream_exists(tid, &stream_id) {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "room not found"})),
+            Json(serde_json::json!({"error": "stream not found"})),
         )
             .into_response();
     }
@@ -333,43 +333,43 @@ pub async fn trigger_event(
 
     let msg = ServerMessage::EventReceived {
         payload: EventReceivedPayload {
-            room: room_id.clone(),
+            stream: stream_id.clone(),
             event: req.event.clone(),
             sender: "_server".to_string(),
             data: req.data,
         },
     };
-    fanout_to_room(&state, tid, &room_id, &msg, exclude);
+    fanout_to_stream(&state, tid, &stream_id, &msg, exclude);
 
     StatusCode::NO_CONTENT.into_response()
 }
 
-pub async fn delete_message(
+pub async fn delete_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path((room_id, msg_id)): Path<(String, String)>,
+    Path((stream_id, event_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
 
-    match store::messages::delete_message(&*state.db, tid, &msg_id).await {
+    match store::events::delete_event(&*state.db, tid, &event_id).await {
         Ok(Some(original)) => {
-            let deleted_msg = ServerMessage::MessageDeleted {
-                payload: herald_core::protocol::MessageDeletedPayload {
-                    room: room_id.clone(),
-                    id: msg_id.clone(),
+            let deleted_event = ServerMessage::EventDeleted {
+                payload: herald_core::protocol::EventDeletedPayload {
+                    stream: stream_id.clone(),
+                    id: event_id.clone(),
                     seq: original.seq,
                 },
             };
-            fanout_to_room(&state, tid, &room_id, &deleted_msg, None);
+            fanout_to_stream(&state, tid, &stream_id, &deleted_event, None);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "message not found"})),
+            Json(serde_json::json!({"error": "event not found"})),
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(tenant = tid, room = %room_id, msg = %msg_id, "failed to delete message: {e}");
+            tracing::error!(tenant = tid, stream = %stream_id, event = %event_id, "failed to delete event: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),

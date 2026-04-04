@@ -3,24 +3,24 @@ use serde::{Deserialize, Serialize};
 pub type Sequence = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MessageId(pub String);
+pub struct EventId(pub String);
 
-impl MessageId {
+impl EventId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl std::fmt::Display for MessageId {
+impl std::fmt::Display for EventId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub id: MessageId,
-    pub room_id: String,
+pub struct Event {
+    pub id: EventId,
+    pub stream_id: String,
     pub seq: Sequence,
     pub sender: String,
     pub body: String,

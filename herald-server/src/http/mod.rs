@@ -1,10 +1,10 @@
 pub mod admin;
 pub mod blocks;
+pub mod events;
 pub mod health;
 pub mod members;
-pub mod messages;
 pub mod presence;
-pub mod rooms;
+pub mod streams;
 pub mod validation;
 
 use std::sync::Arc;
@@ -34,34 +34,34 @@ pub struct RequestId(pub String);
 
 pub fn router(state: Arc<AppState>) -> Router {
     let tenant_api = Router::new()
-        .route("/rooms", post(rooms::create_room))
-        .route("/rooms", get(rooms::list_rooms))
-        .route("/rooms/{id}", get(rooms::get_room))
-        .route("/rooms/{id}", patch(rooms::update_room))
-        .route("/rooms/{id}", delete(rooms::delete_room))
-        .route("/rooms/{id}/members", post(members::add_member))
-        .route("/rooms/{id}/members", get(members::list_members))
+        .route("/streams", post(streams::create_stream))
+        .route("/streams", get(streams::list_streams))
+        .route("/streams/{id}", get(streams::get_stream))
+        .route("/streams/{id}", patch(streams::update_stream))
+        .route("/streams/{id}", delete(streams::delete_stream))
+        .route("/streams/{id}/members", post(members::add_member))
+        .route("/streams/{id}/members", get(members::list_members))
         .route(
-            "/rooms/{id}/members/{user_id}",
+            "/streams/{id}/members/{user_id}",
             delete(members::remove_member),
         )
         .route(
-            "/rooms/{id}/members/{user_id}",
+            "/streams/{id}/members/{user_id}",
             patch(members::update_member),
         )
-        .route("/rooms/{id}/messages", post(messages::inject_message))
-        .route("/rooms/{id}/messages", get(messages::list_messages))
+        .route("/streams/{id}/events", post(events::inject_event))
+        .route("/streams/{id}/events", get(events::list_events))
         .route(
-            "/rooms/{id}/messages/{msg_id}",
-            delete(messages::delete_message).patch(messages::edit_message),
+            "/streams/{id}/events/{event_id}",
+            delete(events::delete_event).patch(events::edit_event),
         )
         .route(
-            "/rooms/{id}/messages/{msg_id}/reactions",
-            get(messages::get_reactions),
+            "/streams/{id}/events/{event_id}/reactions",
+            get(events::get_reactions),
         )
-        .route("/rooms/{id}/trigger", post(messages::trigger_event))
-        .route("/rooms/{id}/cursors", get(messages::list_cursors))
-        .route("/rooms/{id}/presence", get(presence::room_presence))
+        .route("/streams/{id}/trigger", post(events::trigger_ephemeral))
+        .route("/streams/{id}/cursors", get(events::list_cursors))
+        .route("/streams/{id}/presence", get(presence::stream_presence))
         .route("/presence/{user_id}", get(presence::user_presence))
         .route("/blocks", post(blocks::block_user))
         .route("/blocks", delete(blocks::unblock_user))
@@ -90,7 +90,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/admin/tenants/{id}/tokens/{token}",
             delete(admin::delete_api_token),
         )
-        .route("/admin/tenants/{id}/rooms", get(admin::list_tenant_rooms))
+        .route(
+            "/admin/tenants/{id}/streams",
+            get(admin::list_tenant_streams),
+        )
         .route("/admin/connections", get(admin::list_connections))
         .route("/admin/events", get(admin::list_events))
         .route("/admin/events/stream", get(admin::events_stream))
@@ -250,10 +253,10 @@ fn check_scope(scope: &Option<String>, method: &axum::http::Method, path: &str) 
         return *method == axum::http::Method::GET;
     }
 
-    if let Some(room_id) = s.strip_prefix("room:") {
-        // Only allow access to the specific room
-        return path.contains(&format!("/rooms/{room_id}"))
-            || path.contains(&format!("/rooms/{room_id}/"));
+    if let Some(stream_id) = s.strip_prefix("stream:") {
+        // Only allow access to the specific stream
+        return path.contains(&format!("/streams/{stream_id}"))
+            || path.contains(&format!("/streams/{stream_id}/"));
     }
 
     true // Unknown scope = full access (don't break on forward-compatible scopes)

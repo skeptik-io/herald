@@ -13,7 +13,7 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WebhookEvent {
     pub event: String,
-    pub room: String,
+    pub stream: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,7 +75,7 @@ pub fn deliver(
                 Ok(resp) if resp.status().is_success() => {
                     debug!(
                         event = %event.event,
-                        room = %event.room,
+                        stream = %event.stream,
                         attempt = attempt,
                         "webhook delivered"
                     );
@@ -113,13 +113,13 @@ pub fn deliver(
             ),
             serde_json::json!({
                 "event": &event.event,
-                "room": &event.room,
+                "stream": &event.stream,
                 "url": &config.url,
             }),
         );
         warn!(
             event = %event.event,
-            room = %event.room,
+            stream = %event.stream,
             retries = config.retries,
             "webhook delivery exhausted all retries"
         );
@@ -148,7 +148,7 @@ mod tests {
     fn test_sign_and_verify() {
         let secret = "test-secret";
         let timestamp = 1712000001;
-        let body = r#"{"event":"message.new","room":"chat"}"#;
+        let body = r#"{"event":"event.new","stream":"chat"}"#;
 
         let sig = sign(secret, timestamp, body);
         assert!(sig.starts_with("sha256="));

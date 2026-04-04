@@ -7,9 +7,9 @@ use tracing::{debug, info};
 
 use herald_core::error::ErrorCode;
 use herald_core::protocol::{
-    AuthOkPayload, ClientMessage, MemberPresence, MessageNewPayload, MessagesBatchPayload,
-    PresenceChangedPayload, RawFrame, RoomSubscriberCountPayload, ServerMessage, SubscribedPayload,
-    WatchlistPayload,
+    AuthOkPayload, ClientMessage, EventNewPayload, EventsBatchPayload, MemberPresence,
+    PresenceChangedPayload, RawFrame, ServerMessage, StreamSubscriberCountPayload,
+    SubscribedPayload, WatchlistPayload,
 };
 
 use crate::registry::connection::ConnId;
@@ -25,7 +25,7 @@ pub struct ConnContext {
     pub conn_id: ConnId,
     pub tenant_id: String,
     pub user_id: String,
-    pub rooms_claim: Vec<String>,
+    pub streams_claim: Vec<String>,
     pub watchlist: Vec<String>,
 }
 
@@ -109,7 +109,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     };
 
     let user_id = claims.sub.clone();
-    let rooms_claim = claims.rooms.clone();
+    let streams_claim = claims.streams.clone();
 
     // Enforce per-tenant connection limit
     let tenant_conns = state.connections.tenant_connection_count(&tenant_id);
@@ -206,7 +206,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             conn_id,
             &tenant_id,
             &user_id,
-            &rooms_claim,
+            &streams_claim,
             &msg_tx,
             since,
         )
@@ -217,7 +217,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         conn_id,
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
-        rooms_claim,
+        streams_claim,
         watchlist: claims.watchlist.clone(),
     };
 
@@ -238,7 +238,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                         .send(ServerMessage::error(
                             None,
                             ErrorCode::RateLimited,
-                            "message rate limit exceeded",
+                            "event rate limit exceeded",
                         ))
                         .await;
                     continue;
@@ -284,17 +284,17 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "disconnected");
 
-    // Clear typing state and broadcast stop for any rooms this user was typing in
-    let typing_rooms = state.typing.remove_user(&tenant_id, &user_id);
-    for room_id in typing_rooms {
+    // Clear typing state and broadcast stop for any streams this user was typing in
+    let typing_streams = state.typing.remove_user(&tenant_id, &user_id);
+    for stream_id in typing_streams {
         let msg = ServerMessage::Typing {
             payload: herald_core::protocol::TypingPayload {
-                room: room_id.clone(),
+                stream: stream_id.clone(),
                 user_id: user_id.clone(),
                 active: false,
             },
         };
-        crate::ws::fanout::fanout_to_room(&state, &tenant_id, &room_id, &msg, None);
+        crate::ws::fanout::fanout_to_stream(&state, &tenant_id, &stream_id, &msg, None);
     }
 
     state.event_bus.push_event(
@@ -306,21 +306,21 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         }),
     );
 
-    let affected_rooms = state
-        .rooms
+    let affected_streams = state
+        .streams
         .unsubscribe_conn_from_all(conn_id, &tenant_id, &user_id);
     state.connections.unregister(conn_id);
 
-    // Broadcast subscriber count updates for affected rooms
-    for room_id in &affected_rooms {
-        let count = state.rooms.subscriber_count(&tenant_id, room_id);
-        let count_msg = ServerMessage::RoomSubscriberCount {
-            payload: RoomSubscriberCountPayload {
-                room: room_id.clone(),
+    // Broadcast subscriber count updates for affected streams
+    for stream_id in &affected_streams {
+        let count = state.streams.subscriber_count(&tenant_id, stream_id);
+        let count_msg = ServerMessage::StreamSubscriberCount {
+            payload: StreamSubscriberCountPayload {
+                stream: stream_id.clone(),
                 count,
             },
         };
-        crate::ws::fanout::fanout_to_room(&state, &tenant_id, room_id, &count_msg, None);
+        crate::ws::fanout::fanout_to_stream(&state, &tenant_id, stream_id, &count_msg, None);
     }
 
     if state
@@ -382,33 +382,38 @@ async fn reconnect_catchup(
     conn_id: ConnId,
     tenant_id: &str,
     user_id: &str,
-    rooms_claim: &[String],
+    streams_claim: &[String],
     tx: &mpsc::Sender<ServerMessage>,
     since_ms: i64,
 ) {
-    for room_id in rooms_claim {
-        if state.rooms.is_public(tenant_id, room_id) {
-            if !state.rooms.is_member(tenant_id, room_id, user_id) {
-                state.rooms.add_member(tenant_id, room_id, user_id);
+    for stream_id in streams_claim {
+        if state.streams.is_public(tenant_id, stream_id) {
+            if !state.streams.is_member(tenant_id, stream_id, user_id) {
+                state.streams.add_member(tenant_id, stream_id, user_id);
                 let member = herald_core::member::Member {
-                    room_id: room_id.clone(),
+                    stream_id: stream_id.clone(),
                     user_id: user_id.to_string(),
                     role: herald_core::member::Role::Member,
                     joined_at: now_millis(),
                 };
                 let _ = store::members::insert(&*state.db, tenant_id, &member).await;
             }
-        } else if !state.rooms.is_member(tenant_id, room_id, user_id) {
+        } else if !state.streams.is_member(tenant_id, stream_id, user_id) {
             continue;
         }
 
-        state.rooms.subscribe(tenant_id, room_id, user_id, conn_id);
-        state.connections.add_room_subscription(conn_id, room_id);
+        state
+            .streams
+            .subscribe(tenant_id, stream_id, user_id, conn_id);
+        state
+            .connections
+            .add_stream_subscription(conn_id, stream_id);
 
-        let members = state.rooms.get_members(tenant_id, room_id);
+        let members = state.streams.get_members(tenant_id, stream_id);
         let mut member_presence = Vec::new();
         for uid in &members {
-            if let Ok(Some(member)) = store::members::get(&*state.db, tenant_id, room_id, uid).await
+            if let Ok(Some(member)) =
+                store::members::get(&*state.db, tenant_id, stream_id, uid).await
             {
                 let presence = state.presence.resolve(
                     tenant_id,
@@ -424,16 +429,16 @@ async fn reconnect_catchup(
             }
         }
 
-        let cursor = store::cursors::get(&*state.db, tenant_id, room_id, user_id)
+        let cursor = store::cursors::get(&*state.db, tenant_id, stream_id, user_id)
             .await
             .unwrap_or(0);
-        let latest_seq = state.rooms.current_seq(tenant_id, room_id);
+        let latest_seq = state.streams.current_seq(tenant_id, stream_id);
 
         let _ = tx
             .send(ServerMessage::Subscribed {
                 ref_: None,
                 payload: SubscribedPayload {
-                    room: room_id.clone(),
+                    stream: stream_id.clone(),
                     members: member_presence,
                     cursor,
                     latest_seq,
@@ -441,23 +446,23 @@ async fn reconnect_catchup(
             })
             .await;
 
-        let messages = store::messages::list_since_time(
+        let events = store::events::list_since_time(
             &*state.db,
             tenant_id,
-            room_id,
+            stream_id,
             since_ms,
             CATCHUP_LIMIT + 1,
         )
         .await
         .unwrap_or_default();
 
-        if !messages.is_empty() {
-            let has_more = messages.len() > CATCHUP_LIMIT as usize;
-            let batch: Vec<MessageNewPayload> = messages
+        if !events.is_empty() {
+            let has_more = events.len() > CATCHUP_LIMIT as usize;
+            let batch: Vec<EventNewPayload> = events
                 .into_iter()
                 .take(CATCHUP_LIMIT as usize)
-                .map(|m| MessageNewPayload {
-                    room: m.room_id,
+                .map(|m| EventNewPayload {
+                    stream: m.stream_id,
                     id: m.id.0,
                     seq: m.seq,
                     sender: m.sender,
@@ -472,18 +477,18 @@ async fn reconnect_catchup(
                 conn = %conn_id,
                 tenant = %tenant_id,
                 user = %user_id,
-                room = %room_id,
-                messages = batch.len(),
+                stream = %stream_id,
+                events = batch.len(),
                 has_more,
                 "catch-up replay"
             );
 
             let _ = tx
-                .send(ServerMessage::MessagesBatch {
+                .send(ServerMessage::EventsBatch {
                     ref_: None,
-                    payload: MessagesBatchPayload {
-                        room: room_id.clone(),
-                        messages: batch,
+                    payload: EventsBatchPayload {
+                        stream: stream_id.clone(),
+                        events: batch,
                         has_more,
                     },
                 })
@@ -527,8 +532,8 @@ pub fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, user_id
             presence: status,
         },
     };
-    for room_id in state.rooms.get_member_rooms(tenant_id, user_id) {
-        crate::ws::fanout::fanout_to_room(state, tenant_id, &room_id, &msg, None);
+    for stream_id in state.streams.get_member_streams(tenant_id, user_id) {
+        crate::ws::fanout::fanout_to_stream(state, tenant_id, &stream_id, &msg, None);
     }
 }
 

@@ -31,7 +31,7 @@ impl Role {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
-    pub room_id: String,
+    pub stream_id: String,
     pub user_id: String,
     #[serde(default)]
     pub role: Role,

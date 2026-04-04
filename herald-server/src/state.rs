@@ -10,33 +10,33 @@ use crate::integrations::{AuditEvent, ChronicleOps, CourierOps, SentryOps};
 use crate::latency::Histogram;
 use crate::registry::connection::ConnectionRegistry;
 use crate::registry::presence::PresenceTracker;
-use crate::registry::room::RoomRegistry;
+use crate::registry::stream::StreamRegistry;
 use crate::registry::typing::TypingTracker;
 use crate::store;
 use crate::webhook::WebhookEvent;
 
 pub struct Metrics {
-    pub messages_sent: AtomicU64,
-    pub messages_dropped: AtomicU64,
+    pub events_published: AtomicU64,
+    pub events_dropped: AtomicU64,
     pub ws_auth_failures: AtomicU64,
     // Latency histograms
-    pub message_total: Histogram,
-    pub message_store: Histogram,
-    pub message_fanout: Histogram,
+    pub event_total: Histogram,
+    pub event_store: Histogram,
+    pub event_fanout: Histogram,
 }
 
 impl Default for Metrics {
     fn default() -> Self {
         Self {
-            messages_sent: AtomicU64::new(0),
-            messages_dropped: AtomicU64::new(0),
+            events_published: AtomicU64::new(0),
+            events_dropped: AtomicU64::new(0),
             ws_auth_failures: AtomicU64::new(0),
-            message_total: Histogram::new(
-                "herald_message_total_seconds",
-                "Total message send latency",
+            event_total: Histogram::new(
+                "herald_event_total_seconds",
+                "Total event publish latency",
             ),
-            message_store: Histogram::new("herald_message_store_seconds", "WAL store latency"),
-            message_fanout: Histogram::new("herald_message_fanout_seconds", "Fan-out latency"),
+            event_store: Histogram::new("herald_event_store_seconds", "WAL store latency"),
+            event_fanout: Histogram::new("herald_event_fanout_seconds", "Fan-out latency"),
         }
     }
 }
@@ -50,23 +50,23 @@ impl Metrics {
             "herald_connections_total {}\n",
             state.connections.total_connections()
         ));
-        out.push_str("# HELP herald_rooms_total Current rooms\n");
-        out.push_str("# TYPE herald_rooms_total gauge\n");
+        out.push_str("# HELP herald_streams_total Current streams\n");
+        out.push_str("# TYPE herald_streams_total gauge\n");
         out.push_str(&format!(
-            "herald_rooms_total {}\n",
-            state.rooms.room_count()
+            "herald_streams_total {}\n",
+            state.streams.stream_count()
         ));
-        out.push_str("# HELP herald_messages_sent_total Messages sent since startup\n");
-        out.push_str("# TYPE herald_messages_sent_total counter\n");
+        out.push_str("# HELP herald_events_published_total Events published since startup\n");
+        out.push_str("# TYPE herald_events_published_total counter\n");
         out.push_str(&format!(
-            "herald_messages_sent_total {}\n",
-            self.messages_sent.load(Ordering::Relaxed)
+            "herald_events_published_total {}\n",
+            self.events_published.load(Ordering::Relaxed)
         ));
-        out.push_str("# HELP herald_messages_dropped_total Messages dropped due to backpressure\n");
-        out.push_str("# TYPE herald_messages_dropped_total counter\n");
+        out.push_str("# HELP herald_events_dropped_total Events dropped due to backpressure\n");
+        out.push_str("# TYPE herald_events_dropped_total counter\n");
         out.push_str(&format!(
-            "herald_messages_dropped_total {}\n",
-            self.messages_dropped.load(Ordering::Relaxed)
+            "herald_events_dropped_total {}\n",
+            self.events_dropped.load(Ordering::Relaxed)
         ));
         out.push_str("# HELP herald_ws_auth_failures_total Failed WebSocket auth attempts\n");
         out.push_str("# TYPE herald_ws_auth_failures_total counter\n");
@@ -82,9 +82,9 @@ impl Metrics {
         ));
 
         // Latency histograms
-        self.message_total.format_prometheus(&mut out);
-        self.message_store.format_prometheus(&mut out);
-        self.message_fanout.format_prometheus(&mut out);
+        self.event_total.format_prometheus(&mut out);
+        self.event_store.format_prometheus(&mut out);
+        self.event_fanout.format_prometheus(&mut out);
 
         out
     }
@@ -112,14 +112,14 @@ pub struct TenantConfig {
 /// Per-tenant counters.
 #[derive(Default)]
 pub struct TenantMetrics {
-    pub messages_sent: AtomicU64,
+    pub events_published: AtomicU64,
     pub webhooks_sent: AtomicU64,
 }
 
 impl TenantMetrics {
     pub fn new() -> Self {
         Self {
-            messages_sent: AtomicU64::new(0),
+            events_published: AtomicU64::new(0),
             webhooks_sent: AtomicU64::new(0),
         }
     }
@@ -129,7 +129,7 @@ pub struct AppState {
     pub config: HeraldConfig,
     pub db: Arc<shroudb_storage::EmbeddedStore>,
     pub connections: ConnectionRegistry,
-    pub rooms: RoomRegistry,
+    pub streams: StreamRegistry,
     pub presence: PresenceTracker,
     pub typing: TypingTracker,
     pub tenant_cache: DashMap<String, TenantConfig>,
@@ -168,7 +168,7 @@ impl AppState {
             config: b.config,
             db: b.db,
             connections: ConnectionRegistry::new(),
-            rooms: RoomRegistry::new(),
+            streams: StreamRegistry::new(),
             presence: PresenceTracker::new(),
             typing: TypingTracker::new(),
             tenant_cache: DashMap::new(),
@@ -295,11 +295,11 @@ impl AppState {
         Ok((tenant_id.clone(), data.claims))
     }
 
-    pub fn increment_tenant_messages(&self, tenant_id: &str) {
+    pub fn increment_tenant_events(&self, tenant_id: &str) {
         self.tenant_metrics
             .entry(tenant_id.to_string())
             .or_default()
-            .messages_sent
+            .events_published
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -311,10 +311,10 @@ impl AppState {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn tenant_messages_sent(&self, tenant_id: &str) -> u64 {
+    pub fn tenant_events_published(&self, tenant_id: &str) -> u64 {
         self.tenant_metrics
             .get(tenant_id)
-            .map(|m| m.messages_sent.load(Ordering::Relaxed))
+            .map(|m| m.events_published.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
@@ -362,14 +362,20 @@ impl AppState {
         }
     }
 
-    pub fn notify_offline_members(&self, tenant_id: &str, room_id: &str, sender: &str, body: &str) {
+    pub fn notify_offline_members(
+        &self,
+        tenant_id: &str,
+        stream_id: &str,
+        sender: &str,
+        body: &str,
+    ) {
         let Some(ref courier) = self.courier else {
             return;
         };
-        let members = self.rooms.get_members(tenant_id, room_id);
+        let members = self.streams.get_members(tenant_id, stream_id);
         let courier = courier.clone();
         let _tenant_id = tenant_id.to_string();
-        let room_id = room_id.to_string();
+        let stream_id = stream_id.to_string();
         let sender = sender.to_string();
         let body = body.to_string();
 
@@ -378,7 +384,7 @@ impl AppState {
                 if member == sender {
                     continue;
                 }
-                let subject = format!("New message in {room_id}");
+                let subject = format!("New event in {stream_id}");
                 if let Err(e) = courier.notify("default", &member, &subject, &body).await {
                     tracing::warn!("courier notify failed for {member}: {e}");
                 }

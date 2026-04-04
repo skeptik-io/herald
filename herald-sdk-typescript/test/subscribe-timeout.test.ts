@@ -19,7 +19,7 @@ function testSubscribeTimeoutLogic() {
 
   const ref = "test-ref";
   const promise = new Promise<unknown>((resolve, reject) => {
-    pendingSubscribes.set(ref, { rooms: ["room1"], results: [], resolve });
+    pendingSubscribes.set(ref, { streams: ["stream1"], results: [], resolve });
 
     // Simulate the timeout (shortened for test)
     setTimeout(() => {

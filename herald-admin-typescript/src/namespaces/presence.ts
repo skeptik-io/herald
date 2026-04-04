@@ -11,18 +11,18 @@ export class PresenceNamespace {
     );
   }
 
-  async getRoom(roomId: string): Promise<MemberPresenceEntry[]> {
+  async getStream(streamId: string): Promise<MemberPresenceEntry[]> {
     const resp = await this.transport.request<{ members: MemberPresenceEntry[] }>(
       "GET",
-      `/rooms/${encodeURIComponent(roomId)}/presence`,
+      `/streams/${encodeURIComponent(streamId)}/presence`,
     );
     return resp.members;
   }
 
-  async getCursors(roomId: string): Promise<Cursor[]> {
+  async getCursors(streamId: string): Promise<Cursor[]> {
     const resp = await this.transport.request<{ cursors: Cursor[] }>(
       "GET",
-      `/rooms/${encodeURIComponent(roomId)}/cursors`,
+      `/streams/${encodeURIComponent(streamId)}/cursors`,
     );
     return resp.cursors;
   }

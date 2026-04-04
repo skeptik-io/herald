@@ -1,0 +1,5 @@
+- [Production audit initiative](project_audit_initiative.md) — 42-item audit in AUDIT.md, phases 1-4, blocks production deployment
+- [Testing requirements](feedback_testing_requirements.md) — All items need live integration tests, no mocks/stubs/placeholders
+- [Cipher/Veil removal](project_cipher_veil_removal.md) — Encryption moving to client side, audit items paused pending removal
+- [Herald vs Herald Chat](project_herald_chat_separation.md) — Chat features (editing, reactions, threads) belong in separate Herald Chat product, not core transport
+- [Verify all builds before push](feedback_verify_all_builds.md) — Must run ALL build steps locally (Rust + all SDKs + admin UI) before git push

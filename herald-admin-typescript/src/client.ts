@@ -1,8 +1,8 @@
 import { HttpTransport } from "./transport.js";
 import { MemberNamespace } from "./namespaces/members.js";
-import { MessageNamespace } from "./namespaces/messages.js";
+import { EventNamespace } from "./namespaces/messages.js";
 import { PresenceNamespace } from "./namespaces/presence.js";
-import { RoomNamespace } from "./namespaces/rooms.js";
+import { StreamNamespace } from "./namespaces/rooms.js";
 import { TenantNamespace } from "./namespaces/tenants.js";
 import { BlockNamespace } from "./namespaces/blocks.js";
 import type { HealthResponse } from "./types.js";
@@ -14,7 +14,7 @@ export interface HeraldAdminOptions {
   token: string;
 }
 
-export interface EventListOptions {
+export interface AdminEventListOptions {
   limit?: number;
 }
 
@@ -26,13 +26,13 @@ export interface ErrorListOptions {
 /**
  * Herald HTTP admin client for backend services.
  *
- * Provides namespaced access to Herald's HTTP API for room management,
- * member management, message injection, and presence queries.
+ * Provides namespaced access to Herald's HTTP API for stream management,
+ * member management, event publishing, and presence queries.
  */
 export class HeraldAdmin {
-  public readonly rooms: RoomNamespace;
+  public readonly streams: StreamNamespace;
   public readonly members: MemberNamespace;
-  public readonly messages: MessageNamespace;
+  public readonly events: EventNamespace;
   public readonly presence: PresenceNamespace;
   public readonly tenants: TenantNamespace;
   public readonly blocks: BlockNamespace;
@@ -41,9 +41,9 @@ export class HeraldAdmin {
 
   constructor(options: HeraldAdminOptions) {
     this.transport = new HttpTransport(options.url, options.token);
-    this.rooms = new RoomNamespace(this.transport);
+    this.streams = new StreamNamespace(this.transport);
     this.members = new MemberNamespace(this.transport);
-    this.messages = new MessageNamespace(this.transport);
+    this.events = new EventNamespace(this.transport);
     this.presence = new PresenceNamespace(this.transport);
     this.tenants = new TenantNamespace(this.transport);
     this.blocks = new BlockNamespace(this.transport);
@@ -57,7 +57,7 @@ export class HeraldAdmin {
     return this.transport.request("GET", "/admin/connections");
   }
 
-  async events(opts?: EventListOptions): Promise<unknown> {
+  async adminEvents(opts?: AdminEventListOptions): Promise<unknown> {
     let path = "/admin/events";
     if (opts?.limit != null) {
       path += `?limit=${opts.limit}`;

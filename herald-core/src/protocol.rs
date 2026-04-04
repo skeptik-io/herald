@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::ErrorCode;
+use crate::event::Sequence;
 use crate::member::Role;
-use crate::message::Sequence;
 use crate::presence::PresenceStatus;
 
 // ---------------------------------------------------------------------------
@@ -37,27 +37,27 @@ pub enum ClientMessage {
     },
     Subscribe {
         ref_: Option<String>,
-        rooms: Vec<String>,
+        streams: Vec<String>,
     },
     Unsubscribe {
         ref_: Option<String>,
-        rooms: Vec<String>,
+        streams: Vec<String>,
     },
-    MessageSend {
+    EventPublish {
         ref_: Option<String>,
-        room: String,
+        stream: String,
         body: String,
         meta: Option<Value>,
         parent_id: Option<String>,
     },
-    MessageEdit {
+    EventEdit {
         ref_: Option<String>,
-        room: String,
+        stream: String,
         id: String,
         body: String,
     },
     CursorUpdate {
-        room: String,
+        stream: String,
         seq: Sequence,
     },
     PresenceSet {
@@ -65,20 +65,20 @@ pub enum ClientMessage {
         status: PresenceStatus,
     },
     TypingStart {
-        room: String,
+        stream: String,
     },
     TypingStop {
-        room: String,
+        stream: String,
     },
-    MessagesFetch {
+    EventsFetch {
         ref_: Option<String>,
-        room: String,
+        stream: String,
         before: Option<Sequence>,
         limit: Option<u32>,
     },
-    MessageDelete {
+    EventDelete {
         ref_: Option<String>,
-        room: String,
+        stream: String,
         id: String,
     },
     Ping {
@@ -86,20 +86,20 @@ pub enum ClientMessage {
     },
     EventTrigger {
         ref_: Option<String>,
-        room: String,
+        stream: String,
         event: String,
         data: Option<Value>,
     },
     ReactionAdd {
         ref_: Option<String>,
-        room: String,
-        message_id: String,
+        stream: String,
+        event_id: String,
         emoji: String,
     },
     ReactionRemove {
         ref_: Option<String>,
-        room: String,
-        message_id: String,
+        stream: String,
+        event_id: String,
         emoji: String,
     },
 }
@@ -119,15 +119,15 @@ impl ClientMessage {
             }),
             "subscribe" => Ok(Self::Subscribe {
                 ref_: raw.ref_,
-                rooms: str_array_field(p, "rooms")?,
+                streams: str_array_field(p, "streams")?,
             }),
             "unsubscribe" => Ok(Self::Unsubscribe {
                 ref_: raw.ref_,
-                rooms: str_array_field(p, "rooms")?,
+                streams: str_array_field(p, "streams")?,
             }),
-            "message.send" => Ok(Self::MessageSend {
+            "event.publish" => Ok(Self::EventPublish {
                 ref_: raw.ref_,
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
                 body: str_field(p, "body")?,
                 meta: p.get("meta").cloned(),
                 parent_id: p
@@ -135,14 +135,14 @@ impl ClientMessage {
                     .and_then(|v| v.as_str())
                     .map(String::from),
             }),
-            "message.edit" => Ok(Self::MessageEdit {
+            "event.edit" => Ok(Self::EventEdit {
                 ref_: raw.ref_,
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
                 id: str_field(p, "id")?,
                 body: str_field(p, "body")?,
             }),
             "cursor.update" => Ok(Self::CursorUpdate {
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
                 seq: u64_field(p, "seq")?,
             }),
             "presence.set" => {
@@ -155,42 +155,42 @@ impl ClientMessage {
                 })
             }
             "typing.start" => Ok(Self::TypingStart {
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
             }),
             "typing.stop" => Ok(Self::TypingStop {
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
             }),
-            "messages.fetch" => Ok(Self::MessagesFetch {
+            "events.fetch" => Ok(Self::EventsFetch {
                 ref_: raw.ref_,
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
                 before: p.get("before").and_then(|v| v.as_u64()),
                 limit: p
                     .get("limit")
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok()),
             }),
-            "message.delete" => Ok(Self::MessageDelete {
+            "event.delete" => Ok(Self::EventDelete {
                 ref_: raw.ref_,
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
                 id: str_field(p, "id")?,
             }),
             "ping" => Ok(Self::Ping { ref_: raw.ref_ }),
             "event.trigger" => Ok(Self::EventTrigger {
                 ref_: raw.ref_,
-                room: str_field(p, "room")?,
+                stream: str_field(p, "stream")?,
                 event: str_field(p, "event")?,
                 data: p.get("data").cloned(),
             }),
             "reaction.add" => Ok(Self::ReactionAdd {
                 ref_: raw.ref_,
-                room: str_field(p, "room")?,
-                message_id: str_field(p, "message_id")?,
+                stream: str_field(p, "stream")?,
+                event_id: str_field(p, "event_id")?,
                 emoji: str_field(p, "emoji")?,
             }),
             "reaction.remove" => Ok(Self::ReactionRemove {
                 ref_: raw.ref_,
-                room: str_field(p, "room")?,
-                message_id: str_field(p, "message_id")?,
+                stream: str_field(p, "stream")?,
+                event_id: str_field(p, "event_id")?,
                 emoji: str_field(p, "emoji")?,
             }),
             other => Err(format!("unknown message type: {other}")),
@@ -223,24 +223,24 @@ pub enum ServerMessage {
         ref_: Option<String>,
         payload: SubscribedPayload,
     },
-    #[serde(rename = "message.new")]
-    MessageNew { payload: MessageNewPayload },
-    #[serde(rename = "message.ack")]
-    MessageAck {
+    #[serde(rename = "event.new")]
+    EventNew { payload: EventNewPayload },
+    #[serde(rename = "event.ack")]
+    EventAck {
         #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
         ref_: Option<String>,
-        payload: MessageAckPayload,
+        payload: EventAckPayload,
     },
-    #[serde(rename = "messages.batch")]
-    MessagesBatch {
+    #[serde(rename = "events.batch")]
+    EventsBatch {
         #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
         ref_: Option<String>,
-        payload: MessagesBatchPayload,
+        payload: EventsBatchPayload,
     },
-    #[serde(rename = "message.edited")]
-    MessageEdited { payload: MessageEditedPayload },
-    #[serde(rename = "message.deleted")]
-    MessageDeleted { payload: MessageDeletedPayload },
+    #[serde(rename = "event.edited")]
+    EventEdited { payload: EventEditedPayload },
+    #[serde(rename = "event.deleted")]
+    EventDeleted { payload: EventDeletedPayload },
     #[serde(rename = "presence.changed")]
     PresenceChanged { payload: PresenceChangedPayload },
     #[serde(rename = "cursor.moved")]
@@ -249,10 +249,10 @@ pub enum ServerMessage {
     MemberJoined { payload: MemberPayload },
     #[serde(rename = "member.left")]
     MemberLeft { payload: MemberPayload },
-    #[serde(rename = "room.updated")]
-    RoomUpdated { payload: RoomEventPayload },
-    #[serde(rename = "room.deleted")]
-    RoomDeleted { payload: RoomEventPayload },
+    #[serde(rename = "stream.updated")]
+    StreamUpdated { payload: StreamEventPayload },
+    #[serde(rename = "stream.deleted")]
+    StreamDeleted { payload: StreamEventPayload },
     #[serde(rename = "system.token_expiring")]
     TokenExpiring { payload: TokenExpiringPayload },
     #[serde(rename = "typing")]
@@ -263,8 +263,10 @@ pub enum ServerMessage {
     WatchlistOnline { payload: WatchlistPayload },
     #[serde(rename = "watchlist.offline")]
     WatchlistOffline { payload: WatchlistPayload },
-    #[serde(rename = "room.subscriber_count")]
-    RoomSubscriberCount { payload: RoomSubscriberCountPayload },
+    #[serde(rename = "stream.subscriber_count")]
+    StreamSubscriberCount {
+        payload: StreamSubscriberCountPayload,
+    },
     #[serde(rename = "reaction.changed")]
     ReactionChanged { payload: ReactionChangedPayload },
     #[serde(rename = "error")]
@@ -326,15 +328,15 @@ pub struct MemberPresence {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribedPayload {
-    pub room: String,
+    pub stream: String,
     pub members: Vec<MemberPresence>,
     pub cursor: Sequence,
     pub latest_seq: Sequence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageNewPayload {
-    pub room: String,
+pub struct EventNewPayload {
+    pub stream: String,
     pub id: String,
     pub seq: Sequence,
     pub sender: String,
@@ -347,22 +349,22 @@ pub struct MessageNewPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageAckPayload {
+pub struct EventAckPayload {
     pub id: String,
     pub seq: Sequence,
     pub sent_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessagesBatchPayload {
-    pub room: String,
-    pub messages: Vec<MessageNewPayload>,
+pub struct EventsBatchPayload {
+    pub stream: String,
+    pub events: Vec<EventNewPayload>,
     pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageEditedPayload {
-    pub room: String,
+pub struct EventEditedPayload {
+    pub stream: String,
     pub id: String,
     pub seq: Sequence,
     pub body: String,
@@ -370,8 +372,8 @@ pub struct MessageEditedPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageDeletedPayload {
-    pub room: String,
+pub struct EventDeletedPayload {
+    pub stream: String,
     pub id: String,
     pub seq: Sequence,
 }
@@ -384,21 +386,21 @@ pub struct PresenceChangedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CursorMovedPayload {
-    pub room: String,
+    pub stream: String,
     pub user_id: String,
     pub seq: Sequence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberPayload {
-    pub room: String,
+    pub stream: String,
     pub user_id: String,
     pub role: Role,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoomEventPayload {
-    pub room: String,
+pub struct StreamEventPayload {
+    pub stream: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,14 +410,14 @@ pub struct TokenExpiringPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypingPayload {
-    pub room: String,
+    pub stream: String,
     pub user_id: String,
     pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventReceivedPayload {
-    pub room: String,
+    pub stream: String,
     pub event: String,
     pub sender: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -428,15 +430,15 @@ pub struct WatchlistPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoomSubscriberCountPayload {
-    pub room: String,
+pub struct StreamSubscriberCountPayload {
+    pub stream: String,
     pub count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionChangedPayload {
-    pub room: String,
-    pub message_id: String,
+    pub stream: String,
+    pub event_id: String,
     pub emoji: String,
     pub user_id: String,
     pub action: String,

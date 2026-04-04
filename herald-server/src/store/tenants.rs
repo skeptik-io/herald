@@ -91,7 +91,7 @@ pub async fn delete<S: Store>(store: &S, id: &str) -> Result<bool, anyhow::Error
 pub struct ApiToken {
     pub tenant_id: String,
     #[serde(default)]
-    pub scope: Option<String>, // "read-only", "room:chat", etc. None = full access
+    pub scope: Option<String>, // "read-only", "stream:chat", etc. None = full access
 }
 
 pub async fn create_token<S: Store>(

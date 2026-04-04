@@ -26,7 +26,7 @@ herald [--single-tenant|--multi-tenant] [config-path]
 | `ws_bind` | string | `0.0.0.0:6200` | WebSocket listen address |
 | `http_bind` | string | `0.0.0.0:6201` | HTTP API listen address |
 | `log_level` | string | `info` | `trace`, `debug`, `info`, `warn`, `error` |
-| `max_messages_per_sec` | u32 | `10` | Per-connection WS message rate limit |
+| `max_events_per_sec` | u32 | `10` | Per-connection WS event rate limit |
 | `api_rate_limit` | u32 | `100` | HTTP API requests per minute |
 | `shutdown_timeout_secs` | u64 | `30` | Graceful shutdown drain timeout |
 
@@ -35,7 +35,7 @@ herald [--single-tenant|--multi-tenant] [config-path]
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | `./herald-data` | Data directory for WAL + snapshots |
-| `message_ttl_days` | u32 | `7` | Messages older than this are pruned hourly |
+| `event_ttl_days` | u32 | `7` | Events older than this are pruned hourly |
 
 #### `[auth]`
 
@@ -95,7 +95,7 @@ When `[shroudb]` is absent, engines run embedded (in-process) using the same sto
 |---|---|---|---|
 | `sub` | string | yes | User ID |
 | `tenant` | string | yes | Tenant ID |
-| `rooms` | string[] | yes | Room IDs the user may subscribe to |
+| `streams` | string[] | yes | Stream IDs the user may subscribe to |
 | `exp` | number | yes | Expiration (Unix seconds) |
 | `iat` | number | yes | Issued-at |
 | `iss` | string | no | Issuer (validated against tenant config) |
@@ -118,16 +118,16 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 |---|---|---|
 | `auth` | `{token, last_seen_at?}` | Authenticate (required within 5s) |
 | `auth.refresh` | `{token}` | Refresh JWT without reconnecting |
-| `subscribe` | `{rooms: []}` | Subscribe to rooms |
-| `unsubscribe` | `{rooms: []}` | Unsubscribe |
-| `message.send` | `{room, body, meta?, parent_id?}` | Send a message |
-| `cursor.update` | `{room, seq}` | Update read position |
+| `subscribe` | `{streams: []}` | Subscribe to streams |
+| `unsubscribe` | `{streams: []}` | Unsubscribe |
+| `event.publish` | `{stream, body, meta?, parent_id?}` | Send a event |
+| `cursor.update` | `{stream, seq}` | Update read position |
 | `presence.set` | `{status}` | `online`, `away`, `dnd` |
-| `typing.start` / `typing.stop` | `{room}` | Ephemeral |
-| `messages.fetch` | `{room, before?, limit?}` | History |
-| `event.trigger` | `{room, event, data?}` | Trigger ephemeral event (not persisted) |
-| `reaction.add` | `{room, message_id, emoji}` | Add a reaction to a message |
-| `reaction.remove` | `{room, message_id, emoji}` | Remove a reaction from a message |
+| `typing.start` / `typing.stop` | `{stream}` | Ephemeral |
+| `events.fetch` | `{stream, before?, limit?}` | History |
+| `event.trigger` | `{stream, event, data?}` | Trigger ephemeral event (not persisted) |
+| `reaction.add` | `{stream, event_id, emoji}` | Add a reaction to a event |
+| `reaction.remove` | `{stream, event_id, emoji}` | Remove a reaction from a event |
 | `ping` | — | Keepalive |
 
 ### Server → Client
@@ -135,26 +135,26 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | Type | Payload | Description |
 |---|---|---|
 | `auth_ok` | `{user_id, connection_id, server_time, heartbeat_interval}` | Auth success |
-| `auth_error` | `{code, message}` | Auth failure |
-| `subscribed` | `{room, members, cursor, latest_seq}` | Room joined |
-| `message.new` | `{room, id, seq, sender, body, meta?, sent_at}` | New message |
-| `message.ack` | `{id, seq, sent_at}` | Send confirmed |
-| `messages.batch` | `{room, messages[], has_more}` | History/catch-up |
+| `auth_error` | `{code, event}` | Auth failure |
+| `subscribed` | `{stream, members, cursor, latest_seq}` | Stream joined |
+| `event.new` | `{stream, id, seq, sender, body, meta?, sent_at}` | New event |
+| `event.ack` | `{id, seq, sent_at}` | Send confirmed |
+| `events.batch` | `{stream, events[], has_more}` | History/catch-up |
 | `presence.changed` | `{user_id, presence}` | Presence change |
-| `cursor.moved` | `{room, user_id, seq}` | Read position change |
-| `member.joined` / `member.left` | `{room, user_id, role}` | Membership |
-| `typing` | `{room, user_id, active}` | Typing indicator |
-| `event.received` | `{room, event, sender, data?}` | Ephemeral event from another client |
+| `cursor.moved` | `{stream, user_id, seq}` | Read position change |
+| `member.joined` / `member.left` | `{stream, user_id, role}` | Membership |
+| `typing` | `{stream, user_id, active}` | Typing indicator |
+| `event.received` | `{stream, event, sender, data?}` | Ephemeral event from another client |
 | `watchlist.online` | `{user_ids: []}` | Watched users came online |
 | `watchlist.offline` | `{user_ids: []}` | Watched users went offline |
-| `reaction.changed` | `{room, message_id, emoji, user_id, action}` | Reaction added/removed (`action`: `"add"` or `"remove"`) |
-| `room.subscriber_count` | `{room, count}` | Room subscriber count changed |
+| `reaction.changed` | `{stream, event_id, emoji, user_id, action}` | Reaction added/removed (`action`: `"add"` or `"remove"`) |
+| `stream.subscriber_count` | `{stream, count}` | Stream subscriber count changed |
 | `system.token_expiring` | `{expires_at}` | JWT expiring in 60s |
-| `error` | `{code, message}` | Error |
+| `error` | `{code, event}` | Error |
 
 ### Ephemeral Events
 
-Ephemeral events are lightweight events that fan out to room subscribers but are NOT persisted to storage. They are ideal for:
+Ephemeral events are lightweight events that fan out to stream subscribers but are NOT persisted to storage. They are ideal for:
 - Custom application events
 - Live cursors, selections
 - Game state updates
@@ -163,7 +163,7 @@ Ephemeral events are lightweight events that fan out to room subscribers but are
 
 The sender does NOT receive their own event (excluded from fan-out). The event is acknowledged with a `pong` if a `ref` is provided.
 
-Ephemeral events do not trigger webhooks and do not affect message history or sequence numbers.
+Ephemeral events do not trigger webhooks and do not affect event history or sequence numbers.
 
 ### Error Codes
 
@@ -177,28 +177,28 @@ Ephemeral events do not trigger webhooks and do not affect message history or se
 
 | Method | Path | Description |
 |---|---|---|
-| `POST /rooms` | Create room | `{id, name, meta?, public?}` |
-| `GET /rooms` | List rooms | Returns `{rooms: [...]}` |
-| `GET /rooms/:id` | Get room | |
-| `PATCH /rooms/:id` | Update room | `{name?, meta?, archived?}` |
-| `DELETE /rooms/:id` | Delete room | |
-| `POST /rooms/:id/members` | Add member | `{user_id, role?}` |
-| `GET /rooms/:id/members` | List members | |
-| `PATCH /rooms/:id/members/:uid` | Update role | `{role}` |
-| `DELETE /rooms/:id/members/:uid` | Remove member | |
-| `POST /rooms/:id/messages` | Inject message | `{sender, body, meta?, exclude_connection?}` |
-| `GET /rooms/:id/messages` | List messages | `?before=&after=&limit=` |
-| `DELETE /rooms/:id/messages/:msg_id` | Delete/redact message | Soft-deletes: clears body, sets `meta.deleted=true` |
-| `PATCH /rooms/:id/messages/:msg_id` | Edit message | `{body}` |
-| `GET /rooms/:id/messages/:msg_id/reactions` | List reactions | Returns `{reactions: [{emoji, count, users}]}` |
-| `POST /rooms/:id/trigger` | Trigger ephemeral event | `{event, data?, exclude_connection?}` |
-| `GET /rooms/:id/cursors` | Read cursors | |
+| `POST /streams` | Create stream | `{id, name, meta?, public?}` |
+| `GET /streams` | List streams | Returns `{streams: [...]}` |
+| `GET /streams/:id` | Get stream | |
+| `PATCH /streams/:id` | Update stream | `{name?, meta?, archived?}` |
+| `DELETE /streams/:id` | Delete stream | |
+| `POST /streams/:id/members` | Add member | `{user_id, role?}` |
+| `GET /streams/:id/members` | List members | |
+| `PATCH /streams/:id/members/:uid` | Update role | `{role}` |
+| `DELETE /streams/:id/members/:uid` | Remove member | |
+| `POST /streams/:id/events` | Inject event | `{sender, body, meta?, exclude_connection?}` |
+| `GET /streams/:id/events` | List events | `?before=&after=&limit=` |
+| `DELETE /streams/:id/events/:msg_id` | Delete/redact event | Soft-deletes: clears body, sets `meta.deleted=true` |
+| `PATCH /streams/:id/events/:msg_id` | Edit event | `{body}` |
+| `GET /streams/:id/events/:msg_id/reactions` | List reactions | Returns `{reactions: [{emoji, count, users}]}` |
+| `POST /streams/:id/trigger` | Trigger ephemeral event | `{event, data?, exclude_connection?}` |
+| `GET /streams/:id/cursors` | Read cursors | |
 | `POST /blocks` | Block a user | `{user_id, blocked_id}` |
 | `DELETE /blocks` | Unblock a user | `{user_id, blocked_id}` |
 | `GET /blocks/:user_id` | List blocked users | Returns `{blocked: [...]}` |
-| `GET /rooms/:id/presence` | Room presence | |
+| `GET /streams/:id/presence` | Stream presence | |
 | `GET /presence/:uid` | User presence | |
-| `GET /stats` | Tenant-scoped stats | Connection count, room count, message rate for this tenant |
+| `GET /stats` | Tenant-scoped stats | Connection count, stream count, event rate for this tenant |
 
 ### Admin API (Bearer token from `auth.super_admin_token`)
 
@@ -212,7 +212,7 @@ Ephemeral events do not trigger webhooks and do not affect message history or se
 | `POST /admin/tenants/:id/tokens` | Create API token | `{scope?}` — optional scope restriction |
 | `GET /admin/tenants/:id/tokens` | List API tokens | |
 | `DELETE /admin/tenants/:id/tokens/:token` | Delete API token | Verifies token belongs to tenant |
-| `GET /admin/tenants/:id/rooms` | List tenant rooms | Admin view of rooms for a tenant |
+| `GET /admin/tenants/:id/streams` | List tenant streams | Admin view of streams for a tenant |
 | `GET /admin/connections` | List active connections | Active WebSocket connections |
 | `GET /admin/events` | List admin events | Recent admin events |
 | `GET /admin/events/stream` | SSE admin event stream | Server-Sent Events stream |
@@ -223,7 +223,7 @@ Ephemeral events do not trigger webhooks and do not affect message history or se
 
 | Method | Path | Description |
 |---|---|---|
-| `GET /health` | Health check | `{status, connections, rooms, uptime_secs}` |
+| `GET /health` | Health check | `{status, connections, streams, uptime_secs}` |
 | `GET /health/live` | Liveness probe | Returns 200 if process is running |
 | `GET /health/ready` | Readiness probe | Returns 200 when store is initialized |
 | `GET /metrics` | Prometheus metrics | Histograms + counters |
@@ -233,30 +233,30 @@ Ephemeral events do not trigger webhooks and do not affect message history or se
 | Metric | Type | Description |
 |---|---|---|
 | `herald_connections_total` | gauge | WebSocket connections |
-| `herald_rooms_total` | gauge | Rooms |
-| `herald_messages_sent_total` | counter | Messages sent |
-| `herald_messages_dropped_total` | counter | Dropped (backpressure) |
+| `herald_streams_total` | gauge | Streams |
+| `herald_events_sent_total` | counter | Events sent |
+| `herald_events_dropped_total` | counter | Dropped (backpressure) |
 | `herald_ws_auth_failures_total` | counter | Auth failures |
 | `herald_uptime_seconds` | gauge | Uptime |
-| `herald_message_total_seconds` | histogram | End-to-end send latency |
-| `herald_message_store_seconds` | histogram | WAL store |
-| `herald_message_fanout_seconds` | histogram | Fan-out |
+| `herald_event_total_seconds` | histogram | End-to-end send latency |
+| `herald_event_store_seconds` | histogram | WAL store |
+| `herald_event_fanout_seconds` | histogram | Fan-out |
 
 ---
 
 ## Additional Features
 
-### Public Rooms
+### Public Streams
 
-Rooms can be created with `"public": true` to allow any authenticated user to subscribe without being pre-added as a member. When a user subscribes to a public room, they are automatically added as a member with `Member` role.
+Streams can be created with `"public": true` to allow any authenticated user to subscribe without being pre-added as a member. When a user subscribes to a public stream, they are automatically added as a member with `Member` role.
 
-Public rooms still require the room ID to be present in the JWT `rooms` claim -- authorization is enforced, but membership is not required upfront.
+Public streams still require the stream ID to be present in the JWT `streams` claim -- authorization is enforced, but membership is not required upfront.
 
-Private rooms (default, `public: false`) continue to require membership before subscribing.
+Private streams (default, `public: false`) continue to require membership before subscribing.
 
-### Room Archival
+### Stream Archival
 
-Rooms can be archived via `PATCH /rooms/:id` with `{"archived": true}`. Archived rooms remain readable but no new messages can be sent. Unarchive by setting `archived` to `false`.
+Streams can be archived via `PATCH /streams/:id` with `{"archived": true}`. Archived streams remain readable but no new events can be sent. Unarchive by setting `archived` to `false`.
 
 ### Webhook Event Filtering
 
@@ -266,10 +266,10 @@ The `[webhook]` config supports an `events` field to filter which events trigger
 [webhook]
 url = "https://example.com/hook"
 secret = "whsec_..."
-events = ["message.new", "member.joined", "member.left"]
+events = ["event.new", "member.joined", "member.left"]
 ```
 
-When `events` is omitted, all events are sent. Supported event types match server-to-client message types.
+When `events` is omitted, all events are sent. Supported event types match server-to-client event types.
 
 ### API Key Scoping
 
@@ -291,21 +291,21 @@ List endpoints support `limit` and `offset` query parameters:
 | `limit` | u32 | 50 | Maximum items to return |
 | `offset` | u32 | 0 | Number of items to skip |
 
-Applies to: `GET /rooms`, `GET /rooms/:id/members`, `GET /rooms/:id/messages` (also supports `before`/`after` sequence-based cursors), `GET /admin/tenants`, `GET /admin/tenants/:id/tokens`.
+Applies to: `GET /streams`, `GET /streams/:id/members`, `GET /streams/:id/events` (also supports `before`/`after` sequence-based cursors), `GET /admin/tenants`, `GET /admin/tenants/:id/tokens`.
 
 ---
 
 ## Storage
 
-Herald uses ShroudB's WAL-based storage engine. Message bodies are stored as opaque bytes — Herald does not interpret, encrypt, or index them.
+Herald uses ShroudB's WAL-based storage engine. Event bodies are stored as opaque bytes — Herald does not interpret, encrypt, or index them.
 
 **Namespaces:**
 - `herald.tenants` — tenant configurations
 - `herald.api_tokens` — per-tenant API bearer tokens
-- `herald.rooms` — room metadata (key: `{tenant_id}/{room_id}`)
-- `herald.members` — room membership (key: `{tenant_id}/{room_id}/{user_id}`)
-- `herald.messages` — messages (key: `{tenant_id}/{room_id}/{seq:020}`)
-- `herald.cursors` — read positions (key: `{tenant_id}/{room_id}/{user_id}`)
+- `herald.streams` — stream metadata (key: `{tenant_id}/{stream_id}`)
+- `herald.members` — stream membership (key: `{tenant_id}/{stream_id}/{user_id}`)
+- `herald.events` — events (key: `{tenant_id}/{stream_id}/{seq:020}`)
+- `herald.cursors` — read positions (key: `{tenant_id}/{stream_id}/{user_id}`)
 
 ---
 
@@ -325,7 +325,7 @@ Remote wrappers add circuit breaker (5 failures → open, 30s cooldown) + 10s re
 
 ## Watchlist (Friend Online/Offline Tracking)
 
-Track online/offline status of specific users across the entire tenant, regardless of shared rooms. Add a `watchlist` array to the JWT claims containing user IDs to watch.
+Track online/offline status of specific users across the entire tenant, regardless of shared streams. Add a `watchlist` array to the JWT claims containing user IDs to watch.
 
 On connect, the server sends `watchlist.online` with any watched users who are already online. When a watched user connects (first connection) or disconnects (last connection, after linger), the server sends `watchlist.online` or `watchlist.offline` to all watchers.
 
@@ -336,7 +336,7 @@ Example JWT claims:
 {
   "sub": "alice",
   "tenant": "acme",
-  "rooms": ["chat"],
+  "streams": ["chat"],
   "watchlist": ["bob", "charlie"],
   "exp": 1700000000,
   "iat": 1699996400,
@@ -354,20 +354,20 @@ Example server events:
 
 ## Subscription Count Broadcasts
 
-When the subscriber count for a room changes (subscribe, unsubscribe, or disconnect), the server broadcasts a `room.subscriber_count` event to all current subscribers of that room.
+When the subscriber count for a stream changes (subscribe, unsubscribe, or disconnect), the server broadcasts a `stream.subscriber_count` event to all current subscribers of that stream.
 
 Example server event:
 ```json
-{"type": "room.subscriber_count", "payload": {"room": "chat", "count": 5}}
+{"type": "stream.subscriber_count", "payload": {"stream": "chat", "count": 5}}
 ```
 
-This fires on explicit subscribe/unsubscribe and on disconnect (after connection cleanup). The count reflects the number of active WebSocket connections subscribed to the room.
+This fires on explicit subscribe/unsubscribe and on disconnect (after connection cleanup). The count reflects the number of active WebSocket connections subscribed to the stream.
 
 ---
 
 ## Server-Side Ephemeral Events
 
-`POST /rooms/:id/trigger` sends an ephemeral event to all room subscribers without persisting to storage. The sender is `_server`. Useful for server-initiated signals (session events, notifications, live updates).
+`POST /streams/:id/trigger` sends an ephemeral event to all stream subscribers without persisting to storage. The sender is `_server`. Useful for server-initiated signals (session events, notifications, live updates).
 
 Supports `exclude_connection` to skip a specific WebSocket connection.
 
@@ -375,10 +375,10 @@ Supports `exclude_connection` to skip a specific WebSocket connection.
 
 ## Sender Exclusion
 
-When injecting messages via the HTTP API, pass `exclude_connection` (a connection ID as a number) to exclude that specific WebSocket connection from receiving the fan-out. This is useful for optimistic UI updates where the client already shows the message locally.
+When injecting events via the HTTP API, pass `exclude_connection` (a connection ID as a number) to exclude that specific WebSocket connection from receiving the fan-out. This is useful for optimistic UI updates where the client already shows the event locally.
 
 ```json
-POST /rooms/chat/messages
+POST /streams/chat/events
 {
   "sender": "alice",
   "body": "Hello!",
@@ -386,7 +386,7 @@ POST /rooms/chat/messages
 }
 ```
 
-The connection ID is available in the `auth_ok` response or can be tracked by the application server. If the specified connection ID does not match any active subscriber, the message is delivered to all subscribers as normal.
+The connection ID is available in the `auth_ok` response or can be tracked by the application server. If the specified connection ID does not match any active subscriber, the event is delivered to all subscribers as normal.
 
 ---
 
@@ -403,30 +403,30 @@ This means:
 
 ## Reactions
 
-Reactions are per-message emoji/string markers. Any room member can add or remove their own reaction via WebSocket.
+Reactions are per-event emoji/string markers. Any stream member can add or remove their own reaction via WebSocket.
 
 **WebSocket flow:**
 
 ```json
 // Add reaction
-{"type": "reaction.add", "ref": "r1", "payload": {"room": "chat", "message_id": "abc-123", "emoji": "thumbsup"}}
+{"type": "reaction.add", "ref": "r1", "payload": {"stream": "chat", "event_id": "abc-123", "emoji": "thumbsup"}}
 
-// All room subscribers receive:
-{"type": "reaction.changed", "payload": {"room": "chat", "message_id": "abc-123", "emoji": "thumbsup", "user_id": "alice", "action": "add"}}
+// All stream subscribers receive:
+{"type": "reaction.changed", "payload": {"stream": "chat", "event_id": "abc-123", "emoji": "thumbsup", "user_id": "alice", "action": "add"}}
 
 // Remove reaction
-{"type": "reaction.remove", "ref": "r2", "payload": {"room": "chat", "message_id": "abc-123", "emoji": "thumbsup"}}
+{"type": "reaction.remove", "ref": "r2", "payload": {"stream": "chat", "event_id": "abc-123", "emoji": "thumbsup"}}
 ```
 
-**HTTP API:** `GET /rooms/:id/messages/:msg_id/reactions` returns all reactions for a message grouped by emoji, including counts and user lists.
+**HTTP API:** `GET /streams/:id/events/:msg_id/reactions` returns all reactions for a event grouped by emoji, including counts and user lists.
 
-Emoji strings are limited to 32 bytes. Each user can have at most one reaction per emoji per message (idempotent add).
+Emoji strings are limited to 32 bytes. Each user can have at most one reaction per emoji per event (idempotent add).
 
 ---
 
 ## File/Media Attachments
 
-Attachments are stored in the message `meta` field with a standardized schema. Herald validates the structure but does not store files -- it validates and passes through attachment metadata. File storage and URL generation is the responsibility of the application server.
+Attachments are stored in the event `meta` field with a standardized schema. Herald validates the structure but does not store files -- it validates and passes through attachment metadata. File storage and URL generation is the responsibility of the application server.
 
 **Schema:**
 
@@ -448,15 +448,15 @@ Attachments are stored in the message `meta` field with a standardized schema. H
 ```
 
 **Validation rules:**
-- Maximum 10 attachments per message
+- Maximum 10 attachments per event
 - Each attachment must have a `url` field (string)
-- Applied on both HTTP inject and WebSocket `message.send`
+- Applied on both HTTP inject and WebSocket `event.publish`
 
 ---
 
 ## User Blocking
 
-Per-tenant block list managed via HTTP API. When user A blocks user B, the block is stored server-side. Client SDKs should use the block list to filter messages locally.
+Per-tenant block list managed via HTTP API. When user A blocks user B, the block is stored server-side. Client SDKs should use the block list to filter events locally.
 
 **HTTP API:**
 
@@ -466,4 +466,4 @@ Per-tenant block list managed via HTTP API. When user A blocks user B, the block
 | `DELETE /blocks` | | `{user_id, blocked_id}` | Unblock a user |
 | `GET /blocks/:user_id` | | | List blocked users |
 
-The block list is per-tenant and directional (A blocking B does not mean B blocks A). Blocking does not remove the user from rooms or prevent message delivery at the server level -- it provides the data for client-side filtering, which is the standard approach used by major chat platforms.
+The block list is per-tenant and directional (A blocking B does not mean B blocks A). Blocking does not remove the user from streams or prevent event delivery at the server level -- it provides the data for client-side filtering, which is the standard approach used by major chat platforms.

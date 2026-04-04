@@ -2,30 +2,30 @@ use shroudb_store::Store;
 
 use super::NS_REACTIONS;
 
-/// Key: "{tenant}/{room}/{message_id}/{emoji}/{user_id}" -> "1"
+/// Key: "{tenant}/{stream}/{event_id}/{emoji}/{user_id}" -> "1"
 fn reaction_key(
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     msg_id: &str,
     emoji: &str,
     user_id: &str,
 ) -> Vec<u8> {
-    format!("{tenant_id}/{room_id}/{msg_id}/{emoji}/{user_id}").into_bytes()
+    format!("{tenant_id}/{stream_id}/{msg_id}/{emoji}/{user_id}").into_bytes()
 }
 
-fn msg_reaction_prefix(tenant_id: &str, room_id: &str, msg_id: &str) -> Vec<u8> {
-    format!("{tenant_id}/{room_id}/{msg_id}/").into_bytes()
+fn msg_reaction_prefix(tenant_id: &str, stream_id: &str, msg_id: &str) -> Vec<u8> {
+    format!("{tenant_id}/{stream_id}/{msg_id}/").into_bytes()
 }
 
 pub async fn add<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     msg_id: &str,
     emoji: &str,
     user_id: &str,
 ) -> Result<(), anyhow::Error> {
-    let key = reaction_key(tenant_id, room_id, msg_id, emoji, user_id);
+    let key = reaction_key(tenant_id, stream_id, msg_id, emoji, user_id);
     store.put(NS_REACTIONS, &key, b"1", None).await?;
     Ok(())
 }
@@ -33,12 +33,12 @@ pub async fn add<S: Store>(
 pub async fn remove<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     msg_id: &str,
     emoji: &str,
     user_id: &str,
 ) -> Result<bool, anyhow::Error> {
-    let key = reaction_key(tenant_id, room_id, msg_id, emoji, user_id);
+    let key = reaction_key(tenant_id, stream_id, msg_id, emoji, user_id);
     match store.delete(NS_REACTIONS, &key).await {
         Ok(_) => Ok(true),
         Err(shroudb_store::StoreError::NotFound) => Ok(false),
@@ -53,13 +53,13 @@ pub struct ReactionSummary {
     pub users: Vec<String>,
 }
 
-pub async fn list_for_message<S: Store>(
+pub async fn list_for_event<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     msg_id: &str,
 ) -> Result<Vec<ReactionSummary>, anyhow::Error> {
-    let prefix = msg_reaction_prefix(tenant_id, room_id, msg_id);
+    let prefix = msg_reaction_prefix(tenant_id, stream_id, msg_id);
     let mut reactions: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     let mut cursor = None;
@@ -69,7 +69,7 @@ pub async fn list_for_message<S: Store>(
             .await?;
         for key in &page.keys {
             let key_str = String::from_utf8_lossy(key);
-            // key format: tenant/room/msg/emoji/user
+            // key format: tenant/stream/event/emoji/user
             let parts: Vec<&str> = key_str.splitn(5, '/').collect();
             if parts.len() == 5 {
                 reactions
@@ -100,17 +100,17 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_add_remove() {
         let store = crate::store::test_store().await;
-        add(&*store, "t1", "room1", "msg1", "thumbsup", "alice")
+        add(&*store, "t1", "stream1", "msg1", "thumbsup", "alice")
             .await
             .unwrap();
-        add(&*store, "t1", "room1", "msg1", "thumbsup", "bob")
+        add(&*store, "t1", "stream1", "msg1", "thumbsup", "bob")
             .await
             .unwrap();
-        add(&*store, "t1", "room1", "msg1", "heart", "alice")
+        add(&*store, "t1", "stream1", "msg1", "heart", "alice")
             .await
             .unwrap();
 
-        let summaries = list_for_message(&*store, "t1", "room1", "msg1")
+        let summaries = list_for_event(&*store, "t1", "stream1", "msg1")
             .await
             .unwrap();
         assert_eq!(summaries.len(), 2);
@@ -119,19 +119,19 @@ mod tests {
         assert_eq!(thumbsup.count, 2);
 
         // Remove one
-        let removed = remove(&*store, "t1", "room1", "msg1", "thumbsup", "alice")
+        let removed = remove(&*store, "t1", "stream1", "msg1", "thumbsup", "alice")
             .await
             .unwrap();
         assert!(removed);
 
-        let summaries = list_for_message(&*store, "t1", "room1", "msg1")
+        let summaries = list_for_event(&*store, "t1", "stream1", "msg1")
             .await
             .unwrap();
         let thumbsup = summaries.iter().find(|s| s.emoji == "thumbsup").unwrap();
         assert_eq!(thumbsup.count, 1);
 
         // Remove non-existent
-        let removed = remove(&*store, "t1", "room1", "msg1", "thumbsup", "charlie")
+        let removed = remove(&*store, "t1", "stream1", "msg1", "thumbsup", "charlie")
             .await
             .unwrap();
         assert!(!removed);

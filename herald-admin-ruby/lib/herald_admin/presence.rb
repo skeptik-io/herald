@@ -11,13 +11,13 @@ module HeraldAdmin
       UserPresence.new(user_id: data["user_id"], status: data["status"], connections: data["connections"] || 0)
     end
 
-    def get_room(room_id)
-      data = @t.request("GET", "/rooms/#{ERB::Util.url_encode(room_id)}/presence")
+    def get_stream(stream_id)
+      data = @t.request("GET", "/streams/#{ERB::Util.url_encode(stream_id)}/presence")
       data["members"].map { |m| MemberPresenceEntry.new(user_id: m["user_id"], status: m["status"]) }
     end
 
-    def get_cursors(room_id)
-      data = @t.request("GET", "/rooms/#{ERB::Util.url_encode(room_id)}/cursors")
+    def get_cursors(stream_id)
+      data = @t.request("GET", "/streams/#{ERB::Util.url_encode(stream_id)}/cursors")
       data["cursors"].map { |c| Cursor.new(user_id: c["user_id"], seq: c["seq"]) }
     end
   end

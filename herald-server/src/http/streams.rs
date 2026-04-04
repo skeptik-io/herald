@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 
-use herald_core::room::{Room, RoomId};
+use herald_core::stream::{Stream, StreamId};
 
 use crate::http::validation;
 use crate::http::TenantId;
@@ -15,7 +15,7 @@ use crate::store;
 use crate::ws::connection::now_millis;
 
 #[derive(Deserialize)]
-pub struct CreateRoomRequest {
+pub struct CreateStreamRequest {
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -25,21 +25,21 @@ pub struct CreateRoomRequest {
 }
 
 #[derive(Deserialize)]
-pub struct UpdateRoomRequest {
+pub struct UpdateStreamRequest {
     pub name: Option<String>,
     pub meta: Option<serde_json::Value>,
     pub archived: Option<bool>,
 }
 
-pub async fn create_room(
+pub async fn create_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Json(req): Json<CreateRoomRequest>,
+    Json(req): Json<CreateStreamRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = validation::validate_id(&req.id, "room id") {
+    if let Err(e) = validation::validate_id(&req.id, "stream id") {
         return (*e).into_response();
     }
-    if let Err(e) = validation::validate_name(&req.name, "room name") {
+    if let Err(e) = validation::validate_name(&req.name, "stream name") {
         return (*e).into_response();
     }
     if let Err(e) = validation::validate_meta(&req.meta) {
@@ -48,17 +48,17 @@ pub async fn create_room(
 
     let tid = &tenant.0;
 
-    // Check for existing room before insert (KV put is upsert)
-    if let Ok(Some(_)) = store::rooms::get(&*state.db, tid, &req.id).await {
+    // Check for existing stream before insert (KV put is upsert)
+    if let Ok(Some(_)) = store::streams::get(&*state.db, tid, &req.id).await {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "failed to create room"})),
+            Json(serde_json::json!({"error": "failed to create stream"})),
         )
             .into_response();
     }
 
-    let room = Room {
-        id: RoomId(req.id),
+    let stream = Stream {
+        id: StreamId(req.id),
         name: req.name,
         meta: req.meta,
         archived: false,
@@ -66,38 +66,38 @@ pub async fn create_room(
         created_at: now_millis(),
     };
 
-    if let Err(e) = store::rooms::insert(&*state.db, tid, &room).await {
-        tracing::error!(tenant = tid, room = %room.id.as_str(), "failed to create room: {e}");
+    if let Err(e) = store::streams::insert(&*state.db, tid, &stream).await {
+        tracing::error!(tenant = tid, stream = %stream.id.as_str(), "failed to create stream: {e}");
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "failed to create room"})),
+            Json(serde_json::json!({"error": "failed to create stream"})),
         )
             .into_response();
     }
 
     state
-        .rooms
-        .create_room(tid, room.id.as_str(), 0, room.public);
+        .streams
+        .create_stream(tid, stream.id.as_str(), 0, stream.public);
 
-    state.audit(tid, "room.create", room.id.as_str(), "api", "success");
+    state.audit(tid, "stream.create", stream.id.as_str(), "api", "success");
 
-    (StatusCode::CREATED, Json(room)).into_response()
+    (StatusCode::CREATED, Json(stream)).into_response()
 }
 
-pub async fn list_rooms(
+pub async fn list_streams(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
     Query(page): Query<crate::http::validation::PaginationQuery>,
 ) -> impl IntoResponse {
-    match store::rooms::list_by_tenant(&*state.db, &tenant.0).await {
-        Ok(rooms) => {
+    match store::streams::list_by_tenant(&*state.db, &tenant.0).await {
+        Ok(streams) => {
             let (limit, offset) = page.resolve();
-            let total = rooms.len();
-            let rooms: Vec<_> = rooms.into_iter().skip(offset).take(limit).collect();
-            Json(serde_json::json!({ "rooms": rooms, "total": total, "limit": limit, "offset": offset })).into_response()
+            let total = streams.len();
+            let streams: Vec<_> = streams.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({ "streams": streams, "total": total, "limit": limit, "offset": offset })).into_response()
         }
         Err(e) => {
-            tracing::error!(tenant = %tenant.0, "failed to list rooms: {e}");
+            tracing::error!(tenant = %tenant.0, "failed to list streams: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -107,20 +107,20 @@ pub async fn list_rooms(
     }
 }
 
-pub async fn get_room(
+pub async fn get_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match store::rooms::get(&*state.db, &tenant.0, &id).await {
-        Ok(Some(room)) => Json(room).into_response(),
+    match store::streams::get(&*state.db, &tenant.0, &id).await {
+        Ok(Some(stream)) => Json(stream).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "room not found"})),
+            Json(serde_json::json!({"error": "stream not found"})),
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(tenant = %tenant.0, room = %id, "failed to get room: {e}");
+            tracing::error!(tenant = %tenant.0, stream = %id, "failed to get stream: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -130,13 +130,13 @@ pub async fn get_room(
     }
 }
 
-pub async fn update_room(
+pub async fn update_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
     Path(id): Path<String>,
-    Json(req): Json<UpdateRoomRequest>,
+    Json(req): Json<UpdateStreamRequest>,
 ) -> impl IntoResponse {
-    match store::rooms::update(
+    match store::streams::update(
         &*state.db,
         &tenant.0,
         &id,
@@ -148,17 +148,17 @@ pub async fn update_room(
     {
         Ok(true) => {
             if let Some(archived) = req.archived {
-                state.rooms.set_archived(&tenant.0, &id, archived);
+                state.streams.set_archived(&tenant.0, &id, archived);
             }
             StatusCode::OK.into_response()
         }
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "room not found"})),
+            Json(serde_json::json!({"error": "stream not found"})),
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(tenant = %tenant.0, room = %id, "failed to update room: {e}");
+            tracing::error!(tenant = %tenant.0, stream = %id, "failed to update stream: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -168,28 +168,28 @@ pub async fn update_room(
     }
 }
 
-pub async fn delete_room(
+pub async fn delete_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    match store::rooms::delete(&*state.db, tid, &id).await {
+    match store::streams::delete(&*state.db, tid, &id).await {
         Ok(true) => {
-            let msg = herald_core::protocol::ServerMessage::RoomDeleted {
-                payload: herald_core::protocol::RoomEventPayload { room: id.clone() },
+            let msg = herald_core::protocol::ServerMessage::StreamDeleted {
+                payload: herald_core::protocol::StreamEventPayload { stream: id.clone() },
             };
-            crate::ws::fanout::fanout_to_room(&state, tid, &id, &msg, None);
-            state.rooms.remove_room(tid, &id);
+            crate::ws::fanout::fanout_to_stream(&state, tid, &id, &msg, None);
+            state.streams.remove_stream(tid, &id);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "room not found"})),
+            Json(serde_json::json!({"error": "stream not found"})),
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(tenant = tid, room = %id, "failed to delete room: {e}");
+            tracing::error!(tenant = tid, stream = %id, "failed to delete stream: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),

@@ -9,7 +9,7 @@ const MAX_NAME_LEN: usize = 512;
 
 type ValidationError = Box<(StatusCode, axum::response::Response)>;
 
-/// Validate an entity ID (tenant, room, user).
+/// Validate an entity ID (tenant, stream, user).
 /// Must be 1-255 chars, alphanumeric + hyphen + underscore + dot.
 pub fn validate_id(id: &str, field: &str) -> Result<(), ValidationError> {
     if id.is_empty() {
@@ -47,11 +47,11 @@ pub fn validate_name(name: &str, field: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validate a message body.
+/// Validate an event body.
 pub fn validate_body(body: &str) -> Result<(), ValidationError> {
     if body.len() > MAX_BODY_LEN {
         return Err(bad_request(&format!(
-            "message body exceeds maximum length ({MAX_BODY_LEN} bytes)"
+            "event body exceeds maximum length ({MAX_BODY_LEN} bytes)"
         )));
     }
     Ok(())
@@ -93,7 +93,7 @@ pub fn validate_attachments(meta: &Option<serde_json::Value>) -> Result<(), Vali
             if let Some(arr) = attachments.as_array() {
                 if arr.len() > MAX_ATTACHMENTS {
                     return Err(bad_request(&format!(
-                        "maximum {MAX_ATTACHMENTS} attachments per message"
+                        "maximum {MAX_ATTACHMENTS} attachments per event"
                     )));
                 }
                 for (i, att) in arr.iter().enumerate() {

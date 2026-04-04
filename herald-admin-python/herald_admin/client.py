@@ -7,8 +7,8 @@ from urllib.parse import quote
 from .errors import HeraldError
 from .transport import HttpTransport
 from .types import (
-    Cursor, HealthResponse, Member, MemberPresenceEntry, Message,
-    MessageList, MessageSendResult, Room, UserPresence,
+    Cursor, HealthResponse, Member, MemberPresenceEntry, Event,
+    EventList, EventPublishResult, Stream, UserPresence,
 )
 
 
@@ -18,22 +18,22 @@ class HeraldAdminOptions:
     token: str
 
 
-class RoomNamespace:
+class StreamNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def create(self, id: str, name: str, *, meta: Any = None, public: bool = False) -> Room:
+    def create(self, id: str, name: str, *, meta: Any = None, public: bool = False) -> Stream:
         body: dict[str, Any] = {"id": id, "name": name}
         if meta is not None:
             body["meta"] = meta
         if public:
             body["public"] = True
-        data = self._t.request("POST", "/rooms", body)
-        return Room(**{k: data[k] for k in Room.__dataclass_fields__ if k in data})
+        data = self._t.request("POST", "/streams", body)
+        return Stream(**{k: data[k] for k in Stream.__dataclass_fields__ if k in data})
 
-    def get(self, id: str) -> Room:
-        data = self._t.request("GET", f"/rooms/{quote(id, safe='')}")
-        return Room(**{k: data[k] for k in Room.__dataclass_fields__ if k in data})
+    def get(self, id: str) -> Stream:
+        data = self._t.request("GET", f"/streams/{quote(id, safe='')}")
+        return Stream(**{k: data[k] for k in Stream.__dataclass_fields__ if k in data})
 
     def update(self, id: str, *, name: str | None = None, meta: Any = None, archived: bool | None = None) -> None:
         body: dict[str, Any] = {}
@@ -43,40 +43,40 @@ class RoomNamespace:
             body["meta"] = meta
         if archived is not None:
             body["archived"] = archived
-        self._t.request("PATCH", f"/rooms/{quote(id, safe='')}", body)
+        self._t.request("PATCH", f"/streams/{quote(id, safe='')}", body)
 
-    def list(self) -> list[Room]:
-        data = self._t.request("GET", "/rooms")
-        return [Room(**{k: r[k] for k in Room.__dataclass_fields__ if k in r}) for r in data["rooms"]]
+    def list(self) -> list[Stream]:
+        data = self._t.request("GET", "/streams")
+        return [Stream(**{k: r[k] for k in Stream.__dataclass_fields__ if k in r}) for r in data["streams"]]
 
     def delete(self, id: str) -> None:
-        self._t.request("DELETE", f"/rooms/{quote(id, safe='')}")
+        self._t.request("DELETE", f"/streams/{quote(id, safe='')}")
 
 
 class MemberNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def add(self, room_id: str, user_id: str, role: str = "member") -> Member:
-        data = self._t.request("POST", f"/rooms/{quote(room_id, safe='')}/members", {"user_id": user_id, "role": role})
+    def add(self, stream_id: str, user_id: str, role: str = "member") -> Member:
+        data = self._t.request("POST", f"/streams/{quote(stream_id, safe='')}/members", {"user_id": user_id, "role": role})
         return Member(**{k: data[k] for k in Member.__dataclass_fields__ if k in data})
 
-    def list(self, room_id: str) -> list[Member]:
-        data = self._t.request("GET", f"/rooms/{quote(room_id, safe='')}/members")
+    def list(self, stream_id: str) -> list[Member]:
+        data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/members")
         return [Member(**{k: m[k] for k in Member.__dataclass_fields__ if k in m}) for m in data["members"]]
 
-    def remove(self, room_id: str, user_id: str) -> None:
-        self._t.request("DELETE", f"/rooms/{quote(room_id, safe='')}/members/{quote(user_id, safe='')}")
+    def remove(self, stream_id: str, user_id: str) -> None:
+        self._t.request("DELETE", f"/streams/{quote(stream_id, safe='')}/members/{quote(user_id, safe='')}")
 
-    def update(self, room_id: str, user_id: str, role: str) -> None:
-        self._t.request("PATCH", f"/rooms/{quote(room_id, safe='')}/members/{quote(user_id, safe='')}", {"role": role})
+    def update(self, stream_id: str, user_id: str, role: str) -> None:
+        self._t.request("PATCH", f"/streams/{quote(stream_id, safe='')}/members/{quote(user_id, safe='')}", {"role": role})
 
 
-class MessageNamespace:
+class EventNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def send(self, room_id: str, sender: str, body: str, meta: Any = None, *, parent_id: str | None = None, exclude_connection: str | None = None) -> MessageSendResult:
+    def publish(self, stream_id: str, sender: str, body: str, meta: Any = None, *, parent_id: str | None = None, exclude_connection: str | None = None) -> EventPublishResult:
         req: dict[str, Any] = {"sender": sender, "body": body}
         if meta is not None:
             req["meta"] = meta
@@ -84,10 +84,10 @@ class MessageNamespace:
             req["parent_id"] = parent_id
         if exclude_connection is not None:
             req["exclude_connection"] = exclude_connection
-        data = self._t.request("POST", f"/rooms/{quote(room_id, safe='')}/messages", req)
-        return MessageSendResult(id=data["id"], seq=data["seq"], sent_at=data["sent_at"])
+        data = self._t.request("POST", f"/streams/{quote(stream_id, safe='')}/events", req)
+        return EventPublishResult(id=data["id"], seq=data["seq"], sent_at=data["sent_at"])
 
-    def list(self, room_id: str, *, before: int | None = None, after: int | None = None, limit: int | None = None, thread: str | None = None) -> MessageList:
+    def list(self, stream_id: str, *, before: int | None = None, after: int | None = None, limit: int | None = None, thread: str | None = None) -> EventList:
         params: list[str] = []
         if before is not None:
             params.append(f"before={before}")
@@ -98,40 +98,40 @@ class MessageNamespace:
         if thread is not None:
             params.append(f"thread={quote(thread, safe='')}")
         qs = "&".join(params)
-        path = f"/rooms/{quote(room_id, safe='')}/messages"
+        path = f"/streams/{quote(stream_id, safe='')}/events"
         if qs:
             path += f"?{qs}"
         data = self._t.request("GET", path)
-        messages = [Message(id=m["id"], room=m.get("room", room_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["messages"]]
-        return MessageList(messages=messages, has_more=data.get("has_more", False))
+        events = [Event(id=m["id"], stream=m.get("stream", stream_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["events"]]
+        return EventList(events=events, has_more=data.get("has_more", False))
 
-    def delete(self, room_id: str, message_id: str) -> None:
-        self._t.request("DELETE", f"/rooms/{quote(room_id, safe='')}/messages/{quote(message_id, safe='')}")
+    def delete(self, stream_id: str, event_id: str) -> None:
+        self._t.request("DELETE", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}")
 
-    def edit(self, room_id: str, message_id: str, body: str) -> None:
-        self._t.request("PATCH", f"/rooms/{quote(room_id, safe='')}/messages/{quote(message_id, safe='')}", {"body": body})
+    def edit(self, stream_id: str, event_id: str, body: str) -> None:
+        self._t.request("PATCH", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}", {"body": body})
 
-    def get_reactions(self, room_id: str, message_id: str) -> list[dict]:
-        data = self._t.request("GET", f"/rooms/{quote(room_id, safe='')}/messages/{quote(message_id, safe='')}/reactions")
+    def get_reactions(self, stream_id: str, event_id: str) -> list[dict]:
+        data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}/reactions")
         return data["reactions"]
 
-    def trigger(self, room_id: str, event: str, data: Any = None, exclude_connection: int | None = None) -> None:
+    def trigger(self, stream_id: str, event: str, data: Any = None, exclude_connection: int | None = None) -> None:
         body: dict[str, Any] = {"event": event}
         if data is not None:
             body["data"] = data
         if exclude_connection is not None:
             body["exclude_connection"] = exclude_connection
-        self._t.request("POST", f"/rooms/{quote(room_id, safe='')}/trigger", body)
+        self._t.request("POST", f"/streams/{quote(stream_id, safe='')}/trigger", body)
 
-    def search(self, room_id: str, query: str, *, limit: int | None = None) -> MessageList:
+    def search(self, stream_id: str, query: str, *, limit: int | None = None) -> EventList:
         params = [f"q={quote(query, safe='')}"]
         if limit is not None:
             params.append(f"limit={limit}")
         qs = "&".join(params)
-        path = f"/rooms/{quote(room_id, safe='')}/messages/search?{qs}"
+        path = f"/streams/{quote(stream_id, safe='')}/events/search?{qs}"
         data = self._t.request("GET", path)
-        messages = [Message(id=m["id"], room=m.get("room", room_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["messages"]]
-        return MessageList(messages=messages, has_more=data.get("has_more", False))
+        events = [Event(id=m["id"], stream=m.get("stream", stream_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["events"]]
+        return EventList(events=events, has_more=data.get("has_more", False))
 
 
 class PresenceNamespace:
@@ -142,12 +142,12 @@ class PresenceNamespace:
         data = self._t.request("GET", f"/presence/{quote(user_id, safe='')}")
         return UserPresence(user_id=data["user_id"], status=data["status"], connections=data.get("connections", 0))
 
-    def get_room(self, room_id: str) -> list[MemberPresenceEntry]:
-        data = self._t.request("GET", f"/rooms/{quote(room_id, safe='')}/presence")
+    def get_stream(self, stream_id: str) -> list[MemberPresenceEntry]:
+        data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/presence")
         return [MemberPresenceEntry(user_id=m["user_id"], status=m["status"]) for m in data["members"]]
 
-    def get_cursors(self, room_id: str) -> list[Cursor]:
-        data = self._t.request("GET", f"/rooms/{quote(room_id, safe='')}/cursors")
+    def get_cursors(self, stream_id: str) -> list[Cursor]:
+        data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/cursors")
         return [Cursor(user_id=c["user_id"], seq=c["seq"]) for c in data["cursors"]]
 
 
@@ -193,9 +193,9 @@ class TenantNamespace:
         data = self._t.request("GET", f"/admin/tenants/{quote(tenant_id, safe='')}/tokens")
         return data["tokens"]
 
-    def list_rooms(self, tenant_id: str) -> list[dict[str, Any]]:
-        data = self._t.request("GET", f"/admin/tenants/{quote(tenant_id, safe='')}/rooms")
-        return data["rooms"]
+    def list_streams(self, tenant_id: str) -> list[dict[str, Any]]:
+        data = self._t.request("GET", f"/admin/tenants/{quote(tenant_id, safe='')}/streams")
+        return data["streams"]
 
 
 class BlockNamespace:
@@ -218,9 +218,9 @@ class HeraldAdmin:
 
     def __init__(self, url: str, token: str, *, timeout: int = 30) -> None:
         t = HttpTransport(url, token, timeout=timeout)
-        self.rooms = RoomNamespace(t)
+        self.streams = StreamNamespace(t)
         self.members = MemberNamespace(t)
-        self.messages = MessageNamespace(t)
+        self.events = EventNamespace(t)
         self.presence = PresenceNamespace(t)
         self.tenants = TenantNamespace(t)
         self.blocks = BlockNamespace(t)
@@ -232,12 +232,12 @@ class HeraldAdmin:
 
     def health(self) -> HealthResponse:
         data = self._transport.request("GET", "/health")
-        return HealthResponse(status=data["status"], connections=data.get("connections", 0), rooms=data.get("rooms", 0), uptime_secs=data.get("uptime_secs", 0))
+        return HealthResponse(status=data["status"], connections=data.get("connections", 0), streams=data.get("streams", 0), uptime_secs=data.get("uptime_secs", 0))
 
     def connections(self) -> Any:
         return self._transport.request("GET", "/admin/connections")
 
-    def events(self, *, limit: int | None = None) -> Any:
+    def admin_events(self, *, limit: int | None = None) -> Any:
         path = "/admin/events"
         if limit is not None:
             path += f"?limit={limit}"

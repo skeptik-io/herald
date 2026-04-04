@@ -4,17 +4,17 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use herald_core::error::ErrorCode;
-use herald_core::message::{Message, MessageId};
+use herald_core::event::{Event, EventId};
 use herald_core::protocol::*;
 
 use crate::state::AppState;
 use crate::store;
 use crate::ws::connection::{now_millis, ConnContext};
-use crate::ws::fanout::fanout_to_room;
+use crate::ws::fanout::fanout_to_stream;
 
 const MAX_FETCH_LIMIT: u32 = 100;
 const DEFAULT_FETCH_LIMIT: u32 = 50;
-const MESSAGE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 pub async fn handle_message(
     state: &Arc<AppState>,
@@ -23,75 +23,75 @@ pub async fn handle_message(
     msg: ClientMessage,
 ) {
     match msg {
-        ClientMessage::Subscribe { ref_, rooms } => {
-            handle_subscribe(state, ctx, tx, ref_, rooms).await;
+        ClientMessage::Subscribe { ref_, streams } => {
+            handle_subscribe(state, ctx, tx, ref_, streams).await;
         }
-        ClientMessage::Unsubscribe { ref_, rooms } => {
-            handle_unsubscribe(state, ctx, ref_, rooms);
+        ClientMessage::Unsubscribe { ref_, streams } => {
+            handle_unsubscribe(state, ctx, ref_, streams);
         }
-        ClientMessage::MessageSend {
+        ClientMessage::EventPublish {
             ref_,
-            room,
+            stream,
             body,
             meta,
             parent_id,
         } => {
-            handle_send(state, ctx, tx, ref_, room, body, meta, parent_id).await;
+            handle_publish(state, ctx, tx, ref_, stream, body, meta, parent_id).await;
         }
-        ClientMessage::MessageEdit {
+        ClientMessage::EventEdit {
             ref_,
-            room,
+            stream,
             id,
             body,
         } => {
-            handle_edit(state, ctx, tx, ref_, room, id, body).await;
+            handle_edit(state, ctx, tx, ref_, stream, id, body).await;
         }
-        ClientMessage::CursorUpdate { room, seq } => {
-            handle_cursor_update(state, ctx, room, seq).await;
+        ClientMessage::CursorUpdate { stream, seq } => {
+            handle_cursor_update(state, ctx, stream, seq).await;
         }
         ClientMessage::PresenceSet { ref_, status } => {
             handle_presence_set(state, ctx, tx, ref_, status).await;
         }
-        ClientMessage::TypingStart { room } => {
-            handle_typing(state, ctx, &room, true);
+        ClientMessage::TypingStart { stream } => {
+            handle_typing(state, ctx, &stream, true);
         }
-        ClientMessage::TypingStop { room } => {
-            handle_typing(state, ctx, &room, false);
+        ClientMessage::TypingStop { stream } => {
+            handle_typing(state, ctx, &stream, false);
         }
-        ClientMessage::MessagesFetch {
+        ClientMessage::EventsFetch {
             ref_,
-            room,
+            stream,
             before,
             limit,
         } => {
-            handle_fetch(state, ctx, tx, ref_, room, before, limit).await;
+            handle_fetch(state, ctx, tx, ref_, stream, before, limit).await;
         }
-        ClientMessage::MessageDelete { ref_, room, id } => {
-            handle_delete(state, ctx, tx, ref_, room, id).await;
+        ClientMessage::EventDelete { ref_, stream, id } => {
+            handle_delete(state, ctx, tx, ref_, stream, id).await;
         }
         ClientMessage::EventTrigger {
             ref_,
-            room,
+            stream,
             event,
             data,
         } => {
-            handle_event_trigger(state, ctx, tx, ref_, room, event, data).await;
+            handle_ephemeral_trigger(state, ctx, tx, ref_, stream, event, data).await;
         }
         ClientMessage::ReactionAdd {
             ref_,
-            room,
-            message_id,
+            stream,
+            event_id,
             emoji,
         } => {
-            handle_reaction(state, ctx, tx, ref_, room, message_id, emoji, true).await;
+            handle_reaction(state, ctx, tx, ref_, stream, event_id, emoji, true).await;
         }
         ClientMessage::ReactionRemove {
             ref_,
-            room,
-            message_id,
+            stream,
+            event_id,
             emoji,
         } => {
-            handle_reaction(state, ctx, tx, ref_, room, message_id, emoji, false).await;
+            handle_reaction(state, ctx, tx, ref_, stream, event_id, emoji, false).await;
         }
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
@@ -113,55 +113,55 @@ async fn handle_subscribe(
     ctx: &mut ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
-    rooms: Vec<String>,
+    streams: Vec<String>,
 ) {
     let tid = &ctx.tenant_id;
-    for room_id in rooms {
-        if !ctx.rooms_claim.contains(&room_id) {
+    for stream_id in streams {
+        if !ctx.streams_claim.contains(&stream_id) {
             let _ = tx
                 .send(ServerMessage::error(
                     ref_.clone(),
                     ErrorCode::Unauthorized,
-                    format!("not authorized for room {room_id}"),
+                    format!("not authorized for stream {stream_id}"),
                 ))
                 .await;
             continue;
         }
 
-        // For public rooms, auto-add as member on first subscribe
-        if state.rooms.is_public(tid, &room_id) {
-            if !state.rooms.is_member(tid, &room_id, &ctx.user_id) {
-                state.rooms.add_member(tid, &room_id, &ctx.user_id);
+        // For public streams, auto-add as member on first subscribe
+        if state.streams.is_public(tid, &stream_id) {
+            if !state.streams.is_member(tid, &stream_id, &ctx.user_id) {
+                state.streams.add_member(tid, &stream_id, &ctx.user_id);
                 let member = herald_core::member::Member {
-                    room_id: room_id.clone(),
+                    stream_id: stream_id.clone(),
                     user_id: ctx.user_id.clone(),
                     role: herald_core::member::Role::Member,
                     joined_at: now_millis(),
                 };
                 let _ = store::members::insert(&*state.db, tid, &member).await;
             }
-        } else if !state.rooms.is_member(tid, &room_id, &ctx.user_id) {
+        } else if !state.streams.is_member(tid, &stream_id, &ctx.user_id) {
             let _ = tx
                 .send(ServerMessage::error(
                     ref_.clone(),
-                    ErrorCode::RoomNotFound,
-                    format!("not a member of room {room_id}"),
+                    ErrorCode::StreamNotFound,
+                    format!("not a member of stream {stream_id}"),
                 ))
                 .await;
             continue;
         }
 
         state
-            .rooms
-            .subscribe(tid, &room_id, &ctx.user_id, ctx.conn_id);
+            .streams
+            .subscribe(tid, &stream_id, &ctx.user_id, ctx.conn_id);
         state
             .connections
-            .add_room_subscription(ctx.conn_id, &room_id);
+            .add_stream_subscription(ctx.conn_id, &stream_id);
 
-        let members = state.rooms.get_members(tid, &room_id);
+        let members = state.streams.get_members(tid, &stream_id);
         let mut member_presence = Vec::new();
         for uid in &members {
-            if let Ok(Some(member)) = store::members::get(&*state.db, tid, &room_id, uid).await {
+            if let Ok(Some(member)) = store::members::get(&*state.db, tid, &stream_id, uid).await {
                 let presence = state.presence.resolve(
                     tid,
                     uid,
@@ -176,17 +176,17 @@ async fn handle_subscribe(
             }
         }
 
-        let cursor = store::cursors::get(&*state.db, tid, &room_id, &ctx.user_id)
+        let cursor = store::cursors::get(&*state.db, tid, &stream_id, &ctx.user_id)
             .await
             .unwrap_or(0);
-        let latest_seq = state.rooms.current_seq(tid, &room_id);
+        let latest_seq = state.streams.current_seq(tid, &stream_id);
 
-        let room_id_ref = room_id.clone();
+        let stream_id_ref = stream_id.clone();
         let _ = tx
             .send(ServerMessage::Subscribed {
                 ref_: ref_.clone(),
                 payload: SubscribedPayload {
-                    room: room_id,
+                    stream: stream_id,
                     members: member_presence,
                     cursor,
                     latest_seq,
@@ -195,17 +195,17 @@ async fn handle_subscribe(
             .await;
 
         // Broadcast subscriber count update
-        let count = state.rooms.subscriber_count(tid, &room_id_ref);
-        let count_msg = ServerMessage::RoomSubscriberCount {
-            payload: RoomSubscriberCountPayload {
-                room: room_id_ref.clone(),
+        let count = state.streams.subscriber_count(tid, &stream_id_ref);
+        let count_msg = ServerMessage::StreamSubscriberCount {
+            payload: StreamSubscriberCountPayload {
+                stream: stream_id_ref.clone(),
                 count,
             },
         };
-        fanout_to_room(state, tid, &room_id_ref, &count_msg, None);
+        fanout_to_stream(state, tid, &stream_id_ref, &count_msg, None);
 
         // Cache channel: deliver last event to new subscriber
-        if let Some(cached) = state.rooms.get_last_event(tid, &room_id_ref) {
+        if let Some(cached) = state.streams.get_last_event(tid, &stream_id_ref) {
             let _ = tx.send(cached).await;
         }
     }
@@ -215,35 +215,35 @@ fn handle_unsubscribe(
     state: &Arc<AppState>,
     ctx: &mut ConnContext,
     _ref_: Option<String>,
-    rooms: Vec<String>,
+    streams: Vec<String>,
 ) {
-    for room_id in rooms {
+    for stream_id in streams {
         state
-            .rooms
-            .unsubscribe(&ctx.tenant_id, &room_id, &ctx.user_id, ctx.conn_id);
+            .streams
+            .unsubscribe(&ctx.tenant_id, &stream_id, &ctx.user_id, ctx.conn_id);
         state
             .connections
-            .remove_room_subscription(ctx.conn_id, &room_id);
+            .remove_stream_subscription(ctx.conn_id, &stream_id);
 
         // Broadcast subscriber count update
-        let count = state.rooms.subscriber_count(&ctx.tenant_id, &room_id);
-        let count_msg = ServerMessage::RoomSubscriberCount {
-            payload: RoomSubscriberCountPayload {
-                room: room_id.clone(),
+        let count = state.streams.subscriber_count(&ctx.tenant_id, &stream_id);
+        let count_msg = ServerMessage::StreamSubscriberCount {
+            payload: StreamSubscriberCountPayload {
+                stream: stream_id.clone(),
                 count,
             },
         };
-        fanout_to_room(state, &ctx.tenant_id, &room_id, &count_msg, None);
+        fanout_to_stream(state, &ctx.tenant_id, &stream_id, &count_msg, None);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_send(
+async fn handle_publish(
     state: &Arc<AppState>,
     ctx: &ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
-    room: String,
+    stream: String,
     body: String,
     meta: Option<serde_json::Value>,
     parent_id: Option<String>,
@@ -255,7 +255,7 @@ async fn handle_send(
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::BadRequest,
-                "message body exceeds maximum length",
+                "event body exceeds maximum length",
             ))
             .await;
         return;
@@ -270,7 +270,7 @@ async fn handle_send(
                         .send(ServerMessage::error(
                             ref_,
                             ErrorCode::BadRequest,
-                            "maximum 10 attachments per message",
+                            "maximum 10 attachments per event",
                         ))
                         .await;
                     return;
@@ -291,30 +291,30 @@ async fn handle_send(
         }
     }
 
-    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::NotSubscribed,
-                "not a member of this room",
+                "not a member of this stream",
             ))
             .await;
         return;
     }
 
-    if state.rooms.is_archived(tid, &room) {
+    if state.streams.is_archived(tid, &stream) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::BadRequest,
-                "room is archived",
+                "stream is archived",
             ))
             .await;
         return;
     }
 
     if let Err(e) = state
-        .authorize(tid, &ctx.user_id, "message.send", &room)
+        .authorize(tid, &ctx.user_id, "event.publish", &stream)
         .await
     {
         let _ = tx
@@ -325,13 +325,13 @@ async fn handle_send(
 
     let total_start = std::time::Instant::now();
 
-    let seq = state.rooms.next_seq(tid, &room);
+    let seq = state.streams.next_seq(tid, &stream);
     let now = now_millis();
-    let msg_id = uuid::Uuid::new_v4().to_string();
+    let event_id = uuid::Uuid::new_v4().to_string();
 
-    let message = Message {
-        id: MessageId(msg_id.clone()),
-        room_id: room.clone(),
+    let event = Event {
+        id: EventId(event_id.clone()),
+        stream_id: stream.clone(),
         seq,
         sender: ctx.user_id.clone(),
         body: body.clone(),
@@ -343,8 +343,8 @@ async fn handle_send(
 
     // Store
     let store_start = std::time::Instant::now();
-    if let Err(e) = store::messages::insert(&*state.db, tid, &message, now + MESSAGE_TTL_MS).await {
-        tracing::error!("failed to store message: {e}");
+    if let Err(e) = store::events::insert(&*state.db, tid, &event, now + EVENT_TTL_MS).await {
+        tracing::error!("failed to store event: {e}");
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
@@ -354,27 +354,30 @@ async fn handle_send(
             .await;
         return;
     }
-    state.metrics.message_store.observe_since(store_start);
+    state.metrics.event_store.observe_since(store_start);
 
-    state.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
-    state.increment_tenant_messages(tid);
+    state
+        .metrics
+        .events_published
+        .fetch_add(1, Ordering::Relaxed);
+    state.increment_tenant_events(tid);
 
     state.event_bus.push_event(
         crate::admin_events::EventKind::Message,
         Some(tid.to_string()),
         serde_json::json!({
-            "room": &room,
+            "stream": &stream,
             "sender": &ctx.user_id,
-            "msg_id": &msg_id,
+            "event_id": &event_id,
             "seq": seq,
         }),
     );
 
     let _ = tx
-        .send(ServerMessage::MessageAck {
+        .send(ServerMessage::EventAck {
             ref_,
-            payload: MessageAckPayload {
-                id: msg_id.clone(),
+            payload: EventAckPayload {
+                id: event_id.clone(),
                 seq,
                 sent_at: now,
             },
@@ -383,10 +386,10 @@ async fn handle_send(
 
     // Fan-out
     let fanout_start = std::time::Instant::now();
-    let new_msg = ServerMessage::MessageNew {
-        payload: MessageNewPayload {
-            room: room.clone(),
-            id: msg_id.clone(),
+    let new_event = ServerMessage::EventNew {
+        payload: EventNewPayload {
+            stream: stream.clone(),
+            id: event_id.clone(),
             seq,
             sender: ctx.user_id.clone(),
             body: body.clone(),
@@ -395,18 +398,18 @@ async fn handle_send(
             sent_at: now,
         },
     };
-    fanout_to_room(state, tid, &room, &new_msg, None);
-    state.metrics.message_fanout.observe_since(fanout_start);
+    fanout_to_stream(state, tid, &stream, &new_event, None);
+    state.metrics.event_fanout.observe_since(fanout_start);
 
     // Cache channel: update last event for new subscribers
-    state.rooms.set_last_event(tid, &room, new_msg);
+    state.streams.set_last_event(tid, &stream, new_event);
 
     state.fire_webhook(
         tid,
         crate::webhook::WebhookEvent {
-            event: "message.new".to_string(),
-            room: room.clone(),
-            id: Some(msg_id),
+            event: "event.new".to_string(),
+            stream: stream.clone(),
+            id: Some(event_id),
             seq: Some(seq),
             sender: Some(ctx.user_id.clone()),
             body: Some(body.clone()),
@@ -417,24 +420,25 @@ async fn handle_send(
         },
     );
 
-    state.audit(tid, "message.send", &room, &ctx.user_id, "success");
-    state.notify_offline_members(tid, &room, &ctx.user_id, &body);
+    state.audit(tid, "event.publish", &stream, &ctx.user_id, "success");
+    state.notify_offline_members(tid, &stream, &ctx.user_id, &body);
 
-    state.metrics.message_total.observe_since(total_start);
+    state.metrics.event_total.observe_since(total_start);
 }
 
-async fn handle_cursor_update(state: &Arc<AppState>, ctx: &ConnContext, room: String, seq: u64) {
+async fn handle_cursor_update(state: &Arc<AppState>, ctx: &ConnContext, stream: String, seq: u64) {
     let now = now_millis();
-    let _ = store::cursors::upsert(&*state.db, &ctx.tenant_id, &room, &ctx.user_id, seq, now).await;
+    let _ =
+        store::cursors::upsert(&*state.db, &ctx.tenant_id, &stream, &ctx.user_id, seq, now).await;
 
     let msg = ServerMessage::CursorMoved {
         payload: CursorMovedPayload {
-            room: room.clone(),
+            stream: stream.clone(),
             user_id: ctx.user_id.clone(),
             seq,
         },
     };
-    fanout_to_room(state, &ctx.tenant_id, &room, &msg, Some(ctx.conn_id));
+    fanout_to_stream(state, &ctx.tenant_id, &stream, &msg, Some(ctx.conn_id));
 }
 
 async fn handle_presence_set(
@@ -454,23 +458,26 @@ async fn handle_presence_set(
             presence: status,
         },
     };
-    for room_id in state.rooms.get_member_rooms(&ctx.tenant_id, &ctx.user_id) {
-        fanout_to_room(state, &ctx.tenant_id, &room_id, &msg, None);
+    for stream_id in state
+        .streams
+        .get_member_streams(&ctx.tenant_id, &ctx.user_id)
+    {
+        fanout_to_stream(state, &ctx.tenant_id, &stream_id, &msg, None);
     }
 }
 
-fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, room: &str, active: bool) {
+fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, stream: &str, active: bool) {
     state
         .typing
-        .set_typing(&ctx.tenant_id, room, &ctx.user_id, active);
+        .set_typing(&ctx.tenant_id, stream, &ctx.user_id, active);
     let msg = ServerMessage::Typing {
         payload: TypingPayload {
-            room: room.to_string(),
+            stream: stream.to_string(),
             user_id: ctx.user_id.clone(),
             active,
         },
     };
-    fanout_to_room(state, &ctx.tenant_id, room, &msg, Some(ctx.conn_id));
+    fanout_to_stream(state, &ctx.tenant_id, stream, &msg, Some(ctx.conn_id));
 }
 
 async fn handle_fetch(
@@ -478,18 +485,18 @@ async fn handle_fetch(
     ctx: &ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
-    room: String,
+    stream: String,
     before: Option<u64>,
     limit: Option<u32>,
 ) {
     let tid = &ctx.tenant_id;
 
-    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::NotSubscribed,
-                "not a member of this room",
+                "not a member of this stream",
             ))
             .await;
         return;
@@ -498,16 +505,16 @@ async fn handle_fetch(
     let limit = limit.unwrap_or(DEFAULT_FETCH_LIMIT).min(MAX_FETCH_LIMIT);
     let before_seq = before.unwrap_or(i64::MAX as u64);
 
-    let messages = store::messages::list_before(&*state.db, tid, &room, before_seq, limit + 1)
+    let events = store::events::list_before(&*state.db, tid, &stream, before_seq, limit + 1)
         .await
         .unwrap_or_default();
 
-    let has_more = messages.len() > limit as usize;
-    let messages: Vec<MessageNewPayload> = messages
+    let has_more = events.len() > limit as usize;
+    let events: Vec<EventNewPayload> = events
         .into_iter()
         .take(limit as usize)
-        .map(|m| MessageNewPayload {
-            room: m.room_id,
+        .map(|m| EventNewPayload {
+            stream: m.stream_id,
             id: m.id.0,
             seq: m.seq,
             sender: m.sender,
@@ -519,11 +526,11 @@ async fn handle_fetch(
         .collect();
 
     let _ = tx
-        .send(ServerMessage::MessagesBatch {
+        .send(ServerMessage::EventsBatch {
             ref_,
-            payload: MessagesBatchPayload {
-                room,
-                messages,
+            payload: EventsBatchPayload {
+                stream,
+                events,
                 has_more,
             },
         })
@@ -535,37 +542,37 @@ async fn handle_delete(
     ctx: &ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
-    room: String,
+    stream: String,
     id: String,
 ) {
     let tid = &ctx.tenant_id;
 
-    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::NotSubscribed,
-                "not a member of this room",
+                "not a member of this stream",
             ))
             .await;
         return;
     }
 
-    // Look up the message to verify ownership
-    let msg = match store::messages::get_by_id(&*state.db, tid, &id).await {
+    // Look up the event to verify ownership
+    let event = match store::events::get_by_id(&*state.db, tid, &id).await {
         Ok(Some(m)) => m,
         Ok(None) => {
             let _ = tx
                 .send(ServerMessage::error(
                     ref_,
                     ErrorCode::BadRequest,
-                    "message not found",
+                    "event not found",
                 ))
                 .await;
             return;
         }
         Err(e) => {
-            tracing::error!("failed to look up message {id}: {e}");
+            tracing::error!("failed to look up event {id}: {e}");
             let _ = tx
                 .send(ServerMessage::error(
                     ref_,
@@ -577,10 +584,10 @@ async fn handle_delete(
         }
     };
 
-    // Only the sender can delete their own message (admin/owner enforcement could be added via Sentry)
-    if msg.sender != ctx.user_id {
+    // Only the sender can delete their own event (admin/owner enforcement could be added via Sentry)
+    if event.sender != ctx.user_id {
         if let Err(e) = state
-            .authorize(tid, &ctx.user_id, "message.delete", &room)
+            .authorize(tid, &ctx.user_id, "event.delete", &stream)
             .await
         {
             let _ = tx
@@ -590,22 +597,22 @@ async fn handle_delete(
         }
     }
 
-    match store::messages::delete_message(&*state.db, tid, &id).await {
+    match store::events::delete_event(&*state.db, tid, &id).await {
         Ok(Some(original)) => {
-            let deleted_msg = ServerMessage::MessageDeleted {
-                payload: MessageDeletedPayload {
-                    room: room.clone(),
+            let deleted_event = ServerMessage::EventDeleted {
+                payload: EventDeletedPayload {
+                    stream: stream.clone(),
                     id: id.clone(),
                     seq: original.seq,
                 },
             };
-            fanout_to_room(state, tid, &room, &deleted_msg, None);
+            fanout_to_stream(state, tid, &stream, &deleted_event, None);
 
             // Ack to sender
             let _ = tx
-                .send(ServerMessage::MessageAck {
+                .send(ServerMessage::EventAck {
                     ref_,
-                    payload: MessageAckPayload {
+                    payload: EventAckPayload {
                         id,
                         seq: original.seq,
                         sent_at: now_millis(),
@@ -618,12 +625,12 @@ async fn handle_delete(
                 .send(ServerMessage::error(
                     ref_,
                     ErrorCode::BadRequest,
-                    "message not found",
+                    "event not found",
                 ))
                 .await;
         }
         Err(e) => {
-            tracing::error!("failed to delete message {id}: {e}");
+            tracing::error!("failed to delete event {id}: {e}");
             let _ = tx
                 .send(ServerMessage::error(
                     ref_,
@@ -640,7 +647,7 @@ async fn handle_edit(
     ctx: &ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
-    room: String,
+    stream: String,
     id: String,
     body: String,
 ) {
@@ -651,38 +658,38 @@ async fn handle_edit(
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::BadRequest,
-                "message body exceeds maximum length",
+                "event body exceeds maximum length",
             ))
             .await;
         return;
     }
 
-    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::NotSubscribed,
-                "not a member of this room",
+                "not a member of this stream",
             ))
             .await;
         return;
     }
 
     // Look up original to check sender
-    let msg = match store::messages::get_by_id(&*state.db, tid, &id).await {
+    let event = match store::events::get_by_id(&*state.db, tid, &id).await {
         Ok(Some(m)) => m,
         Ok(None) => {
             let _ = tx
                 .send(ServerMessage::error(
                     ref_,
                     ErrorCode::BadRequest,
-                    "message not found",
+                    "event not found",
                 ))
                 .await;
             return;
         }
         Err(e) => {
-            tracing::error!("failed to look up message {id}: {e}");
+            tracing::error!("failed to look up event {id}: {e}");
             let _ = tx
                 .send(ServerMessage::error(
                     ref_,
@@ -695,9 +702,9 @@ async fn handle_edit(
     };
 
     // Only sender can edit (or Sentry authorize)
-    if msg.sender != ctx.user_id {
+    if event.sender != ctx.user_id {
         if let Err(e) = state
-            .authorize(tid, &ctx.user_id, "message.edit", &room)
+            .authorize(tid, &ctx.user_id, "event.edit", &stream)
             .await
         {
             let _ = tx
@@ -708,23 +715,23 @@ async fn handle_edit(
     }
 
     let now = now_millis();
-    match store::messages::edit_message(&*state.db, tid, &id, &body, now).await {
+    match store::events::edit_event(&*state.db, tid, &id, &body, now).await {
         Ok(Some(updated)) => {
-            let edited_msg = ServerMessage::MessageEdited {
-                payload: MessageEditedPayload {
-                    room: room.clone(),
+            let edited_event = ServerMessage::EventEdited {
+                payload: EventEditedPayload {
+                    stream: stream.clone(),
                     id: id.clone(),
                     seq: updated.seq,
                     body: body.clone(),
                     edited_at: now,
                 },
             };
-            fanout_to_room(state, tid, &room, &edited_msg, None);
+            fanout_to_stream(state, tid, &stream, &edited_event, None);
 
             let _ = tx
-                .send(ServerMessage::MessageAck {
+                .send(ServerMessage::EventAck {
                     ref_,
-                    payload: MessageAckPayload {
+                    payload: EventAckPayload {
                         id,
                         seq: updated.seq,
                         sent_at: now,
@@ -737,12 +744,12 @@ async fn handle_edit(
                 .send(ServerMessage::error(
                     ref_,
                     ErrorCode::BadRequest,
-                    "message not found",
+                    "event not found",
                 ))
                 .await;
         }
         Err(e) => {
-            tracing::error!("failed to edit message {id}: {e}");
+            tracing::error!("failed to edit event {id}: {e}");
             let _ = tx
                 .send(ServerMessage::error(
                     ref_,
@@ -754,35 +761,35 @@ async fn handle_edit(
     }
 }
 
-async fn handle_event_trigger(
+async fn handle_ephemeral_trigger(
     state: &Arc<AppState>,
     ctx: &ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
-    room: String,
+    stream: String,
     event: String,
     data: Option<serde_json::Value>,
 ) {
     let tid = &ctx.tenant_id;
 
-    // Must be subscribed (member) to trigger events
-    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+    // Must be subscribed (member) to trigger ephemeral events
+    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::NotSubscribed,
-                "not a member of this room",
+                "not a member of this stream",
             ))
             .await;
         return;
     }
 
-    if state.rooms.is_archived(tid, &room) {
+    if state.streams.is_archived(tid, &stream) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::BadRequest,
-                "room is archived",
+                "stream is archived",
             ))
             .await;
         return;
@@ -791,13 +798,13 @@ async fn handle_event_trigger(
     // Fan-out to all subscribers except sender
     let msg = ServerMessage::EventReceived {
         payload: EventReceivedPayload {
-            room: room.clone(),
+            stream: stream.clone(),
             event: event.clone(),
             sender: ctx.user_id.clone(),
             data,
         },
     };
-    fanout_to_room(state, tid, &room, &msg, Some(ctx.conn_id));
+    fanout_to_stream(state, tid, &stream, &msg, Some(ctx.conn_id));
 
     // Ack to sender (lightweight — no seq/id since ephemeral)
     if let Some(r) = ref_ {
@@ -811,18 +818,18 @@ async fn handle_reaction(
     ctx: &ConnContext,
     tx: &mpsc::Sender<ServerMessage>,
     ref_: Option<String>,
-    room: String,
-    message_id: String,
+    stream: String,
+    event_id: String,
     emoji: String,
     add: bool,
 ) {
     let tid = &ctx.tenant_id;
-    if !state.rooms.is_member(tid, &room, &ctx.user_id) {
+    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
         let _ = tx
             .send(ServerMessage::error(
                 ref_,
                 ErrorCode::NotSubscribed,
-                "not a member of this room",
+                "not a member of this stream",
             ))
             .await;
         return;
@@ -839,9 +846,9 @@ async fn handle_reaction(
     }
 
     let result = if add {
-        store::reactions::add(&*state.db, tid, &room, &message_id, &emoji, &ctx.user_id).await
+        store::reactions::add(&*state.db, tid, &stream, &event_id, &emoji, &ctx.user_id).await
     } else {
-        store::reactions::remove(&*state.db, tid, &room, &message_id, &emoji, &ctx.user_id)
+        store::reactions::remove(&*state.db, tid, &stream, &event_id, &emoji, &ctx.user_id)
             .await
             .map(|_| ())
     };
@@ -850,8 +857,8 @@ async fn handle_reaction(
         Ok(()) => {
             let msg = ServerMessage::ReactionChanged {
                 payload: ReactionChangedPayload {
-                    room: room.clone(),
-                    message_id,
+                    stream: stream.clone(),
+                    event_id,
                     emoji,
                     user_id: ctx.user_id.clone(),
                     action: if add {
@@ -861,7 +868,7 @@ async fn handle_reaction(
                     },
                 },
             };
-            fanout_to_room(state, tid, &room, &msg, None);
+            fanout_to_stream(state, tid, &stream, &msg, None);
             if let Some(r) = ref_ {
                 let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;
             }

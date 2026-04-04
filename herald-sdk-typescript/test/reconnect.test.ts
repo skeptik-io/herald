@@ -7,12 +7,12 @@
 //
 // The fix: handleStateChange now calls handleReconnect() which:
 // 1. Re-authenticates with the current token
-// 2. Re-subscribes to all previously subscribed rooms
+// 2. Re-subscribes to all previously subscribed streams
 
 import { HeraldClient } from "../src/client.js";
 
-function testSubscribedRoomsTracking() {
-  // Verify that subscribedRooms is tracked correctly
+function testSubscribedStreamsTracking() {
+  // Verify that subscribedStreams is tracked correctly
   // We can't test the full reconnect flow without a WebSocket server,
   // but we can verify the state tracking.
 
@@ -24,21 +24,21 @@ function testSubscribedRoomsTracking() {
 
   // Cast to access private state
   const internals = client as unknown as {
-    subscribedRooms: Set<string>;
+    subscribedStreams: Set<string>;
     _initialConnectDone: boolean;
   };
 
   // Initially empty
   console.assert(
-    internals.subscribedRooms.size === 0,
-    "should start with no subscribed rooms",
+    internals.subscribedStreams.size === 0,
+    "should start with no subscribed streams",
   );
   console.assert(
     !internals._initialConnectDone,
     "should not be marked as initial connect done",
   );
 
-  console.log("✓ subscribedRooms starts empty");
+  console.log("✓ subscribedStreams starts empty");
   console.log("✓ _initialConnectDone starts false");
 }
 
@@ -49,28 +49,28 @@ function testDisconnectClearsState() {
   });
 
   const internals = client as unknown as {
-    subscribedRooms: Set<string>;
+    subscribedStreams: Set<string>;
     _initialConnectDone: boolean;
   };
 
-  // Simulate having subscribed rooms
-  internals.subscribedRooms.add("room1");
-  internals.subscribedRooms.add("room2");
+  // Simulate having subscribed streams
+  internals.subscribedStreams.add("stream1");
+  internals.subscribedStreams.add("stream2");
   internals._initialConnectDone = true;
 
   // Disconnect should clear everything
   client.disconnect();
 
   console.assert(
-    internals.subscribedRooms.size === 0,
-    "disconnect should clear subscribed rooms",
+    internals.subscribedStreams.size === 0,
+    "disconnect should clear subscribed streams",
   );
   console.assert(
     !internals._initialConnectDone,
     "disconnect should reset initial connect flag",
   );
 
-  console.log("✓ disconnect clears subscribedRooms");
+  console.log("✓ disconnect clears subscribedStreams");
   console.log("✓ disconnect resets _initialConnectDone");
 }
 
@@ -90,7 +90,7 @@ function testHandleReconnectExists() {
   console.log("✓ handleReconnect method exists");
 }
 
-testSubscribedRoomsTracking();
+testSubscribedStreamsTracking();
 testDisconnectClearsState();
 testHandleReconnectExists();
 console.log("✓ all reconnect tests passed");

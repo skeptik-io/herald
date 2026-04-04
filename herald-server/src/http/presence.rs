@@ -28,13 +28,13 @@ pub async fn user_presence(
     }))
 }
 
-pub async fn room_presence(
+pub async fn stream_presence(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path(room_id): Path<String>,
+    Path(stream_id): Path<String>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    let members = state.rooms.get_members(tid, &room_id);
+    let members = state.streams.get_members(tid, &stream_id);
     let presence: Vec<serde_json::Value> = members
         .iter()
         .map(|uid| {

@@ -4,7 +4,7 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class Room:
+class Stream:
     id: str
     name: str
     meta: Any = None
@@ -15,16 +15,16 @@ class Room:
 
 @dataclass(frozen=True)
 class Member:
-    room_id: str
+    stream_id: str
     user_id: str
     role: str = "member"
     joined_at: int = 0
 
 
 @dataclass(frozen=True)
-class Message:
+class Event:
     id: str
-    room: str
+    stream: str
     seq: int
     sender: str
     body: str
@@ -35,13 +35,13 @@ class Message:
 
 
 @dataclass(frozen=True)
-class MessageList:
-    messages: list[Message] = field(default_factory=list)
+class EventList:
+    events: list[Event] = field(default_factory=list)
     has_more: bool = False
 
 
 @dataclass(frozen=True)
-class MessageSendResult:
+class EventPublishResult:
     id: str
     seq: int
     sent_at: int
@@ -70,5 +70,5 @@ class Cursor:
 class HealthResponse:
     status: str
     connections: int = 0
-    rooms: int = 0
+    streams: int = 0
     uptime_secs: int = 0

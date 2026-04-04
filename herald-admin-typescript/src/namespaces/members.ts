@@ -4,33 +4,33 @@ import type { Member } from "../types.js";
 export class MemberNamespace {
   constructor(private transport: HttpTransport) {}
 
-  async add(roomId: string, userId: string, role?: string): Promise<Member> {
+  async add(streamId: string, userId: string, role?: string): Promise<Member> {
     return this.transport.request<Member>(
       "POST",
-      `/rooms/${encodeURIComponent(roomId)}/members`,
+      `/streams/${encodeURIComponent(streamId)}/members`,
       { user_id: userId, role },
     );
   }
 
-  async list(roomId: string): Promise<Member[]> {
+  async list(streamId: string): Promise<Member[]> {
     const resp = await this.transport.request<{ members: Member[] }>(
       "GET",
-      `/rooms/${encodeURIComponent(roomId)}/members`,
+      `/streams/${encodeURIComponent(streamId)}/members`,
     );
     return resp.members;
   }
 
-  async remove(roomId: string, userId: string): Promise<void> {
+  async remove(streamId: string, userId: string): Promise<void> {
     return this.transport.request(
       "DELETE",
-      `/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`,
+      `/streams/${encodeURIComponent(streamId)}/members/${encodeURIComponent(userId)}`,
     );
   }
 
-  async update(roomId: string, userId: string, role: string): Promise<void> {
+  async update(streamId: string, userId: string, role: string): Promise<void> {
     return this.transport.request(
       "PATCH",
-      `/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`,
+      `/streams/${encodeURIComponent(streamId)}/members/${encodeURIComponent(userId)}`,
       { role },
     );
   }

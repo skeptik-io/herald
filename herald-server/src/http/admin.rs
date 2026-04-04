@@ -327,21 +327,21 @@ pub async fn delete_api_token(
     }
 }
 
-/// List rooms for a specific tenant (admin view).
-pub async fn list_tenant_rooms(
+/// List streams for a specific tenant (admin view).
+pub async fn list_tenant_streams(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
     Query(page): Query<crate::http::validation::PaginationQuery>,
 ) -> impl IntoResponse {
-    match store::rooms::list_by_tenant(&*state.db, &tenant_id).await {
-        Ok(rooms) => {
+    match store::streams::list_by_tenant(&*state.db, &tenant_id).await {
+        Ok(streams) => {
             let (limit, offset) = page.resolve();
-            let total = rooms.len();
-            let rooms: Vec<_> = rooms.into_iter().skip(offset).take(limit).collect();
-            Json(serde_json::json!({"rooms": rooms, "total": total, "limit": limit, "offset": offset})).into_response()
+            let total = streams.len();
+            let streams: Vec<_> = streams.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({"streams": streams, "total": total, "limit": limit, "offset": offset})).into_response()
         }
         Err(e) => {
-            tracing::error!(tenant = %tenant_id, "failed to list tenant rooms: {e}");
+            tracing::error!(tenant = %tenant_id, "failed to list tenant streams: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -450,11 +450,11 @@ pub async fn get_stats(
     let from = q.from.unwrap_or(now - 86_400_000); // default: last 24h
     let to = q.to.unwrap_or(now);
     let snapshots = state.event_bus.get_snapshots(from, to);
-    let messages_total = state
+    let events_total = state
         .metrics
-        .messages_sent
+        .events_published
         .load(std::sync::atomic::Ordering::Relaxed);
-    let today = state.event_bus.today_summary(messages_total);
+    let today = state.event_bus.today_summary(events_total);
 
     Json(serde_json::json!({
         "today": today,

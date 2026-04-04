@@ -1,11 +1,11 @@
-use herald_core::room::Room;
+use herald_core::stream::Stream;
 use shroudb_store::Store;
 
-use super::NS_ROOMS;
+use super::NS_STREAMS;
 
-/// Key format: "{tenant_id}/{room_id}"
-fn room_key(tenant_id: &str, room_id: &str) -> Vec<u8> {
-    format!("{tenant_id}/{room_id}").into_bytes()
+/// Key format: "{tenant_id}/{stream_id}"
+fn stream_key(tenant_id: &str, stream_id: &str) -> Vec<u8> {
+    format!("{tenant_id}/{stream_id}").into_bytes()
 }
 
 fn tenant_prefix(tenant_id: &str) -> Vec<u8> {
@@ -15,11 +15,11 @@ fn tenant_prefix(tenant_id: &str) -> Vec<u8> {
 pub async fn insert<S: Store>(
     store: &S,
     tenant_id: &str,
-    room: &Room,
+    stream: &Stream,
 ) -> Result<(), anyhow::Error> {
-    let key = room_key(tenant_id, room.id.as_str());
-    let value = serde_json::to_vec(room)?;
-    store.put(NS_ROOMS, &key, &value, None).await?;
+    let key = stream_key(tenant_id, stream.id.as_str());
+    let value = serde_json::to_vec(stream)?;
+    store.put(NS_STREAMS, &key, &value, None).await?;
     Ok(())
 }
 
@@ -27,9 +27,9 @@ pub async fn get<S: Store>(
     store: &S,
     tenant_id: &str,
     id: &str,
-) -> Result<Option<Room>, anyhow::Error> {
-    let key = room_key(tenant_id, id);
-    match store.get(NS_ROOMS, &key, None).await {
+) -> Result<Option<Stream>, anyhow::Error> {
+    let key = stream_key(tenant_id, id);
+    match store.get(NS_STREAMS, &key, None).await {
         Ok(entry) => Ok(Some(serde_json::from_slice(&entry.value)?)),
         Err(shroudb_store::StoreError::NotFound) => Ok(None),
         Err(e) => Err(e.into()),
@@ -39,18 +39,18 @@ pub async fn get<S: Store>(
 pub async fn list_by_tenant<S: Store>(
     store: &S,
     tenant_id: &str,
-) -> Result<Vec<Room>, anyhow::Error> {
+) -> Result<Vec<Stream>, anyhow::Error> {
     let prefix = tenant_prefix(tenant_id);
-    let mut rooms = Vec::new();
+    let mut streams = Vec::new();
     let mut cursor = None;
     loop {
         let page = store
-            .list(NS_ROOMS, Some(&prefix), cursor.as_deref(), 100)
+            .list(NS_STREAMS, Some(&prefix), cursor.as_deref(), 100)
             .await?;
         for key in &page.keys {
-            if let Ok(entry) = store.get(NS_ROOMS, key, None).await {
-                if let Ok(r) = serde_json::from_slice::<Room>(&entry.value) {
-                    rooms.push(r);
+            if let Ok(entry) = store.get(NS_STREAMS, key, None).await {
+                if let Ok(r) = serde_json::from_slice::<Stream>(&entry.value) {
+                    streams.push(r);
                 }
             }
         }
@@ -59,20 +59,20 @@ pub async fn list_by_tenant<S: Store>(
         }
         cursor = page.cursor;
     }
-    Ok(rooms)
+    Ok(streams)
 }
 
-/// List all rooms across all tenants (for startup hydration).
-pub async fn list_all<S: Store>(store: &S) -> Result<Vec<(String, Room)>, anyhow::Error> {
+/// List all streams across all tenants (for startup hydration).
+pub async fn list_all<S: Store>(store: &S) -> Result<Vec<(String, Stream)>, anyhow::Error> {
     let mut results = Vec::new();
     let mut cursor = None;
     loop {
-        let page = store.list(NS_ROOMS, None, cursor.as_deref(), 100).await?;
+        let page = store.list(NS_STREAMS, None, cursor.as_deref(), 100).await?;
         for key in &page.keys {
-            if let Ok(entry) = store.get(NS_ROOMS, key, None).await {
+            if let Ok(entry) = store.get(NS_STREAMS, key, None).await {
                 let key_str = String::from_utf8_lossy(key);
                 if let Some((tid, _)) = key_str.split_once('/') {
-                    if let Ok(r) = serde_json::from_slice::<Room>(&entry.value) {
+                    if let Ok(r) = serde_json::from_slice::<Stream>(&entry.value) {
                         results.push((tid.to_string(), r));
                     }
                 }
@@ -94,68 +94,68 @@ pub async fn update<S: Store>(
     meta: Option<&serde_json::Value>,
     archived: Option<bool>,
 ) -> Result<bool, anyhow::Error> {
-    let key = room_key(tenant_id, id);
-    let entry = match store.get(NS_ROOMS, &key, None).await {
+    let key = stream_key(tenant_id, id);
+    let entry = match store.get(NS_STREAMS, &key, None).await {
         Ok(e) => e,
         Err(shroudb_store::StoreError::NotFound) => return Ok(false),
         Err(e) => return Err(e.into()),
     };
-    let mut room: Room = serde_json::from_slice(&entry.value)?;
+    let mut stream: Stream = serde_json::from_slice(&entry.value)?;
     if let Some(n) = name {
-        room.name = n.to_string();
+        stream.name = n.to_string();
     }
     if let Some(m) = meta {
-        room.meta = Some(m.clone());
+        stream.meta = Some(m.clone());
     }
     if let Some(a) = archived {
-        room.archived = a;
+        stream.archived = a;
     }
-    let value = serde_json::to_vec(&room)?;
-    store.put(NS_ROOMS, &key, &value, None).await?;
+    let value = serde_json::to_vec(&stream)?;
+    store.put(NS_STREAMS, &key, &value, None).await?;
     Ok(true)
 }
 
 pub async fn delete<S: Store>(store: &S, tenant_id: &str, id: &str) -> Result<bool, anyhow::Error> {
-    let key = room_key(tenant_id, id);
-    match store.delete(NS_ROOMS, &key).await {
+    let key = stream_key(tenant_id, id);
+    match store.delete(NS_STREAMS, &key).await {
         Ok(_) => Ok(true),
         Err(shroudb_store::StoreError::NotFound) => Ok(false),
         Err(e) => Err(e.into()),
     }
-    // Note: members, messages, cursors cleanup should be handled by caller
+    // Note: members, events, cursors cleanup should be handled by caller
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use herald_core::room::RoomId;
+    use herald_core::stream::StreamId;
 
     #[tokio::test]
-    async fn test_room_crud() {
+    async fn test_stream_crud() {
         let store = crate::store::test_store().await;
-        let room = Room {
-            id: RoomId("r1".into()),
-            name: "Room 1".into(),
+        let stream = Stream {
+            id: StreamId("r1".into()),
+            name: "Stream 1".into(),
             meta: None,
             archived: false,
             public: false,
             created_at: 1000,
         };
-        insert(&*store, "t1", &room).await.unwrap();
+        insert(&*store, "t1", &stream).await.unwrap();
 
         let got = get(&*store, "t1", "r1").await.unwrap().unwrap();
-        assert_eq!(got.name, "Room 1");
+        assert_eq!(got.name, "Stream 1");
 
         assert!(get(&*store, "t1", "nope").await.unwrap().is_none());
         assert!(get(&*store, "t2", "r1").await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn test_room_list_by_tenant() {
+    async fn test_stream_list_by_tenant() {
         let store = crate::store::test_store().await;
         for i in 0..3 {
-            let r = Room {
-                id: RoomId(format!("r{i}")),
+            let r = Stream {
+                id: StreamId(format!("r{i}")),
                 name: format!("R{i}"),
                 meta: None,
                 archived: false,
@@ -164,8 +164,8 @@ mod tests {
             };
             insert(&*store, "t1", &r).await.unwrap();
         }
-        let r = Room {
-            id: RoomId("other".into()),
+        let r = Stream {
+            id: StreamId("other".into()),
             name: "Other".into(),
             meta: None,
             archived: false,
@@ -174,18 +174,18 @@ mod tests {
         };
         insert(&*store, "t2", &r).await.unwrap();
 
-        let rooms = list_by_tenant(&*store, "t1").await.unwrap();
-        assert_eq!(rooms.len(), 3);
+        let streams = list_by_tenant(&*store, "t1").await.unwrap();
+        assert_eq!(streams.len(), 3);
 
-        let rooms = list_by_tenant(&*store, "t2").await.unwrap();
-        assert_eq!(rooms.len(), 1);
+        let streams = list_by_tenant(&*store, "t2").await.unwrap();
+        assert_eq!(streams.len(), 1);
     }
 
     #[tokio::test]
-    async fn test_room_update_and_archive() {
+    async fn test_stream_update_and_archive() {
         let store = crate::store::test_store().await;
-        let r = Room {
-            id: RoomId("r1".into()),
+        let r = Stream {
+            id: StreamId("r1".into()),
             name: "Old".into(),
             meta: None,
             archived: false,
@@ -203,10 +203,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_room_delete() {
+    async fn test_stream_delete() {
         let store = crate::store::test_store().await;
-        let r = Room {
-            id: RoomId("r1".into()),
+        let r = Stream {
+            id: StreamId("r1".into()),
             name: "R".into(),
             meta: None,
             archived: false,
@@ -220,18 +220,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_room_list_all() {
+    async fn test_stream_list_all() {
         let store = crate::store::test_store().await;
-        let r1 = Room {
-            id: RoomId("r1".into()),
+        let r1 = Stream {
+            id: StreamId("r1".into()),
             name: "R1".into(),
             meta: None,
             archived: false,
             public: false,
             created_at: 1000,
         };
-        let r2 = Room {
-            id: RoomId("r2".into()),
+        let r2 = Stream {
+            id: StreamId("r2".into()),
             name: "R2".into(),
             meta: None,
             archived: false,

@@ -17,9 +17,9 @@ type Options struct {
 
 // HeraldAdmin is the Herald HTTP admin client.
 type HeraldAdmin struct {
-	Rooms    *RoomNamespace
+	Streams  *StreamNamespace
 	Members  *MemberNamespace
-	Messages *MessageNamespace
+	Events   *EventNamespace
 	Presence *PresenceNamespace
 	Tenants  *TenantNamespace
 	Blocks   *BlockNamespace
@@ -31,9 +31,9 @@ type HeraldAdmin struct {
 func New(opts Options) *HeraldAdmin {
 	t := newTransport(opts.URL, opts.Token)
 	return &HeraldAdmin{
-		Rooms:     &RoomNamespace{t: t},
+		Streams:   &StreamNamespace{t: t},
 		Members:   &MemberNamespace{t: t},
-		Messages:  &MessageNamespace{t: t},
+		Events:    &EventNamespace{t: t},
 		Presence:  &PresenceNamespace{t: t},
 		Tenants:   &TenantNamespace{t: t},
 		Blocks:    &BlockNamespace{t: t},
@@ -54,16 +54,16 @@ func (h *HeraldAdmin) Health(ctx context.Context) (*HealthResponse, error) {
 	return &resp, nil
 }
 
-// RoomNamespace provides room management operations.
-type RoomNamespace struct{ t *httpTransport }
+// StreamNamespace provides stream management operations.
+type StreamNamespace struct{ t *httpTransport }
 
-// RoomCreateOptions are optional parameters for room creation.
-type RoomCreateOptions struct {
+// StreamCreateOptions are optional parameters for stream creation.
+type StreamCreateOptions struct {
 	Meta   any  `json:"meta,omitempty"`
 	Public bool `json:"public,omitempty"`
 }
 
-func (ns *RoomNamespace) Create(ctx context.Context, id, name string, opts *RoomCreateOptions) (*Room, error) {
+func (ns *StreamNamespace) Create(ctx context.Context, id, name string, opts *StreamCreateOptions) (*Stream, error) {
 	body := map[string]any{"id": id, "name": name}
 	if opts != nil {
 		if opts.Meta != nil {
@@ -73,30 +73,30 @@ func (ns *RoomNamespace) Create(ctx context.Context, id, name string, opts *Room
 			body["public"] = true
 		}
 	}
-	data, err := ns.t.request(ctx, "POST", "/rooms", body)
+	data, err := ns.t.request(ctx, "POST", "/streams", body)
 	if err != nil {
 		return nil, err
 	}
-	var room Room
-	if err := json.Unmarshal(data, &room); err != nil {
+	var stream Stream
+	if err := json.Unmarshal(data, &stream); err != nil {
 		return nil, err
 	}
-	return &room, nil
+	return &stream, nil
 }
 
-func (ns *RoomNamespace) Get(ctx context.Context, id string) (*Room, error) {
-	data, err := ns.t.request(ctx, "GET", "/rooms/"+url.PathEscape(id), nil)
+func (ns *StreamNamespace) Get(ctx context.Context, id string) (*Stream, error) {
+	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
-	var room Room
-	if err := json.Unmarshal(data, &room); err != nil {
+	var stream Stream
+	if err := json.Unmarshal(data, &stream); err != nil {
 		return nil, err
 	}
-	return &room, nil
+	return &stream, nil
 }
 
-func (ns *RoomNamespace) Update(ctx context.Context, id string, name *string, meta any, archived *bool) error {
+func (ns *StreamNamespace) Update(ctx context.Context, id string, name *string, meta any, archived *bool) error {
 	body := map[string]any{}
 	if name != nil {
 		body["name"] = *name
@@ -107,38 +107,38 @@ func (ns *RoomNamespace) Update(ctx context.Context, id string, name *string, me
 	if archived != nil {
 		body["archived"] = *archived
 	}
-	_, err := ns.t.request(ctx, "PATCH", "/rooms/"+url.PathEscape(id), body)
+	_, err := ns.t.request(ctx, "PATCH", "/streams/"+url.PathEscape(id), body)
 	return err
 }
 
-func (ns *RoomNamespace) List(ctx context.Context) ([]Room, error) {
-	data, err := ns.t.request(ctx, "GET", "/rooms", nil)
+func (ns *StreamNamespace) List(ctx context.Context) ([]Stream, error) {
+	data, err := ns.t.request(ctx, "GET", "/streams", nil)
 	if err != nil {
 		return nil, err
 	}
 	var resp struct {
-		Rooms []Room `json:"rooms"`
+		Streams []Stream `json:"streams"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	return resp.Rooms, nil
+	return resp.Streams, nil
 }
 
-func (ns *RoomNamespace) Delete(ctx context.Context, id string) error {
-	_, err := ns.t.request(ctx, "DELETE", "/rooms/"+url.PathEscape(id), nil)
+func (ns *StreamNamespace) Delete(ctx context.Context, id string) error {
+	_, err := ns.t.request(ctx, "DELETE", "/streams/"+url.PathEscape(id), nil)
 	return err
 }
 
 // MemberNamespace provides member management operations.
 type MemberNamespace struct{ t *httpTransport }
 
-func (ns *MemberNamespace) Add(ctx context.Context, roomID, userID string, role string) (*Member, error) {
+func (ns *MemberNamespace) Add(ctx context.Context, streamID, userID string, role string) (*Member, error) {
 	body := map[string]string{"user_id": userID}
 	if role != "" {
 		body["role"] = role
 	}
-	data, err := ns.t.request(ctx, "POST", "/rooms/"+url.PathEscape(roomID)+"/members", body)
+	data, err := ns.t.request(ctx, "POST", "/streams/"+url.PathEscape(streamID)+"/members", body)
 	if err != nil {
 		return nil, err
 	}
@@ -149,8 +149,8 @@ func (ns *MemberNamespace) Add(ctx context.Context, roomID, userID string, role 
 	return &m, nil
 }
 
-func (ns *MemberNamespace) List(ctx context.Context, roomID string) ([]Member, error) {
-	data, err := ns.t.request(ctx, "GET", "/rooms/"+url.PathEscape(roomID)+"/members", nil)
+func (ns *MemberNamespace) List(ctx context.Context, streamID string) ([]Member, error) {
+	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(streamID)+"/members", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -163,27 +163,27 @@ func (ns *MemberNamespace) List(ctx context.Context, roomID string) ([]Member, e
 	return resp.Members, nil
 }
 
-func (ns *MemberNamespace) Remove(ctx context.Context, roomID, userID string) error {
-	_, err := ns.t.request(ctx, "DELETE", "/rooms/"+url.PathEscape(roomID)+"/members/"+url.PathEscape(userID), nil)
+func (ns *MemberNamespace) Remove(ctx context.Context, streamID, userID string) error {
+	_, err := ns.t.request(ctx, "DELETE", "/streams/"+url.PathEscape(streamID)+"/members/"+url.PathEscape(userID), nil)
 	return err
 }
 
-func (ns *MemberNamespace) Update(ctx context.Context, roomID, userID, role string) error {
-	_, err := ns.t.request(ctx, "PATCH", "/rooms/"+url.PathEscape(roomID)+"/members/"+url.PathEscape(userID), map[string]string{"role": role})
+func (ns *MemberNamespace) Update(ctx context.Context, streamID, userID, role string) error {
+	_, err := ns.t.request(ctx, "PATCH", "/streams/"+url.PathEscape(streamID)+"/members/"+url.PathEscape(userID), map[string]string{"role": role})
 	return err
 }
 
-// MessageNamespace provides message operations.
-type MessageNamespace struct{ t *httpTransport }
+// EventNamespace provides event operations.
+type EventNamespace struct{ t *httpTransport }
 
-// MessageSendOptions are optional parameters for sending a message.
-type MessageSendOptions struct {
+// EventPublishOptions are optional parameters for publishing an event.
+type EventPublishOptions struct {
 	Meta              any    `json:"meta,omitempty"`
 	ParentID          string `json:"parent_id,omitempty"`
 	ExcludeConnection string `json:"exclude_connection,omitempty"`
 }
 
-func (ns *MessageNamespace) Send(ctx context.Context, roomID, sender, body string, opts *MessageSendOptions) (*MessageSendResult, error) {
+func (ns *EventNamespace) Publish(ctx context.Context, streamID, sender, body string, opts *EventPublishOptions) (*EventPublishResult, error) {
 	req := map[string]any{"sender": sender, "body": body}
 	if opts != nil {
 		if opts.Meta != nil {
@@ -196,29 +196,29 @@ func (ns *MessageNamespace) Send(ctx context.Context, roomID, sender, body strin
 			req["exclude_connection"] = opts.ExcludeConnection
 		}
 	}
-	data, err := ns.t.request(ctx, "POST", "/rooms/"+url.PathEscape(roomID)+"/messages", req)
+	data, err := ns.t.request(ctx, "POST", "/streams/"+url.PathEscape(streamID)+"/events", req)
 	if err != nil {
 		return nil, err
 	}
-	var result MessageSendResult
+	var result EventPublishResult
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func (ns *MessageNamespace) Delete(ctx context.Context, roomID, messageID string) error {
-	_, err := ns.t.request(ctx, "DELETE", "/rooms/"+url.PathEscape(roomID)+"/messages/"+url.PathEscape(messageID), nil)
+func (ns *EventNamespace) Delete(ctx context.Context, streamID, eventID string) error {
+	_, err := ns.t.request(ctx, "DELETE", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID), nil)
 	return err
 }
 
-func (ns *MessageNamespace) Edit(ctx context.Context, roomID, messageID, body string) error {
-	_, err := ns.t.request(ctx, "PATCH", "/rooms/"+url.PathEscape(roomID)+"/messages/"+url.PathEscape(messageID), map[string]string{"body": body})
+func (ns *EventNamespace) Edit(ctx context.Context, streamID, eventID, body string) error {
+	_, err := ns.t.request(ctx, "PATCH", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID), map[string]string{"body": body})
 	return err
 }
 
-func (ns *MessageNamespace) GetReactions(ctx context.Context, roomID, messageID string) ([]ReactionSummary, error) {
-	data, err := ns.t.request(ctx, "GET", "/rooms/"+url.PathEscape(roomID)+"/messages/"+url.PathEscape(messageID)+"/reactions", nil)
+func (ns *EventNamespace) GetReactions(ctx context.Context, streamID, eventID string) ([]ReactionSummary, error) {
+	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID)+"/reactions", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +231,7 @@ func (ns *MessageNamespace) GetReactions(ctx context.Context, roomID, messageID 
 	return resp.Reactions, nil
 }
 
-func (ns *MessageNamespace) Trigger(ctx context.Context, roomID, event string, data any, excludeConnection *uint64) error {
+func (ns *EventNamespace) Trigger(ctx context.Context, streamID, event string, data any, excludeConnection *uint64) error {
 	body := map[string]any{"event": event}
 	if data != nil {
 		body["data"] = data
@@ -239,20 +239,20 @@ func (ns *MessageNamespace) Trigger(ctx context.Context, roomID, event string, d
 	if excludeConnection != nil {
 		body["exclude_connection"] = *excludeConnection
 	}
-	_, err := ns.t.request(ctx, "POST", "/rooms/"+url.PathEscape(roomID)+"/trigger", body)
+	_, err := ns.t.request(ctx, "POST", "/streams/"+url.PathEscape(streamID)+"/trigger", body)
 	return err
 }
 
-// MessageListOptions are optional parameters for listing messages.
-type MessageListOptions struct {
+// EventListOptions are optional parameters for listing events.
+type EventListOptions struct {
 	Before *uint64
 	After  *uint64
 	Limit  *int
 	Thread *string
 }
 
-func (ns *MessageNamespace) List(ctx context.Context, roomID string, opts *MessageListOptions) (*MessageList, error) {
-	path := "/rooms/" + url.PathEscape(roomID) + "/messages"
+func (ns *EventNamespace) List(ctx context.Context, streamID string, opts *EventListOptions) (*EventList, error) {
+	path := "/streams/" + url.PathEscape(streamID) + "/events"
 	params := url.Values{}
 	if opts != nil {
 		if opts.Before != nil {
@@ -275,24 +275,24 @@ func (ns *MessageNamespace) List(ctx context.Context, roomID string, opts *Messa
 	if err != nil {
 		return nil, err
 	}
-	var list MessageList
+	var list EventList
 	if err := json.Unmarshal(data, &list); err != nil {
 		return nil, err
 	}
 	return &list, nil
 }
 
-func (ns *MessageNamespace) Search(ctx context.Context, roomID, query string, limit *int) (*MessageList, error) {
+func (ns *EventNamespace) Search(ctx context.Context, streamID, query string, limit *int) (*EventList, error) {
 	params := url.Values{"q": {query}}
 	if limit != nil {
 		params.Set("limit", fmt.Sprint(*limit))
 	}
-	path := "/rooms/" + url.PathEscape(roomID) + "/messages/search?" + params.Encode()
+	path := "/streams/" + url.PathEscape(streamID) + "/events/search?" + params.Encode()
 	data, err := ns.t.request(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
-	var list MessageList
+	var list EventList
 	if err := json.Unmarshal(data, &list); err != nil {
 		return nil, err
 	}
@@ -314,8 +314,8 @@ func (ns *PresenceNamespace) GetUser(ctx context.Context, userID string) (*UserP
 	return &p, nil
 }
 
-func (ns *PresenceNamespace) GetRoom(ctx context.Context, roomID string) ([]MemberPresenceEntry, error) {
-	data, err := ns.t.request(ctx, "GET", "/rooms/"+url.PathEscape(roomID)+"/presence", nil)
+func (ns *PresenceNamespace) GetStream(ctx context.Context, streamID string) ([]MemberPresenceEntry, error) {
+	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(streamID)+"/presence", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -328,8 +328,8 @@ func (ns *PresenceNamespace) GetRoom(ctx context.Context, roomID string) ([]Memb
 	return resp.Members, nil
 }
 
-func (ns *PresenceNamespace) GetCursors(ctx context.Context, roomID string) ([]Cursor, error) {
-	data, err := ns.t.request(ctx, "GET", "/rooms/"+url.PathEscape(roomID)+"/cursors", nil)
+func (ns *PresenceNamespace) GetCursors(ctx context.Context, streamID string) ([]Cursor, error) {
+	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(streamID)+"/cursors", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -353,13 +353,13 @@ func (h *HeraldAdmin) Connections(ctx context.Context) (json.RawMessage, error) 
 	return json.RawMessage(data), nil
 }
 
-// EventListOptions are optional parameters for listing events.
-type EventListOptions struct {
+// AdminEventListOptions are optional parameters for listing admin events.
+type AdminEventListOptions struct {
 	Limit *int
 }
 
-// Events returns recent server events from the admin endpoint.
-func (h *HeraldAdmin) Events(ctx context.Context, opts *EventListOptions) (json.RawMessage, error) {
+// AdminEvents returns recent server events from the admin endpoint.
+func (h *HeraldAdmin) AdminEvents(ctx context.Context, opts *AdminEventListOptions) (json.RawMessage, error) {
 	path := "/admin/events"
 	if opts != nil && opts.Limit != nil {
 		path += fmt.Sprintf("?limit=%d", *opts.Limit)
@@ -507,18 +507,18 @@ func (ns *TenantNamespace) ListTokens(ctx context.Context, tenantID string) ([]s
 	return resp.Tokens, nil
 }
 
-func (ns *TenantNamespace) ListRooms(ctx context.Context, tenantID string) ([]Room, error) {
-	data, err := ns.t.request(ctx, "GET", "/admin/tenants/"+url.PathEscape(tenantID)+"/rooms", nil)
+func (ns *TenantNamespace) ListStreams(ctx context.Context, tenantID string) ([]Stream, error) {
+	data, err := ns.t.request(ctx, "GET", "/admin/tenants/"+url.PathEscape(tenantID)+"/streams", nil)
 	if err != nil {
 		return nil, err
 	}
 	var resp struct {
-		Rooms []Room `json:"rooms"`
+		Streams []Stream `json:"streams"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	return resp.Rooms, nil
+	return resp.Streams, nil
 }
 
 // BlockNamespace provides user blocking operations.

@@ -9,15 +9,15 @@ import type {
   HeraldEvent,
   HeraldEventMap,
   MemberEvent,
-  MessageAck,
-  MessageDeleted,
-  MessageEdited,
-  MessageNew,
-  MessagesBatch,
+  EventAck,
+  EventDeleted,
+  EventEdited,
+  EventNew,
+  EventsBatch,
   PresenceChanged,
   ReactionChanged,
-  RoomEvent,
-  RoomSubscriberCount,
+  StreamEvent,
+  StreamSubscriberCount,
   ServerFrame,
   SubscribedPayload,
   TypingEvent,
@@ -35,7 +35,7 @@ function nextRef(): string {
  * Herald WebSocket client for browsers.
  *
  * Connects to a Herald server, authenticates with a JWT, and provides
- * methods for subscribing to rooms, sending messages, and receiving
+ * methods for subscribing to streams, publishing events, and receiving
  * real-time events.
  */
 export class HeraldClient {
@@ -47,8 +47,8 @@ export class HeraldClient {
   private _connectionId: number | null = null;
   private _initialConnectDone = false;
 
-  // Track subscribed rooms for re-subscribe on reconnect
-  private subscribedRooms = new Set<string>();
+  // Track subscribed streams for re-subscribe on reconnect
+  private subscribedStreams = new Set<string>();
 
   // Pending request/response correlation
   private pending = new Map<
@@ -60,7 +60,7 @@ export class HeraldClient {
   private pendingSubscribes = new Map<
     string,
     {
-      rooms: string[];
+      streams: string[];
       results: SubscribedPayload[];
       resolve: (v: SubscribedPayload[]) => void;
     }
@@ -108,7 +108,7 @@ export class HeraldClient {
 
   disconnect(): void {
     this._initialConnectDone = false;
-    this.subscribedRooms.clear();
+    this.subscribedStreams.clear();
     this.e2ee?.clear();
     this.connection.close();
     this.pending.clear();
@@ -117,33 +117,33 @@ export class HeraldClient {
 
   // ── E2EE ──────────────────────────────────────────────────────────
 
-  /** Set an E2EE session for a room. Messages to/from this room will be encrypted. */
-  setE2EESession(room: string, session: import("./crypto.js").E2EESession): void {
+  /** Set an E2EE session for a stream. Events to/from this stream will be encrypted. */
+  setE2EESession(stream: string, session: import("./crypto.js").E2EESession): void {
     if (!this.e2ee) {
       throw new Error("E2EE not enabled. Set e2ee: true in HeraldClientOptions.");
     }
-    this.e2ee.setSession(room, session);
+    this.e2ee.setSession(stream, session);
   }
 
-  /** Remove an E2EE session for a room. */
-  removeE2EESession(room: string): void {
-    this.e2ee?.removeSession(room);
+  /** Remove an E2EE session for a stream. */
+  removeE2EESession(stream: string): void {
+    this.e2ee?.removeSession(stream);
   }
 
-  // ── Rooms ──────────────────────────────────────────────────────────
+  // ── Streams ────────────────────────────────────────────────────────
 
-  async subscribe(rooms: string[]): Promise<SubscribedPayload[]> {
+  async subscribe(streams: string[]): Promise<SubscribedPayload[]> {
     const ref = nextRef();
     return new Promise((resolve, reject) => {
-      this.pendingSubscribes.set(ref, { rooms: [...rooms], results: [], resolve });
+      this.pendingSubscribes.set(ref, { streams: [...streams], results: [], resolve });
       this.connection.send({
         type: "subscribe",
         ref,
-        payload: { rooms },
+        payload: { streams },
       });
       // Track for re-subscribe on reconnect
-      for (const room of rooms) {
-        this.subscribedRooms.add(room);
+      for (const stream of streams) {
+        this.subscribedStreams.add(stream);
       }
       // Timeout after 10 seconds
       setTimeout(() => {
@@ -155,66 +155,66 @@ export class HeraldClient {
     });
   }
 
-  unsubscribe(rooms: string[]): void {
-    for (const room of rooms) {
-      this.subscribedRooms.delete(room);
+  unsubscribe(streams: string[]): void {
+    for (const stream of streams) {
+      this.subscribedStreams.delete(stream);
     }
     this.connection.send({
       type: "unsubscribe",
-      payload: { rooms },
+      payload: { streams },
     });
   }
 
-  // ── Messages ───────────────────────────────────────────────────────
+  // ── Events ─────────────────────────────────────────────────────────
 
-  async send(room: string, body: string, options?: { meta?: unknown; parentId?: string }): Promise<MessageAck> {
+  async publish(stream: string, body: string, options?: { meta?: unknown; parentId?: string }): Promise<EventAck> {
     const ref = nextRef();
     const { body: finalBody, meta: finalMeta } = this.e2ee
-      ? this.e2ee.encryptOutgoing(room, body, options?.meta)
+      ? this.e2ee.encryptOutgoing(stream, body, options?.meta)
       : { body, meta: options?.meta };
     return this.request(ref, {
-      type: "message.send",
+      type: "event.publish",
       ref,
-      payload: { room, body: finalBody, meta: finalMeta, parent_id: options?.parentId },
-    }) as Promise<MessageAck>;
+      payload: { stream, body: finalBody, meta: finalMeta, parent_id: options?.parentId },
+    }) as Promise<EventAck>;
   }
 
-  async editMessage(room: string, id: string, body: string): Promise<MessageAck> {
+  async editEvent(stream: string, id: string, body: string): Promise<EventAck> {
     const ref = nextRef();
     const { body: finalBody } = this.e2ee
-      ? this.e2ee.encryptOutgoing(room, body)
+      ? this.e2ee.encryptOutgoing(stream, body)
       : { body };
     return this.request(ref, {
-      type: "message.edit",
+      type: "event.edit",
       ref,
-      payload: { room, id, body: finalBody },
-    }) as Promise<MessageAck>;
+      payload: { stream, id, body: finalBody },
+    }) as Promise<EventAck>;
   }
 
-  addReaction(room: string, messageId: string, emoji: string): void {
+  addReaction(stream: string, eventId: string, emoji: string): void {
     this.connection.send({
       type: "reaction.add",
-      payload: { room, message_id: messageId, emoji },
+      payload: { stream, event_id: eventId, emoji },
     });
   }
 
-  removeReaction(room: string, messageId: string, emoji: string): void {
+  removeReaction(stream: string, eventId: string, emoji: string): void {
     this.connection.send({
       type: "reaction.remove",
-      payload: { room, message_id: messageId, emoji },
+      payload: { stream, event_id: eventId, emoji },
     });
   }
 
   async fetch(
-    room: string,
+    stream: string,
     options?: { before?: number; limit?: number },
-  ): Promise<MessagesBatch> {
+  ): Promise<EventsBatch> {
     const ref = nextRef();
     return this.request(ref, {
-      type: "messages.fetch",
+      type: "events.fetch",
       ref,
-      payload: { room, ...options },
-    }) as Promise<MessagesBatch>;
+      payload: { stream, ...options },
+    }) as Promise<EventsBatch>;
   }
 
   // ── Presence ───────────────────────────────────────────────────────
@@ -228,47 +228,47 @@ export class HeraldClient {
 
   // ── Cursors ────────────────────────────────────────────────────────
 
-  updateCursor(room: string, seq: number): void {
+  updateCursor(stream: string, seq: number): void {
     this.connection.send({
       type: "cursor.update",
-      payload: { room, seq },
+      payload: { stream, seq },
     });
   }
 
   // ── Typing ─────────────────────────────────────────────────────────
 
-  startTyping(room: string): void {
+  startTyping(stream: string): void {
     this.connection.send({
       type: "typing.start",
-      payload: { room },
+      payload: { stream },
     });
   }
 
-  stopTyping(room: string): void {
+  stopTyping(stream: string): void {
     this.connection.send({
       type: "typing.stop",
-      payload: { room },
+      payload: { stream },
     });
   }
 
   // ── Ephemeral Events ────────────────────────────────────────────────
 
   /** Trigger an ephemeral event (not persisted). */
-  trigger(room: string, event: string, data?: unknown): void {
+  trigger(stream: string, event: string, data?: unknown): void {
     this.connection.send({
       type: "event.trigger",
-      payload: { room, event, data },
+      payload: { stream, event, data },
     });
   }
 
-  /** Delete a message. */
-  async deleteMessage(room: string, id: string): Promise<MessageAck> {
+  /** Delete an event. */
+  async deleteEvent(stream: string, id: string): Promise<EventAck> {
     const ref = nextRef();
     return this.request(ref, {
-      type: "message.delete",
+      type: "event.delete",
       ref,
-      payload: { room, id },
-    }) as Promise<MessageAck>;
+      payload: { stream, id },
+    }) as Promise<EventAck>;
   }
 
   // ── Events ─────────────────────────────────────────────────────────
@@ -376,7 +376,7 @@ export class HeraldClient {
         if (ref && this.pendingSubscribes.has(ref)) {
           const batch = this.pendingSubscribes.get(ref)!;
           batch.results.push(payload);
-          if (batch.results.length >= batch.rooms.length) {
+          if (batch.results.length >= batch.streams.length) {
             batch.resolve(batch.results);
             this.pendingSubscribes.delete(ref);
           }
@@ -384,8 +384,8 @@ export class HeraldClient {
         break;
       }
 
-      case "message.new": {
-        const msg = p as unknown as MessageNew;
+      case "event.new": {
+        const msg = p as unknown as EventNew;
         // Track for reconnect catch-up dedup
         if (msg.sent_at && msg.sent_at > (this.lastSeenAt ?? 0)) {
           this.lastSeenAt = msg.sent_at;
@@ -400,30 +400,30 @@ export class HeraldClient {
         }
         // E2EE decrypt
         if (this.e2ee) {
-          const result = this.e2ee.decryptIncoming(msg.room, msg.body, msg.meta);
+          const result = this.e2ee.decryptIncoming(msg.stream, msg.body, msg.meta);
           msg.body = result.body;
           msg.meta = result.meta;
         }
-        this.emit("message", msg);
+        this.emit("event", msg);
         break;
       }
 
-      case "message.ack":
+      case "event.ack":
         if (ref && this.pending.has(ref)) {
           this.pending.get(ref)!.resolve(p);
           this.pending.delete(ref);
         }
         break;
 
-      case "messages.batch":
+      case "events.batch":
         if (ref && this.pending.has(ref)) {
           // E2EE decrypt batch
           if (this.e2ee && p) {
-            const batch = p as unknown as MessagesBatch;
-            for (const msg of batch.messages) {
-              const result = this.e2ee.decryptIncoming(batch.room, msg.body, msg.meta);
-              msg.body = result.body;
-              msg.meta = result.meta;
+            const batch = p as unknown as EventsBatch;
+            for (const evt of batch.events) {
+              const result = this.e2ee.decryptIncoming(batch.stream, evt.body, evt.meta);
+              evt.body = result.body;
+              evt.meta = result.meta;
             }
           }
           this.pending.get(ref)!.resolve(p);
@@ -451,25 +451,25 @@ export class HeraldClient {
         this.emit("typing", p as unknown as TypingEvent);
         break;
 
-      case "room.updated":
-        this.emit("room.updated", p as unknown as RoomEvent);
+      case "stream.updated":
+        this.emit("stream.updated", p as unknown as StreamEvent);
         break;
 
-      case "room.deleted":
-        this.emit("room.deleted", p as unknown as RoomEvent);
+      case "stream.deleted":
+        this.emit("stream.deleted", p as unknown as StreamEvent);
         break;
 
-      case "message.deleted":
-        this.emit("message.deleted", p as unknown as MessageDeleted);
+      case "event.deleted":
+        this.emit("event.deleted", p as unknown as EventDeleted);
         break;
 
-      case "message.edited": {
-        const edited = p as unknown as MessageEdited;
+      case "event.edited": {
+        const edited = p as unknown as EventEdited;
         if (this.e2ee) {
-          const result = this.e2ee.decryptIncoming(edited.room, edited.body);
+          const result = this.e2ee.decryptIncoming(edited.stream, edited.body);
           edited.body = result.body;
         }
-        this.emit("message.edited", edited);
+        this.emit("event.edited", edited);
         break;
       }
 
@@ -481,8 +481,8 @@ export class HeraldClient {
         this.emit("event.received", p as unknown as EventReceived);
         break;
 
-      case "room.subscriber_count":
-        this.emit("room.subscriber_count", p as unknown as RoomSubscriberCount);
+      case "stream.subscriber_count":
+        this.emit("stream.subscriber_count", p as unknown as StreamSubscriberCount);
         break;
 
       case "watchlist.online":
@@ -551,14 +551,14 @@ export class HeraldClient {
       // Re-authenticate with the current token
       await this.authenticate();
 
-      // Re-subscribe to all previously subscribed rooms
-      if (this.subscribedRooms.size > 0) {
-        const rooms = Array.from(this.subscribedRooms);
+      // Re-subscribe to all previously subscribed streams
+      if (this.subscribedStreams.size > 0) {
+        const streams = Array.from(this.subscribedStreams);
         // Fire-and-forget subscribe — don't block on it, just send the frame.
         // The subscribed responses will come through handleFrame normally.
         this.connection.send({
           type: "subscribe",
-          payload: { rooms },
+          payload: { streams },
         });
       }
     } catch {

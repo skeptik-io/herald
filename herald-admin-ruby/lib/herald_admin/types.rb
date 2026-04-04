@@ -1,13 +1,13 @@
 # frozen_string_literal: true
 
 module HeraldAdmin
-  Room = Struct.new(:id, :name, :meta, :public, :archived, :created_at, keyword_init: true)
-  Member = Struct.new(:room_id, :user_id, :role, :joined_at, keyword_init: true)
-  Message = Struct.new(:id, :room, :seq, :sender, :body, :meta, :parent_id, :edited_at, :sent_at, keyword_init: true)
-  MessageList = Struct.new(:messages, :has_more, keyword_init: true)
-  MessageSendResult = Struct.new(:id, :seq, :sent_at, keyword_init: true)
+  Stream = Struct.new(:id, :name, :meta, :public, :archived, :created_at, keyword_init: true)
+  Member = Struct.new(:stream_id, :user_id, :role, :joined_at, keyword_init: true)
+  Event = Struct.new(:id, :stream, :seq, :sender, :body, :meta, :parent_id, :edited_at, :sent_at, keyword_init: true)
+  EventList = Struct.new(:events, :has_more, keyword_init: true)
+  EventPublishResult = Struct.new(:id, :seq, :sent_at, keyword_init: true)
   UserPresence = Struct.new(:user_id, :status, :connections, keyword_init: true)
   MemberPresenceEntry = Struct.new(:user_id, :status, keyword_init: true)
   Cursor = Struct.new(:user_id, :seq, keyword_init: true)
-  HealthResponse = Struct.new(:status, :connections, :rooms, :uptime_secs, keyword_init: true)
+  HealthResponse = Struct.new(:status, :connections, :streams, :uptime_secs, keyword_init: true)
 end

@@ -1,4 +1,4 @@
-export interface Room {
+export interface Stream {
   id: string;
   name: string;
   meta?: unknown;
@@ -8,15 +8,15 @@ export interface Room {
 }
 
 export interface Member {
-  room_id: string;
+  stream_id: string;
   user_id: string;
   role: string;
   joined_at: number;
 }
 
-export interface Message {
+export interface Event {
   id: string;
-  room: string;
+  stream: string;
   seq: number;
   sender: string;
   body: string;
@@ -36,8 +36,8 @@ export interface BlockList {
   blocked: string[];
 }
 
-export interface MessageList {
-  messages: Message[];
+export interface EventList {
+  events: Event[];
   has_more: boolean;
 }
 
@@ -60,11 +60,11 @@ export interface Cursor {
 export interface HealthResponse {
   status: string;
   connections: number;
-  rooms: number;
+  streams: number;
   uptime_secs: number;
 }
 
-export interface MessageSendResult {
+export interface EventPublishResult {
   id: string;
   seq: number;
   sent_at: number;

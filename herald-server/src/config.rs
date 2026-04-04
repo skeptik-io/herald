@@ -28,15 +28,15 @@ pub struct HeraldConfig {
 pub struct TenantLimitsConfig {
     #[serde(default = "default_max_connections_per_tenant")]
     pub max_connections_per_tenant: u32,
-    #[serde(default = "default_max_rooms_per_tenant")]
-    pub max_rooms_per_tenant: u32,
+    #[serde(default = "default_max_streams_per_tenant")]
+    pub max_streams_per_tenant: u32,
 }
 
 impl Default for TenantLimitsConfig {
     fn default() -> Self {
         Self {
             max_connections_per_tenant: default_max_connections_per_tenant(),
-            max_rooms_per_tenant: default_max_rooms_per_tenant(),
+            max_streams_per_tenant: default_max_streams_per_tenant(),
         }
     }
 }
@@ -44,7 +44,7 @@ impl Default for TenantLimitsConfig {
 fn default_max_connections_per_tenant() -> u32 {
     10000
 }
-fn default_max_rooms_per_tenant() -> u32 {
+fn default_max_streams_per_tenant() -> u32 {
     10000
 }
 
@@ -96,14 +96,14 @@ pub struct StoreConfig {
     #[serde(default = "default_store_path")]
     pub path: PathBuf,
     #[serde(default = "default_ttl_days")]
-    pub message_ttl_days: u32,
+    pub event_ttl_days: u32,
 }
 
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
             path: default_store_path(),
-            message_ttl_days: default_ttl_days(),
+            event_ttl_days: default_ttl_days(),
         }
     }
 }
@@ -219,8 +219,8 @@ impl HeraldConfig {
         }
 
         // Store config
-        if self.store.message_ttl_days == 0 {
-            anyhow::bail!("store.message_ttl_days must be > 0");
+        if self.store.event_ttl_days == 0 {
+            anyhow::bail!("store.event_ttl_days must be > 0");
         }
 
         // Auth config
@@ -311,7 +311,7 @@ impl HeraldConfig {
             },
             store: StoreConfig {
                 path: env_or("HERALD_DATA_DIR", "./herald-data").into(),
-                message_ttl_days: env("HERALD_MESSAGE_TTL_DAYS")
+                event_ttl_days: env("HERALD_EVENT_TTL_DAYS")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(7),
             },
@@ -364,7 +364,7 @@ impl HeraldConfig {
                 max_connections_per_tenant: env("HERALD_MAX_CONNS_PER_TENANT")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(10000),
-                max_rooms_per_tenant: env("HERALD_MAX_ROOMS_PER_TENANT")
+                max_streams_per_tenant: env("HERALD_MAX_STREAMS_PER_TENANT")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(10000),
             },

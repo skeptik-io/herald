@@ -18,23 +18,23 @@ const admin = new HeraldAdmin({
   token: 'your-api-token',
 });
 
-// Rooms
-const room = await admin.rooms.create('general', 'General Chat');
-const rooms = await admin.rooms.get('general');
-await admin.rooms.delete('general');
+// Streams
+const stream = await admin.streams.create('general', 'General Chat');
+const fetched = await admin.streams.get('general');
+await admin.streams.delete('general');
 
 // Members
 await admin.members.add('general', 'alice', 'owner');
 const members = await admin.members.list('general');
 await admin.members.remove('general', 'alice');
 
-// Messages
-await admin.messages.send('general', 'system', 'Welcome!');
-const history = await admin.messages.list('general', { limit: 50 });
+// Events
+await admin.events.publish('general', 'system', 'Welcome!');
+const history = await admin.events.list('general', { limit: 50 });
 
 // Presence
 const presence = await admin.presence.getUser('alice');
-const roomPresence = await admin.presence.getRoom('general');
+const streamPresence = await admin.presence.getStream('general');
 const cursors = await admin.presence.getCursors('general');
 
 // Health

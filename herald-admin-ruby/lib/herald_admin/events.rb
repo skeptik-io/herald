@@ -1,0 +1,71 @@
+# frozen_string_literal: true
+
+module HeraldAdmin
+  class EventNamespace
+    def initialize(transport)
+      @t = transport
+    end
+
+    def publish(stream_id, sender:, body:, meta: nil, parent_id: nil, exclude_connection: nil)
+      req = { sender: sender, body: body }
+      req[:meta] = meta if meta
+      req[:parent_id] = parent_id if parent_id
+      req[:exclude_connection] = exclude_connection if exclude_connection
+      data = @t.request("POST", "/streams/#{esc(stream_id)}/events", req)
+      EventPublishResult.new(id: data["id"], seq: data["seq"], sent_at: data["sent_at"])
+    end
+
+    def list(stream_id, before: nil, after: nil, limit: nil, thread: nil)
+      params = []
+      params << "before=#{before}" if before
+      params << "after=#{after}" if after
+      params << "limit=#{limit}" if limit
+      params << "thread=#{ERB::Util.url_encode(thread)}" if thread
+      qs = params.empty? ? "" : "?#{params.join("&")}"
+      data = @t.request("GET", "/streams/#{esc(stream_id)}/events#{qs}")
+      events = data["events"].map do |m|
+        Event.new(id: m["id"], stream: m["stream"] || stream_id, seq: m["seq"],
+                  sender: m["sender"], body: m["body"], meta: m["meta"],
+                  parent_id: m["parent_id"], edited_at: m["edited_at"], sent_at: m["sent_at"])
+      end
+      EventList.new(events: events, has_more: data["has_more"] || false)
+    end
+
+    def delete(stream_id, event_id)
+      @t.request("DELETE", "/streams/#{esc(stream_id)}/events/#{esc(event_id)}")
+    end
+
+    def edit(stream_id, event_id, body)
+      @t.request("PATCH", "/streams/#{esc(stream_id)}/events/#{esc(event_id)}", { body: body })
+    end
+
+    def get_reactions(stream_id, event_id)
+      data = @t.request("GET", "/streams/#{esc(stream_id)}/events/#{esc(event_id)}/reactions")
+      data["reactions"]
+    end
+
+    def trigger(stream_id, event, data: nil, exclude_connection: nil)
+      body = { event: event }
+      body[:data] = data if data
+      body[:exclude_connection] = exclude_connection if exclude_connection
+      @t.request("POST", "/streams/#{esc(stream_id)}/trigger", body)
+    end
+
+    def search(stream_id, query:, limit: nil)
+      params = ["q=#{ERB::Util.url_encode(query)}"]
+      params << "limit=#{limit}" if limit
+      qs = params.join("&")
+      data = @t.request("GET", "/streams/#{esc(stream_id)}/events/search?#{qs}")
+      events = data["events"].map do |m|
+        Event.new(id: m["id"], stream: m["stream"] || stream_id, seq: m["seq"],
+                  sender: m["sender"], body: m["body"], meta: m["meta"],
+                  parent_id: m["parent_id"], edited_at: m["edited_at"], sent_at: m["sent_at"])
+      end
+      EventList.new(events: events, has_more: data["has_more"] || false)
+    end
+
+    private
+
+    def esc(s) = ERB::Util.url_encode(s)
+  end
+end

@@ -27,16 +27,16 @@ func main() {
 
     ctx := context.Background()
 
-    // Rooms
-    room, _ := client.Rooms.Create(ctx, "general", "General Chat", nil)
-    fmt.Println(room.Name)
+    // Streams
+    stream, _ := client.Streams.Create(ctx, "general", "General Chat", nil)
+    fmt.Println(stream.Name)
 
     // Members
     client.Members.Add(ctx, "general", "alice", "owner")
     members, _ := client.Members.List(ctx, "general")
 
-    // Messages
-    result, _ := client.Messages.Send(ctx, "general", "system", "Welcome!", nil)
+    // Events
+    result, _ := client.Events.Publish(ctx, "general", "system", "Welcome!", nil)
     fmt.Println(result.Seq)
 
     // Presence

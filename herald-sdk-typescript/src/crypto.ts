@@ -12,10 +12,10 @@ export interface E2EEKeyPair {
 }
 
 export interface E2EESession {
-  /** Encrypt plaintext with room ID as AAD. Returns CiphertextEnvelope string. */
-  encrypt(plaintext: string, roomId: string): string;
-  /** Decrypt CiphertextEnvelope string. Room ID must match encryption. */
-  decrypt(ciphertext: string, roomId: string): string;
+  /** Encrypt plaintext with stream ID as AAD. Returns CiphertextEnvelope string. */
+  encrypt(plaintext: string, streamId: string): string;
+  /** Decrypt CiphertextEnvelope string. Stream ID must match encryption. */
+  decrypt(ciphertext: string, streamId: string): string;
   /** Generate blind tokens for searchable encryption. Returns base64 wire format. */
   blind(plaintext: string): string;
   /** Export keys for persistence (e.g. IndexedDB). */
@@ -45,8 +45,8 @@ function ensureInit(): typeof import("./wasm-pkg/herald_e2ee_wasm.js") {
 
 function wrapSession(handle: WasmSession): E2EESession {
   const session: E2EESession = {
-    encrypt: (plaintext, roomId) => handle.encrypt(plaintext, roomId),
-    decrypt: (ciphertext, roomId) => handle.decrypt(ciphertext, roomId),
+    encrypt: (plaintext, streamId) => handle.encrypt(plaintext, streamId),
+    decrypt: (ciphertext, streamId) => handle.decrypt(ciphertext, streamId),
     blind: (plaintext) => handle.blind(plaintext),
     exportKeys: () => ({
       cipherKey: handle.exportCipherKey(),

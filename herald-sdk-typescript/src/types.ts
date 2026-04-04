@@ -14,7 +14,7 @@ export interface HeraldClientOptions {
     enabled?: boolean;
     maxDelay?: number;
   };
-  /** Enable E2EE. Messages are encrypted/decrypted transparently per-room. */
+  /** Enable E2EE. Events are encrypted/decrypted transparently per-stream. */
   e2ee?: boolean;
 }
 
@@ -29,14 +29,14 @@ export interface MemberPresence {
 }
 
 export interface SubscribedPayload {
-  room: string;
+  stream: string;
   members: MemberPresence[];
   cursor: number;
   latest_seq: number;
 }
 
-export interface MessageNew {
-  room: string;
+export interface EventNew {
+  stream: string;
   id: string;
   seq: number;
   sender: string;
@@ -47,8 +47,8 @@ export interface MessageNew {
   edited_at?: number;
 }
 
-export interface MessageEdited {
-  room: string;
+export interface EventEdited {
+  stream: string;
   id: string;
   seq: number;
   body: string;
@@ -56,22 +56,22 @@ export interface MessageEdited {
 }
 
 export interface ReactionChanged {
-  room: string;
-  message_id: string;
+  stream: string;
+  event_id: string;
   emoji: string;
   user_id: string;
   action: "add" | "remove";
 }
 
-export interface MessageAck {
+export interface EventAck {
   id: string;
   seq: number;
   sent_at: number;
 }
 
-export interface MessagesBatch {
-  room: string;
-  messages: MessageNew[];
+export interface EventsBatch {
+  stream: string;
+  events: EventNew[];
   has_more: boolean;
 }
 
@@ -81,25 +81,25 @@ export interface PresenceChanged {
 }
 
 export interface CursorMoved {
-  room: string;
+  stream: string;
   user_id: string;
   seq: number;
 }
 
 export interface MemberEvent {
-  room: string;
+  stream: string;
   user_id: string;
   role: string;
 }
 
 export interface TypingEvent {
-  room: string;
+  stream: string;
   user_id: string;
   active: boolean;
 }
 
-export interface RoomEvent {
-  room: string;
+export interface StreamEvent {
+  stream: string;
 }
 
 export interface ErrorPayload {
@@ -108,7 +108,7 @@ export interface ErrorPayload {
 }
 
 export interface EventReceived {
-  room: string;
+  stream: string;
   event: string;
   sender: string;
   data?: unknown;
@@ -118,13 +118,13 @@ export interface WatchlistEvent {
   user_ids: string[];
 }
 
-export interface RoomSubscriberCount {
-  room: string;
+export interface StreamSubscriberCount {
+  stream: string;
   count: number;
 }
 
-export interface MessageDeleted {
-  room: string;
+export interface EventDeleted {
+  stream: string;
   id: string;
   seq: number;
 }
@@ -140,9 +140,9 @@ export interface ServerFrame {
 }
 
 export type HeraldEventMap = {
-  message: MessageNew;
-  "message.deleted": MessageDeleted;
-  "message.edited": MessageEdited;
+  event: EventNew;
+  "event.deleted": EventDeleted;
+  "event.edited": EventEdited;
   "reaction.changed": ReactionChanged;
   "event.received": EventReceived;
   presence: PresenceChanged;
@@ -150,9 +150,9 @@ export type HeraldEventMap = {
   "member.joined": MemberEvent;
   "member.left": MemberEvent;
   typing: TypingEvent;
-  "room.updated": RoomEvent;
-  "room.deleted": RoomEvent;
-  "room.subscriber_count": RoomSubscriberCount;
+  "stream.updated": StreamEvent;
+  "stream.deleted": StreamEvent;
+  "stream.subscriber_count": StreamSubscriberCount;
   "watchlist.online": WatchlistEvent;
   "watchlist.offline": WatchlistEvent;
   connected: void;

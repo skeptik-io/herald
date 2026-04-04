@@ -171,29 +171,31 @@ async fn main() -> anyhow::Result<()> {
         info!(tenants = state.tenant_cache.len(), "multi-tenant mode");
     }
 
-    // Hydrate rooms + members into memory
-    let all_rooms = store::rooms::list_all(&*state.db).await?;
-    for (tid, room) in &all_rooms {
-        let latest_seq = store::messages::latest_seq(&*state.db, tid, room.id.as_str())
+    // Hydrate streams + members into memory
+    let all_streams = store::streams::list_all(&*state.db).await?;
+    for (tid, stream) in &all_streams {
+        let latest_seq = store::events::latest_seq(&*state.db, tid, stream.id.as_str())
             .await
             .unwrap_or(0);
         state
-            .rooms
-            .create_room(tid, room.id.as_str(), latest_seq, room.public);
-        if room.archived {
-            state.rooms.set_archived(tid, room.id.as_str(), true);
+            .streams
+            .create_stream(tid, stream.id.as_str(), latest_seq, stream.public);
+        if stream.archived {
+            state.streams.set_archived(tid, stream.id.as_str(), true);
         }
 
-        if let Ok(members) = store::members::list_by_room(&*state.db, tid, room.id.as_str()).await {
+        if let Ok(members) =
+            store::members::list_by_stream(&*state.db, tid, stream.id.as_str()).await
+        {
             for member in members {
                 state
-                    .rooms
-                    .add_member(tid, room.id.as_str(), &member.user_id);
+                    .streams
+                    .add_member(tid, stream.id.as_str(), &member.user_id);
             }
         }
     }
 
-    info!(rooms = all_rooms.len(), "hydrated room state");
+    info!(streams = all_streams.len(), "hydrated stream state");
 
     // Stats snapshot collector — every 60 seconds
     let stats_state = state.clone();
@@ -201,32 +203,32 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let connections = stats_state.connections.total_connections() as u64;
-            let messages = stats_state
+            let events = stats_state
                 .metrics
-                .messages_sent
+                .events_published
                 .load(std::sync::atomic::Ordering::Relaxed);
-            let rooms = stats_state.rooms.room_count() as u64;
+            let streams = stats_state.streams.stream_count() as u64;
             let auth_failures = stats_state
                 .metrics
                 .ws_auth_failures
                 .load(std::sync::atomic::Ordering::Relaxed);
             stats_state
                 .event_bus
-                .record_snapshot(connections, messages, rooms, auth_failures);
+                .record_snapshot(connections, events, streams, auth_failures);
 
             // Per-tenant snapshots
             for entry in stats_state.tenant_cache.iter() {
                 let tid = entry.key();
                 let t_connections = stats_state.connections.tenant_connection_count(tid) as u64;
-                let t_messages = stats_state.tenant_messages_sent(tid);
+                let t_events = stats_state.tenant_events_published(tid);
                 let t_webhooks = stats_state.tenant_webhooks_sent(tid);
-                let t_rooms = stats_state.rooms.tenant_room_count(tid) as u64;
+                let t_streams = stats_state.streams.tenant_stream_count(tid) as u64;
                 stats_state.event_bus.record_tenant_snapshot(
                     tid,
                     t_connections,
-                    t_messages,
+                    t_events,
                     t_webhooks,
-                    t_rooms,
+                    t_streams,
                 );
             }
         }
@@ -238,18 +240,18 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let expired = typing_state.typing.expire();
-            for (tenant_id, room_id, user_id) in expired {
+            for (tenant_id, stream_id, user_id) in expired {
                 let msg = herald_core::protocol::ServerMessage::Typing {
                     payload: herald_core::protocol::TypingPayload {
-                        room: room_id.clone(),
+                        stream: stream_id.clone(),
                         user_id: user_id.clone(),
                         active: false,
                     },
                 };
-                herald_server::ws::fanout::fanout_to_room(
+                herald_server::ws::fanout::fanout_to_stream(
                     &typing_state,
                     &tenant_id,
-                    &room_id,
+                    &stream_id,
                     &msg,
                     None,
                 );
@@ -263,8 +265,8 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             let now = herald_server::ws::connection::now_millis();
-            match store::messages::delete_expired(&*cleanup_db, now).await {
-                Ok(n) if n > 0 => info!(deleted = n, "TTL cleanup: pruned expired messages"),
+            match store::events::delete_expired(&*cleanup_db, now).await {
+                Ok(n) if n > 0 => info!(deleted = n, "TTL cleanup: pruned expired events"),
                 Err(e) => warn!("TTL cleanup error: {e}"),
                 _ => {}
             }

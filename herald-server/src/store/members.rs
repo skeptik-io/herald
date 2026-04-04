@@ -3,13 +3,13 @@ use shroudb_store::Store;
 
 use super::NS_MEMBERS;
 
-/// Key format: "{tenant_id}/{room_id}/{user_id}"
-fn member_key(tenant_id: &str, room_id: &str, user_id: &str) -> Vec<u8> {
-    format!("{tenant_id}/{room_id}/{user_id}").into_bytes()
+/// Key format: "{tenant_id}/{stream_id}/{user_id}"
+fn member_key(tenant_id: &str, stream_id: &str, user_id: &str) -> Vec<u8> {
+    format!("{tenant_id}/{stream_id}/{user_id}").into_bytes()
 }
 
-fn room_prefix(tenant_id: &str, room_id: &str) -> Vec<u8> {
-    format!("{tenant_id}/{room_id}/").into_bytes()
+fn stream_prefix(tenant_id: &str, stream_id: &str) -> Vec<u8> {
+    format!("{tenant_id}/{stream_id}/").into_bytes()
 }
 
 pub async fn insert<S: Store>(
@@ -17,7 +17,7 @@ pub async fn insert<S: Store>(
     tenant_id: &str,
     member: &Member,
 ) -> Result<(), anyhow::Error> {
-    let key = member_key(tenant_id, &member.room_id, &member.user_id);
+    let key = member_key(tenant_id, &member.stream_id, &member.user_id);
     let value = serde_json::to_vec(member)?;
     store.put(NS_MEMBERS, &key, &value, None).await?;
     Ok(())
@@ -26,10 +26,10 @@ pub async fn insert<S: Store>(
 pub async fn get<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     user_id: &str,
 ) -> Result<Option<Member>, anyhow::Error> {
-    let key = member_key(tenant_id, room_id, user_id);
+    let key = member_key(tenant_id, stream_id, user_id);
     match store.get(NS_MEMBERS, &key, None).await {
         Ok(entry) => Ok(Some(serde_json::from_slice(&entry.value)?)),
         Err(shroudb_store::StoreError::NotFound) => Ok(None),
@@ -37,12 +37,12 @@ pub async fn get<S: Store>(
     }
 }
 
-pub async fn list_by_room<S: Store>(
+pub async fn list_by_stream<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
 ) -> Result<Vec<Member>, anyhow::Error> {
-    let prefix = room_prefix(tenant_id, room_id);
+    let prefix = stream_prefix(tenant_id, stream_id);
     let mut members = Vec::new();
     let mut cursor = None;
     loop {
@@ -67,10 +67,10 @@ pub async fn list_by_room<S: Store>(
 pub async fn delete<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     user_id: &str,
 ) -> Result<bool, anyhow::Error> {
-    let key = member_key(tenant_id, room_id, user_id);
+    let key = member_key(tenant_id, stream_id, user_id);
     match store.delete(NS_MEMBERS, &key).await {
         Ok(_) => Ok(true),
         Err(shroudb_store::StoreError::NotFound) => Ok(false),
@@ -81,11 +81,11 @@ pub async fn delete<S: Store>(
 pub async fn update_role<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     user_id: &str,
     role: Role,
 ) -> Result<bool, anyhow::Error> {
-    let key = member_key(tenant_id, room_id, user_id);
+    let key = member_key(tenant_id, stream_id, user_id);
     let entry = match store.get(NS_MEMBERS, &key, None).await {
         Ok(e) => e,
         Err(shroudb_store::StoreError::NotFound) => return Ok(false),
@@ -102,9 +102,9 @@ pub async fn update_role<S: Store>(
 mod tests {
     use super::*;
 
-    fn make_member(room: &str, user: &str) -> Member {
+    fn make_member(stream: &str, user: &str) -> Member {
         Member {
-            room_id: room.into(),
+            stream_id: stream.into(),
             user_id: user.into(),
             role: Role::Member,
             joined_at: 1000,
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_member_list_by_room() {
+    async fn test_member_list_by_stream() {
         let store = crate::store::test_store().await;
         for i in 0..3 {
             let m = make_member("r1", &format!("u{i}"));
@@ -135,10 +135,10 @@ mod tests {
         let other = make_member("r2", "u0");
         insert(&*store, "t1", &other).await.unwrap();
 
-        let members = list_by_room(&*store, "t1", "r1").await.unwrap();
+        let members = list_by_stream(&*store, "t1", "r1").await.unwrap();
         assert_eq!(members.len(), 3);
 
-        let members = list_by_room(&*store, "t1", "r2").await.unwrap();
+        let members = list_by_stream(&*store, "t1", "r2").await.unwrap();
         assert_eq!(members.len(), 1);
     }
 

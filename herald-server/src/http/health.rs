@@ -19,7 +19,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let checks = serde_json::json!({
         "status": status,
         "connections": state.connections.total_connections(),
-        "rooms": state.rooms.room_count(),
+        "streams": state.streams.stream_count(),
         "tenants": state.tenant_cache.len(),
         "uptime_secs": state.start_time.elapsed().as_secs(),
         "storage": storage_ok,
@@ -91,16 +91,16 @@ pub async fn tenant_stats(
     let snapshots = state.event_bus.get_tenant_snapshots(tid, from, to);
 
     let connections = state.connections.tenant_connection_count(tid) as u64;
-    let messages = state.tenant_messages_sent(tid);
+    let events = state.tenant_events_published(tid);
     let webhooks = state.tenant_webhooks_sent(tid);
-    let rooms = state.rooms.tenant_room_count(tid) as u64;
+    let streams = state.streams.tenant_stream_count(tid) as u64;
 
     Json(serde_json::json!({
         "current": {
             "connections": connections,
-            "messages_sent": messages,
+            "events_published": events,
             "webhooks_sent": webhooks,
-            "rooms": rooms,
+            "streams": streams,
         },
         "snapshots": snapshots,
     }))

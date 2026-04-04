@@ -1,26 +1,26 @@
 use herald_core::cursor::Cursor;
-use herald_core::message::Sequence;
+use herald_core::event::Sequence;
 use shroudb_store::Store;
 
 use super::NS_CURSORS;
 
-fn cursor_key(tenant_id: &str, room_id: &str, user_id: &str) -> Vec<u8> {
-    format!("{tenant_id}/{room_id}/{user_id}").into_bytes()
+fn cursor_key(tenant_id: &str, stream_id: &str, user_id: &str) -> Vec<u8> {
+    format!("{tenant_id}/{stream_id}/{user_id}").into_bytes()
 }
 
-fn room_prefix(tenant_id: &str, room_id: &str) -> Vec<u8> {
-    format!("{tenant_id}/{room_id}/").into_bytes()
+fn stream_prefix(tenant_id: &str, stream_id: &str) -> Vec<u8> {
+    format!("{tenant_id}/{stream_id}/").into_bytes()
 }
 
 pub async fn upsert<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     user_id: &str,
     seq: Sequence,
     now_ms: i64,
 ) -> Result<(), anyhow::Error> {
-    let key = cursor_key(tenant_id, room_id, user_id);
+    let key = cursor_key(tenant_id, stream_id, user_id);
 
     // Read current to implement MAX semantics
     let current_seq = match store.get(NS_CURSORS, &key, None).await {
@@ -34,7 +34,7 @@ pub async fn upsert<S: Store>(
 
     let new_seq = seq.max(current_seq);
     let cursor = Cursor {
-        room_id: room_id.to_string(),
+        stream_id: stream_id.to_string(),
         user_id: user_id.to_string(),
         seq: new_seq,
         updated_at: now_ms,
@@ -47,10 +47,10 @@ pub async fn upsert<S: Store>(
 pub async fn get<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
     user_id: &str,
 ) -> Result<Sequence, anyhow::Error> {
-    let key = cursor_key(tenant_id, room_id, user_id);
+    let key = cursor_key(tenant_id, stream_id, user_id);
     match store.get(NS_CURSORS, &key, None).await {
         Ok(entry) => {
             let c: Cursor = serde_json::from_slice(&entry.value)?;
@@ -61,12 +61,12 @@ pub async fn get<S: Store>(
     }
 }
 
-pub async fn list_by_room<S: Store>(
+pub async fn list_by_stream<S: Store>(
     store: &S,
     tenant_id: &str,
-    room_id: &str,
+    stream_id: &str,
 ) -> Result<Vec<Cursor>, anyhow::Error> {
-    let prefix = room_prefix(tenant_id, room_id);
+    let prefix = stream_prefix(tenant_id, stream_id);
     let mut cursors = Vec::new();
     let mut cursor = None;
     loop {
@@ -122,20 +122,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cursor_list_by_room() {
+    async fn test_cursor_list_by_stream() {
         let store = crate::store::test_store().await;
         for i in 0..3 {
             upsert(&*store, "t1", "r1", &format!("u{i}"), i + 1, 1000)
                 .await
                 .unwrap();
         }
-        // Different room
+        // Different stream
         upsert(&*store, "t1", "r2", "u0", 1, 1000).await.unwrap();
 
-        let cursors = list_by_room(&*store, "t1", "r1").await.unwrap();
+        let cursors = list_by_stream(&*store, "t1", "r1").await.unwrap();
         assert_eq!(cursors.len(), 3);
 
-        let cursors = list_by_room(&*store, "t1", "r2").await.unwrap();
+        let cursors = list_by_stream(&*store, "t1", "r2").await.unwrap();
         assert_eq!(cursors.len(), 1);
     }
 

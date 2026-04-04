@@ -13,7 +13,7 @@ use crate::http::TenantId;
 use crate::state::AppState;
 use crate::store;
 use crate::ws::connection::now_millis;
-use crate::ws::fanout::fanout_to_room;
+use crate::ws::fanout::fanout_to_stream;
 
 #[derive(Deserialize)]
 pub struct AddMemberRequest {
@@ -30,7 +30,7 @@ pub struct UpdateMemberRequest {
 pub async fn add_member(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path(room_id): Path<String>,
+    Path(stream_id): Path<String>,
     Json(req): Json<AddMemberRequest>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
@@ -46,14 +46,14 @@ pub async fn add_member(
         .unwrap_or_default();
 
     let member = Member {
-        room_id: room_id.clone(),
+        stream_id: stream_id.clone(),
         user_id: req.user_id.clone(),
         role,
         joined_at: now_millis(),
     };
 
     if let Err(e) = store::members::insert(&*state.db, tid, &member).await {
-        tracing::error!(tenant = tid, room = %room_id, user = %req.user_id, "failed to add member: {e}");
+        tracing::error!(tenant = tid, stream = %stream_id, user = %req.user_id, "failed to add member: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
@@ -61,22 +61,22 @@ pub async fn add_member(
             .into_response();
     }
 
-    state.rooms.add_member(tid, &room_id, &req.user_id);
+    state.streams.add_member(tid, &stream_id, &req.user_id);
 
     let msg = herald_core::protocol::ServerMessage::MemberJoined {
         payload: herald_core::protocol::MemberPayload {
-            room: room_id.clone(),
+            stream: stream_id.clone(),
             user_id: req.user_id.clone(),
             role,
         },
     };
-    fanout_to_room(&state, tid, &room_id, &msg, None);
+    fanout_to_stream(&state, tid, &stream_id, &msg, None);
 
     state.fire_webhook(
         tid,
         crate::webhook::WebhookEvent {
             event: "member.joined".to_string(),
-            room: room_id,
+            stream: stream_id,
             id: None,
             seq: None,
             sender: None,
@@ -94,10 +94,10 @@ pub async fn add_member(
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path(room_id): Path<String>,
+    Path(stream_id): Path<String>,
     Query(page): Query<crate::http::validation::PaginationQuery>,
 ) -> impl IntoResponse {
-    match store::members::list_by_room(&*state.db, &tenant.0, &room_id).await {
+    match store::members::list_by_stream(&*state.db, &tenant.0, &stream_id).await {
         Ok(members) => {
             let (limit, offset) = page.resolve();
             let total = members.len();
@@ -105,7 +105,7 @@ pub async fn list_members(
             Json(serde_json::json!({"members": members, "total": total, "limit": limit, "offset": offset})).into_response()
         }
         Err(e) => {
-            tracing::error!(tenant = %tenant.0, room = %room_id, "failed to list members: {e}");
+            tracing::error!(tenant = %tenant.0, stream = %stream_id, "failed to list members: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -118,27 +118,27 @@ pub async fn list_members(
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path((room_id, user_id)): Path<(String, String)>,
+    Path((stream_id, user_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    match store::members::delete(&*state.db, tid, &room_id, &user_id).await {
+    match store::members::delete(&*state.db, tid, &stream_id, &user_id).await {
         Ok(true) => {
-            state.rooms.remove_member(tid, &room_id, &user_id);
+            state.streams.remove_member(tid, &stream_id, &user_id);
 
             let msg = herald_core::protocol::ServerMessage::MemberLeft {
                 payload: herald_core::protocol::MemberPayload {
-                    room: room_id.clone(),
+                    stream: stream_id.clone(),
                     user_id: user_id.clone(),
                     role: Role::Member,
                 },
             };
-            fanout_to_room(&state, tid, &room_id, &msg, None);
+            fanout_to_stream(&state, tid, &stream_id, &msg, None);
 
             state.fire_webhook(
                 tid,
                 crate::webhook::WebhookEvent {
                     event: "member.left".to_string(),
-                    room: room_id,
+                    stream: stream_id,
                     id: None,
                     seq: None,
                     sender: None,
@@ -158,7 +158,7 @@ pub async fn remove_member(
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(tenant = tid, room = %room_id, user = %user_id, "failed to remove member: {e}");
+            tracing::error!(tenant = tid, stream = %stream_id, user = %user_id, "failed to remove member: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),
@@ -171,7 +171,7 @@ pub async fn remove_member(
 pub async fn update_member(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
-    Path((room_id, user_id)): Path<(String, String)>,
+    Path((stream_id, user_id)): Path<(String, String)>,
     Json(req): Json<UpdateMemberRequest>,
 ) -> impl IntoResponse {
     let role = match Role::from_str_loose(&req.role) {
@@ -185,7 +185,7 @@ pub async fn update_member(
         }
     };
 
-    match store::members::update_role(&*state.db, &tenant.0, &room_id, &user_id, role).await {
+    match store::members::update_role(&*state.db, &tenant.0, &stream_id, &user_id, role).await {
         Ok(true) => StatusCode::OK.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
@@ -193,7 +193,7 @@ pub async fn update_member(
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(tenant = %tenant.0, room = %room_id, user = %user_id, "failed to update member role: {e}");
+            tracing::error!(tenant = %tenant.0, stream = %stream_id, user = %user_id, "failed to update member role: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "internal error"})),

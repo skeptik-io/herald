@@ -18,23 +18,23 @@ client = HeraldAdmin::Client.new(
   token: 'your-api-token'
 )
 
-# Rooms
-client.rooms.create('general', 'General Chat')
-room = client.rooms.get('general')
-client.rooms.delete('general')
+# Streams
+client.streams.create('general', 'General Chat')
+stream = client.streams.get('general')
+client.streams.delete('general')
 
 # Members
 client.members.add('general', 'alice', role: 'owner')
 members = client.members.list('general')
 client.members.remove('general', 'alice')
 
-# Messages
-result = client.messages.send('general', sender: 'system', body: 'Welcome!')
-history = client.messages.list('general', limit: 50)
+# Events
+result = client.events.publish('general', sender: 'system', body: 'Welcome!')
+history = client.events.list('general', limit: 50)
 
 # Presence
 presence = client.presence.get_user('alice')
-room_presence = client.presence.get_room('general')
+stream_presence = client.presence.get_stream('general')
 cursors = client.presence.get_cursors('general')
 
 # Health

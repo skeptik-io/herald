@@ -15,12 +15,12 @@ function testGlobalBinding() {
         }
     }
 
-    emit("message", { body: "hello" });
+    emit("event", { body: "hello" });
     emit("presence", { user_id: "alice", presence: "online" });
-    emit("typing", { room: "chat", user_id: "bob", active: true });
+    emit("typing", { stream: "chat", user_id: "bob", active: true });
 
     console.assert(received.length === 3, `Expected 3 events, got ${received.length}`);
-    console.assert(received[0].event === "message", "First event should be message");
+    console.assert(received[0].event === "event", "First event should be event");
     console.assert(received[1].event === "presence", "Second event should be presence");
     console.assert(received[2].event === "typing", "Third event should be typing");
 

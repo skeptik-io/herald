@@ -1,7 +1,7 @@
 package herald
 
-// Room represents a Herald chat room.
-type Room struct {
+// Stream represents a Herald stream.
+type Stream struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Meta      any    `json:"meta,omitempty"`
@@ -10,18 +10,18 @@ type Room struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
-// Member represents a user's membership in a room.
+// Member represents a user's membership in a stream.
 type Member struct {
-	RoomID   string `json:"room_id"`
+	StreamID string `json:"stream_id"`
 	UserID   string `json:"user_id"`
 	Role     string `json:"role"`
 	JoinedAt int64  `json:"joined_at"`
 }
 
-// Message represents a chat message.
-type Message struct {
+// Event represents a stream event.
+type Event struct {
 	ID       string `json:"id"`
-	Room     string `json:"room"`
+	Stream   string `json:"stream"`
 	Seq      uint64 `json:"seq"`
 	Sender   string `json:"sender"`
 	Body     string `json:"body"`
@@ -31,21 +31,21 @@ type Message struct {
 	SentAt   int64  `json:"sent_at"`
 }
 
-// ReactionSummary represents aggregated reactions on a message.
+// ReactionSummary represents aggregated reactions on an event.
 type ReactionSummary struct {
 	Emoji string   `json:"emoji"`
 	Count int      `json:"count"`
 	Users []string `json:"users"`
 }
 
-// MessageList is a paginated list of messages.
-type MessageList struct {
-	Messages []Message `json:"messages"`
-	HasMore  bool      `json:"has_more"`
+// EventList is a paginated list of events.
+type EventList struct {
+	Events  []Event `json:"events"`
+	HasMore bool    `json:"has_more"`
 }
 
-// MessageSendResult is the response from injecting a message.
-type MessageSendResult struct {
+// EventPublishResult is the response from publishing an event.
+type EventPublishResult struct {
 	ID     string `json:"id"`
 	Seq    uint64 `json:"seq"`
 	SentAt int64  `json:"sent_at"`
@@ -58,13 +58,13 @@ type UserPresence struct {
 	Connections int    `json:"connections"`
 }
 
-// MemberPresenceEntry is a member's presence in a room.
+// MemberPresenceEntry is a member's presence in a stream.
 type MemberPresenceEntry struct {
 	UserID string `json:"user_id"`
 	Status string `json:"status"`
 }
 
-// Cursor is a user's read position in a room.
+// Cursor is a user's read position in a stream.
 type Cursor struct {
 	UserID string `json:"user_id"`
 	Seq    uint64 `json:"seq"`
@@ -74,7 +74,7 @@ type Cursor struct {
 type HealthResponse struct {
 	Status      string `json:"status"`
 	Connections int    `json:"connections"`
-	Rooms       int    `json:"rooms"`
+	Streams     int    `json:"streams"`
 	UptimeSecs  int64  `json:"uptime_secs"`
 }
 

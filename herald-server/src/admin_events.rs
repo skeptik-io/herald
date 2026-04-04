@@ -74,11 +74,11 @@ pub struct StatsSnapshot {
     pub timestamp: i64,
     pub connections: u64,
     pub peak_connections: u64,
-    pub messages_sent: u64,
-    pub messages_delta: u64,
+    pub events_published: u64,
+    pub events_delta: u64,
     pub webhooks_sent: u64,
     pub webhooks_delta: u64,
-    pub rooms: u64,
+    pub streams: u64,
     pub auth_failures: u64,
 }
 
@@ -86,16 +86,16 @@ pub struct StatsSnapshot {
 pub struct TenantSnapshot {
     pub timestamp: i64,
     pub connections: u64,
-    pub messages_sent: u64,
-    pub messages_delta: u64,
+    pub events_published: u64,
+    pub events_delta: u64,
     pub webhooks_sent: u64,
     pub webhooks_delta: u64,
-    pub rooms: u64,
+    pub streams: u64,
 }
 
 struct TenantStatsState {
     snapshots: VecDeque<TenantSnapshot>,
-    last_messages: u64,
+    last_events: u64,
     last_webhooks: u64,
 }
 
@@ -109,9 +109,9 @@ pub struct EventBus {
     stats_snapshots: RwLock<VecDeque<StatsSnapshot>>,
     peak_connections_today: AtomicU64,
     webhooks_sent: AtomicU64,
-    last_messages_total: AtomicU64,
+    last_events_total: AtomicU64,
     last_webhooks_total: AtomicU64,
-    day_start_messages: AtomicU64,
+    day_start_events: AtomicU64,
     day_start_webhooks: AtomicU64,
     current_day: RwLock<u32>,
 
@@ -130,9 +130,9 @@ impl EventBus {
             stats_snapshots: RwLock::new(VecDeque::with_capacity(8640)), // ~30 days at 5min intervals
             peak_connections_today: AtomicU64::new(0),
             webhooks_sent: AtomicU64::new(0),
-            last_messages_total: AtomicU64::new(0),
+            last_events_total: AtomicU64::new(0),
             last_webhooks_total: AtomicU64::new(0),
-            day_start_messages: AtomicU64::new(0),
+            day_start_events: AtomicU64::new(0),
             day_start_webhooks: AtomicU64::new(0),
             current_day: RwLock::new(0),
             tenant_stats: DashMap::new(),
@@ -211,8 +211,8 @@ impl EventBus {
     pub fn record_snapshot(
         &self,
         connections: u64,
-        messages_total: u64,
-        rooms: u64,
+        events_total: u64,
+        streams: u64,
         auth_failures: u64,
     ) {
         let now = now_millis();
@@ -224,8 +224,7 @@ impl EventBus {
             if *current_day != today {
                 *current_day = today;
                 self.peak_connections_today.store(0, Ordering::Relaxed);
-                self.day_start_messages
-                    .store(messages_total, Ordering::Relaxed);
+                self.day_start_events.store(events_total, Ordering::Relaxed);
                 self.day_start_webhooks.store(
                     self.webhooks_sent.load(Ordering::Relaxed),
                     Ordering::Relaxed,
@@ -237,9 +236,7 @@ impl EventBus {
         self.peak_connections_today
             .fetch_max(connections, Ordering::Relaxed);
 
-        let prev_messages = self
-            .last_messages_total
-            .swap(messages_total, Ordering::Relaxed);
+        let prev_events = self.last_events_total.swap(events_total, Ordering::Relaxed);
         let webhooks_total = self.webhooks_sent.load(Ordering::Relaxed);
         let prev_webhooks = self
             .last_webhooks_total
@@ -249,11 +246,11 @@ impl EventBus {
             timestamp: now,
             connections,
             peak_connections: self.peak_connections_today.load(Ordering::Relaxed),
-            messages_sent: messages_total,
-            messages_delta: messages_total.saturating_sub(prev_messages),
+            events_published: events_total,
+            events_delta: events_total.saturating_sub(prev_events),
             webhooks_sent: webhooks_total,
             webhooks_delta: webhooks_total.saturating_sub(prev_webhooks),
-            rooms,
+            streams,
             auth_failures,
         };
 
@@ -275,13 +272,13 @@ impl EventBus {
     }
 
     /// Get today's summary stats.
-    pub fn today_summary(&self, current_messages: u64) -> TodaySummary {
-        let day_start_messages = self.day_start_messages.load(Ordering::Relaxed);
+    pub fn today_summary(&self, current_events: u64) -> TodaySummary {
+        let day_start_events = self.day_start_events.load(Ordering::Relaxed);
         let day_start_webhooks = self.day_start_webhooks.load(Ordering::Relaxed);
         let webhooks_total = self.webhooks_sent.load(Ordering::Relaxed);
         TodaySummary {
             peak_connections: self.peak_connections_today.load(Ordering::Relaxed),
-            messages_today: current_messages.saturating_sub(day_start_messages),
+            events_today: current_events.saturating_sub(day_start_events),
             webhooks_today: webhooks_total.saturating_sub(day_start_webhooks),
         }
     }
@@ -291,9 +288,9 @@ impl EventBus {
         &self,
         tenant_id: &str,
         connections: u64,
-        messages_sent: u64,
+        events_published: u64,
         webhooks_sent: u64,
-        rooms: u64,
+        streams: u64,
     ) {
         let now = now_millis();
         let entry = self
@@ -302,25 +299,25 @@ impl EventBus {
             .or_insert_with(|| {
                 parking_lot::RwLock::new(TenantStatsState {
                     snapshots: VecDeque::with_capacity(1440),
-                    last_messages: messages_sent,
+                    last_events: events_published,
                     last_webhooks: webhooks_sent,
                 })
             });
 
         let mut state = entry.write();
-        let messages_delta = messages_sent.saturating_sub(state.last_messages);
+        let events_delta = events_published.saturating_sub(state.last_events);
         let webhooks_delta = webhooks_sent.saturating_sub(state.last_webhooks);
-        state.last_messages = messages_sent;
+        state.last_events = events_published;
         state.last_webhooks = webhooks_sent;
 
         let snapshot = TenantSnapshot {
             timestamp: now,
             connections,
-            messages_sent,
-            messages_delta,
+            events_published,
+            events_delta,
             webhooks_sent,
             webhooks_delta,
-            rooms,
+            streams,
         };
 
         if state.snapshots.len() >= 1440 {
@@ -349,7 +346,7 @@ impl EventBus {
 #[derive(Debug, Clone, Serialize)]
 pub struct TodaySummary {
     pub peak_connections: u64,
-    pub messages_today: u64,
+    pub events_today: u64,
     pub webhooks_today: u64,
 }
 

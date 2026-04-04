@@ -61,7 +61,7 @@ impl BenchServer {
             },
             store: StoreConfig {
                 path: "/tmp/bench".into(),
-                message_ttl_days: 7,
+                event_ttl_days: 7,
             },
             auth: AuthConfig {
                 jwt_secret: Some(JWT_SECRET.to_string()),
@@ -128,21 +128,21 @@ impl BenchServer {
         }
     }
 
-    async fn setup_room(&self, room_id: &str, members: &[&str]) {
+    async fn setup_stream(&self, stream_id: &str, members: &[&str]) {
         let client = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{}", self.http_port);
 
         client
-            .post(format!("{base}/rooms"))
+            .post(format!("{base}/streams"))
             .bearer_auth(&self.api_token)
-            .json(&json!({"id": room_id, "name": room_id}))
+            .json(&json!({"id": stream_id, "name": stream_id}))
             .send()
             .await
             .unwrap();
 
         for m in members {
             client
-                .post(format!("{base}/rooms/{room_id}/members"))
+                .post(format!("{base}/streams/{stream_id}/members"))
                 .bearer_auth(&self.api_token)
                 .json(&json!({"user_id": m}))
                 .send()
@@ -152,7 +152,7 @@ impl BenchServer {
     }
 }
 
-fn mint_jwt(user_id: &str, rooms: &[&str]) -> String {
+fn mint_jwt(user_id: &str, streams: &[&str]) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -162,7 +162,7 @@ fn mint_jwt(user_id: &str, rooms: &[&str]) -> String {
         &JwtClaims {
             sub: user_id.to_string(),
             tenant: "default".to_string(),
-            rooms: rooms.iter().map(|s| s.to_string()).collect(),
+            streams: streams.iter().map(|s| s.to_string()).collect(),
             exp: now + 3600,
             iat: now,
             iss: "test".to_string(),
@@ -183,7 +183,7 @@ async fn ws_connect(port: u16) -> WsStream {
     ws
 }
 
-async fn ws_auth_subscribe(ws: &mut WsStream, token: &str, rooms: &[&str]) {
+async fn ws_auth_subscribe(ws: &mut WsStream, token: &str, streams: &[&str]) {
     ws.send(Message::Text(
         json!({"type": "auth", "payload": {"token": token}})
             .to_string()
@@ -200,14 +200,14 @@ async fn ws_auth_subscribe(ws: &mut WsStream, token: &str, rooms: &[&str]) {
         }
     }
     ws.send(Message::Text(
-        json!({"type": "subscribe", "payload": {"rooms": rooms}})
+        json!({"type": "subscribe", "payload": {"streams": streams}})
             .to_string()
             .into(),
     ))
     .await
     .unwrap();
     let mut got = 0;
-    while got < rooms.len() {
+    while got < streams.len() {
         if let Some(Ok(Message::Text(text))) = ws.next().await {
             let msg: Value = serde_json::from_str(&text).unwrap();
             if msg["type"] == "subscribed" {
@@ -217,14 +217,14 @@ async fn ws_auth_subscribe(ws: &mut WsStream, token: &str, rooms: &[&str]) {
     }
 }
 
-async fn bench_send(ws: &mut WsStream, room: &str, count: u64) -> Duration {
+async fn bench_send(ws: &mut WsStream, stream: &str, count: u64) -> Duration {
     let start = Instant::now();
     for i in 0..count {
         ws.send(Message::Text(
             json!({
-                "type": "message.send",
+                "type": "event.publish",
                 "ref": format!("b{i}"),
-                "payload": {"room": room, "body": format!("bench msg {i}")}
+                "payload": {"stream": stream, "body": format!("bench msg {i}")}
             })
             .to_string()
             .into(),
@@ -240,7 +240,7 @@ async fn bench_send(ws: &mut WsStream, room: &str, count: u64) -> Duration {
             tokio::time::timeout(Duration::from_secs(5), ws.next()).await
         {
             let msg: Value = serde_json::from_str(&text).unwrap();
-            if msg["type"] == "message.ack" {
+            if msg["type"] == "event.ack" {
                 acks += 1;
             }
         } else {
@@ -254,19 +254,19 @@ async fn bench_send(ws: &mut WsStream, room: &str, count: u64) -> Duration {
 
 fn print_results(label: &str, count: u64, elapsed: Duration, state: &AppState) {
     let throughput = count as f64 / elapsed.as_secs_f64();
-    let (p50, p95, p99) = state.metrics.message_total.percentiles();
-    let avg = state.metrics.message_total.avg_ms();
+    let (p50, p95, p99) = state.metrics.event_total.percentiles();
+    let avg = state.metrics.event_total.avg_ms();
 
     println!("\n=== {label} ===");
     println!(
-        "  Messages: {count} in {:.2}s ({:.0} msg/s)",
+        "  Events: {count} in {:.2}s ({:.0} evt/s)",
         elapsed.as_secs_f64(),
         throughput
     );
     println!("  Total  — avg: {avg:.2}ms  p50: {p50:.2}ms  p95: {p95:.2}ms  p99: {p99:.2}ms");
 
-    let store = &state.metrics.message_store;
-    let fanout = &state.metrics.message_fanout;
+    let store = &state.metrics.event_store;
+    let fanout = &state.metrics.event_fanout;
 
     println!(
         "  Store   — avg: {:.2}ms  p50: {:.2}ms  p95: {:.2}ms  p99: {:.2}ms",
@@ -292,7 +292,7 @@ fn print_results(label: &str, count: u64, elapsed: Duration, state: &AppState) {
 async fn bench_wal_latency() {
     let count = 500;
     let server = BenchServer::start().await;
-    server.setup_room("bench", &["sender"]).await;
+    server.setup_stream("bench", &["sender"]).await;
 
     let mut ws = ws_connect(server.ws_port).await;
     ws_auth_subscribe(&mut ws, &mint_jwt("sender", &["bench"]), &["bench"]).await;

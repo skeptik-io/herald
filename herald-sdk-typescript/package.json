@@ -1,6 +1,6 @@
 {
   "name": "herald-sdk",
-  "version": "0.2.0",
+  "version": "2.0.0",
   "description": "Herald WebSocket client SDK for browsers with optional E2EE",
   "type": "module",
   "main": "dist/index.js",

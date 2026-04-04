@@ -1,7 +1,7 @@
 {
   "name": "herald-sdk",
-  "version": "0.1.0",
-  "description": "Herald WebSocket client SDK for browsers",
+  "version": "0.2.0",
+  "description": "Herald WebSocket client SDK for browsers with optional E2EE",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,14 +9,23 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./e2ee": {
+      "types": "./dist/crypto.d.ts",
+      "import": "./dist/crypto.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build:wasm": "cd wasm && ./build.sh",
+    "build:ts": "tsc && cp -r src/wasm-pkg dist/wasm-pkg",
+    "build": "npm run build:wasm && npm run build:ts",
     "check": "tsc --noEmit"
   },
   "devDependencies": {
+    "tsx": "^4.21.0",
     "typescript": "^5.7.0"
   }
 }

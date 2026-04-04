@@ -14,6 +14,8 @@ export interface HeraldClientOptions {
     enabled?: boolean;
     maxDelay?: number;
   };
+  /** Enable E2EE. Messages are encrypted/decrypted transparently per-room. */
+  e2ee?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 import { Connection, type ConnectionState } from "./connection.js";
 import { HeraldError } from "./errors.js";
+import { E2EEManager } from "./e2ee.js";
+import { initE2EE } from "./crypto.js";
 import type {
   CursorMoved,
   EventReceived,
@@ -68,9 +70,15 @@ export class HeraldClient {
   private handlers = new Map<string, Set<Handler<unknown>>>();
   private globalHandlers = new Set<(event: string, data: unknown) => void>();
 
+  // E2EE — null when e2ee option is not set (zero overhead)
+  private e2ee: E2EEManager | null = null;
+
   constructor(options: HeraldClientOptions) {
     this.options = options;
     this.token = options.token;
+    if (options.e2ee) {
+      this.e2ee = new E2EEManager();
+    }
     this.connection = new Connection(
       options.url,
       options.reconnect?.enabled ?? true,
@@ -90,6 +98,9 @@ export class HeraldClient {
   }
 
   async connect(): Promise<void> {
+    if (this.e2ee) {
+      await initE2EE();
+    }
     await this.connection.connect();
     await this.authenticate();
     this._initialConnectDone = true;
@@ -98,9 +109,25 @@ export class HeraldClient {
   disconnect(): void {
     this._initialConnectDone = false;
     this.subscribedRooms.clear();
+    this.e2ee?.clear();
     this.connection.close();
     this.pending.clear();
     this.pendingSubscribes.clear();
+  }
+
+  // ── E2EE ──────────────────────────────────────────────────────────
+
+  /** Set an E2EE session for a room. Messages to/from this room will be encrypted. */
+  setE2EESession(room: string, session: import("./crypto.js").E2EESession): void {
+    if (!this.e2ee) {
+      throw new Error("E2EE not enabled. Set e2ee: true in HeraldClientOptions.");
+    }
+    this.e2ee.setSession(room, session);
+  }
+
+  /** Remove an E2EE session for a room. */
+  removeE2EESession(room: string): void {
+    this.e2ee?.removeSession(room);
   }
 
   // ── Rooms ──────────────────────────────────────────────────────────
@@ -142,19 +169,25 @@ export class HeraldClient {
 
   async send(room: string, body: string, options?: { meta?: unknown; parentId?: string }): Promise<MessageAck> {
     const ref = nextRef();
+    const { body: finalBody, meta: finalMeta } = this.e2ee
+      ? this.e2ee.encryptOutgoing(room, body, options?.meta)
+      : { body, meta: options?.meta };
     return this.request(ref, {
       type: "message.send",
       ref,
-      payload: { room, body, meta: options?.meta, parent_id: options?.parentId },
+      payload: { room, body: finalBody, meta: finalMeta, parent_id: options?.parentId },
     }) as Promise<MessageAck>;
   }
 
   async editMessage(room: string, id: string, body: string): Promise<MessageAck> {
     const ref = nextRef();
+    const { body: finalBody } = this.e2ee
+      ? this.e2ee.encryptOutgoing(room, body)
+      : { body };
     return this.request(ref, {
       type: "message.edit",
       ref,
-      payload: { room, id, body },
+      payload: { room, id, body: finalBody },
     }) as Promise<MessageAck>;
   }
 
@@ -365,6 +398,12 @@ export class HeraldClient {
           const ids = Array.from(this.seenMessageIds);
           this.seenMessageIds = new Set(ids.slice(-5_000));
         }
+        // E2EE decrypt
+        if (this.e2ee) {
+          const result = this.e2ee.decryptIncoming(msg.room, msg.body, msg.meta);
+          msg.body = result.body;
+          msg.meta = result.meta;
+        }
         this.emit("message", msg);
         break;
       }
@@ -378,6 +417,15 @@ export class HeraldClient {
 
       case "messages.batch":
         if (ref && this.pending.has(ref)) {
+          // E2EE decrypt batch
+          if (this.e2ee && p) {
+            const batch = p as unknown as MessagesBatch;
+            for (const msg of batch.messages) {
+              const result = this.e2ee.decryptIncoming(batch.room, msg.body, msg.meta);
+              msg.body = result.body;
+              msg.meta = result.meta;
+            }
+          }
           this.pending.get(ref)!.resolve(p);
           this.pending.delete(ref);
         }
@@ -415,9 +463,15 @@ export class HeraldClient {
         this.emit("message.deleted", p as unknown as MessageDeleted);
         break;
 
-      case "message.edited":
-        this.emit("message.edited", p as unknown as MessageEdited);
+      case "message.edited": {
+        const edited = p as unknown as MessageEdited;
+        if (this.e2ee) {
+          const result = this.e2ee.decryptIncoming(edited.room, edited.body);
+          edited.body = result.body;
+        }
+        this.emit("message.edited", edited);
         break;
+      }
 
       case "reaction.changed":
         this.emit("reaction.changed", p as unknown as ReactionChanged);

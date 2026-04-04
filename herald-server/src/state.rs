@@ -386,16 +386,6 @@ impl AppState {
         });
     }
 
-    /// Evict tenant cache entries older than `TENANT_CACHE_TTL_SECS`.
-    /// Stale entries are re-populated on the next JWT validation via `hydrate_tenant_cache`
-    /// or admin API create/update.
-    pub fn evict_stale_tenants(&self) -> usize {
-        let before = self.tenant_cache.len();
-        self.tenant_cache
-            .retain(|_, config| config.cached_at.elapsed().as_secs() < TENANT_CACHE_TTL_SECS);
-        before - self.tenant_cache.len()
-    }
-
     pub fn audit(
         &self,
         tenant_id: &str,

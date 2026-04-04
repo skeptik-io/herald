@@ -5892,3 +5892,194 @@ async fn test_reconnect_reauth_and_resubscribe() {
     assert_eq!(msg["payload"]["body"], "hello from reconnected alice");
     assert_eq!(msg["payload"]["sender"], "alice");
 }
+
+// ---------------------------------------------------------------------------
+// Tenant cache robustness tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_tenant_cache_survives_time_passage() {
+    // Regression test: the cache TTL eviction was removing tenants from the
+    // in-memory cache, but validate_jwt (sync) couldn't reload from DB,
+    // causing "unknown tenant" errors for valid tenants.
+    //
+    // After the fix, the cache is never evicted — it's only refreshed on
+    // admin update/delete or on startup hydration.
+    let server = TestServer::start().await;
+    let _token = server.create_tenant("persistent", TENANT_A_SECRET).await;
+
+    // Verify tenant is in cache
+    assert!(
+        server.state.tenant_cache.get("persistent").is_some(),
+        "tenant should be in cache after creation"
+    );
+
+    // JWT auth should work
+    let jwt = mint_jwt("alice", "persistent", &[], TENANT_A_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    drop(ws);
+
+    // Manually set cached_at to 10 minutes ago (beyond any TTL)
+    if let Some(mut entry) = server.state.tenant_cache.get_mut("persistent") {
+        entry.cached_at = std::time::Instant::now() - std::time::Duration::from_secs(600);
+    }
+
+    // Tenant should STILL be in cache (no eviction)
+    assert!(
+        server.state.tenant_cache.get("persistent").is_some(),
+        "stale tenant should remain in cache (no eviction)"
+    );
+
+    // JWT auth should STILL work even with stale cache entry
+    let mut ws2 = server.ws_connect().await;
+    ws_send(
+        &mut ws2,
+        json!({"type": "auth", "payload": {"token": &jwt}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws2, "auth_ok").await;
+    assert_eq!(
+        msg["payload"]["user_id"], "alice",
+        "JWT auth should succeed with stale cache entry"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_cache_delete_then_auth_fails() {
+    // Ensure that deleting a tenant via admin API immediately invalidates
+    // the cache, and subsequent JWT auth fails.
+    let server = TestServer::start().await;
+    let _token = server.create_tenant("deleteme", TENANT_A_SECRET).await;
+
+    let jwt = mint_jwt("user1", "deleteme", &[], TENANT_A_SECRET);
+
+    // Auth works before delete
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt).await;
+    drop(ws);
+
+    // Delete tenant
+    let resp = server
+        .http_client()
+        .delete(server.http_url("/admin/tenants/deleteme"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Cache should be empty for this tenant
+    assert!(
+        server.state.tenant_cache.get("deleteme").is_none(),
+        "deleted tenant should not be in cache"
+    );
+
+    // Auth should fail immediately (not after TTL)
+    let mut ws2 = server.ws_connect().await;
+    ws_send(
+        &mut ws2,
+        json!({"type": "auth", "payload": {"token": &jwt}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws2, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+#[tokio::test]
+async fn test_tenant_cache_update_refreshes_immediately() {
+    // Ensure that updating a tenant via admin API refreshes the cache
+    // entry immediately (not stale after update).
+    let server = TestServer::start().await;
+    let _token = server.create_tenant("updating", TENANT_A_SECRET).await;
+
+    // Check initial state
+    let cached = server.state.tenant_cache.get("updating").unwrap();
+    let initial_plan = cached.plan.clone();
+    let initial_cached_at = cached.cached_at;
+    drop(cached);
+    assert_eq!(initial_plan, "free");
+
+    // Small delay to ensure time difference is measurable
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Update plan
+    let resp = server
+        .http_client()
+        .patch(server.http_url("/admin/tenants/updating"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"plan": "pro"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Cache should have new plan and fresh cached_at
+    let cached = server.state.tenant_cache.get("updating").unwrap();
+    assert_eq!(cached.plan, "pro", "plan should be updated in cache");
+    assert!(
+        cached.cached_at > initial_cached_at,
+        "cached_at should be refreshed after update"
+    );
+}
+
+#[tokio::test]
+async fn test_multiple_tenants_independent_cache() {
+    // Ensure operations on one tenant don't affect another's cache.
+    let server = TestServer::start().await;
+    let _token_a = server.create_tenant("alpha", TENANT_A_SECRET).await;
+    let _token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+
+    // Both should be in cache
+    assert!(server.state.tenant_cache.get("alpha").is_some());
+    assert!(server.state.tenant_cache.get("beta").is_some());
+
+    // Delete alpha
+    server
+        .http_client()
+        .delete(server.http_url("/admin/tenants/alpha"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+
+    // Alpha gone, beta still present
+    assert!(server.state.tenant_cache.get("alpha").is_none());
+    assert!(server.state.tenant_cache.get("beta").is_some());
+
+    // Beta JWT still works
+    let jwt_b = mint_jwt("user1", "beta", &[], TENANT_B_SECRET);
+    let mut ws = server.ws_connect().await;
+    ws_auth(&mut ws, &jwt_b).await;
+
+    // Alpha JWT fails
+    let jwt_a = mint_jwt("user1", "alpha", &[], TENANT_A_SECRET);
+    let mut ws2 = server.ws_connect().await;
+    ws_send(
+        &mut ws2,
+        json!({"type": "auth", "payload": {"token": &jwt_a}}),
+    )
+    .await;
+    let msg = ws_recv_type(&mut ws2, "auth_error").await;
+    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+}
+
+#[tokio::test]
+async fn test_health_shows_correct_tenant_count() {
+    let server = TestServer::start().await;
+    server.create_tenant("t1", TENANT_A_SECRET).await;
+    server.create_tenant("t2", TENANT_B_SECRET).await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/health"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let tenant_count = body["tenants"].as_u64().unwrap();
+    assert!(
+        tenant_count >= 2,
+        "health should show at least 2 tenants, got {tenant_count}"
+    );
+}

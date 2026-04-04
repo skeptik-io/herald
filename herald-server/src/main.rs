@@ -214,12 +214,6 @@ async fn main() -> anyhow::Result<()> {
                 .event_bus
                 .record_snapshot(connections, messages, rooms, auth_failures);
 
-            // Evict stale tenant cache entries (TTL safety net)
-            let evicted = stats_state.evict_stale_tenants();
-            if evicted > 0 {
-                info!(evicted, "evicted stale tenant cache entries");
-            }
-
             // Per-tenant snapshots
             for entry in stats_state.tenant_cache.iter() {
                 let tid = entry.key();

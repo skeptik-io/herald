@@ -1,0 +1,15 @@
+{
+  "name": "herald-e2ee-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "herald_e2ee_wasm_bg.wasm",
+    "herald_e2ee_wasm.js",
+    "herald_e2ee_wasm.d.ts"
+  ],
+  "main": "herald_e2ee_wasm.js",
+  "types": "herald_e2ee_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -76,6 +76,7 @@ pub async fn inject_event(
             .into_response();
     }
 
+    // See ws/handler.rs handle_publish for why seq gaps on storage failure are accepted.
     let seq = state.streams.next_seq(tid, &stream_id);
     let now = now_millis();
     let event_id = uuid::Uuid::new_v4().to_string();
@@ -206,6 +207,7 @@ pub async fn list_events(
     .into_response()
 }
 
+#[cfg(not(feature = "chat"))]
 pub async fn list_cursors(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -235,11 +237,13 @@ pub async fn list_cursors(
     }
 }
 
+#[cfg(not(feature = "chat"))]
 #[derive(Deserialize)]
 pub struct EditEventRequest {
     pub body: String,
 }
 
+#[cfg(not(feature = "chat"))]
 pub async fn edit_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -283,6 +287,7 @@ pub async fn edit_event(
     }
 }
 
+#[cfg(not(feature = "chat"))]
 pub async fn get_reactions(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -344,6 +349,7 @@ pub async fn trigger_ephemeral(
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[cfg(not(feature = "chat"))]
 pub async fn delete_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

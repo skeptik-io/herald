@@ -21,7 +21,7 @@ use herald_server::store;
 const JWT_SECRET: &str = "bench-secret";
 const SUPER_TOKEN: &str = "bench-super";
 
-async fn create_test_store() -> Arc<shroudb_storage::EmbeddedStore> {
+async fn create_test_store() -> Arc<herald_server::store_backend::StoreBackend> {
     let dir = tempfile::tempdir().unwrap();
     let config = shroudb_storage::StorageEngineConfig {
         data_dir: dir.keep(),
@@ -33,7 +33,10 @@ async fn create_test_store() -> Arc<shroudb_storage::EmbeddedStore> {
             .await
             .unwrap(),
     );
-    let store = Arc::new(shroudb_storage::EmbeddedStore::new(engine, "bench"));
+    let embedded = shroudb_storage::EmbeddedStore::new(engine, "bench");
+    let store = Arc::new(herald_server::store_backend::StoreBackend::Embedded(
+        embedded,
+    ));
     store::init_namespaces(&*store).await.unwrap();
     store
 }
@@ -60,7 +63,9 @@ impl BenchServer {
                 ..Default::default()
             },
             store: StoreConfig {
+                mode: "embedded".to_string(),
                 path: "/tmp/bench".into(),
+                addr: None,
                 event_ttl_days: 7,
             },
             auth: AuthConfig {

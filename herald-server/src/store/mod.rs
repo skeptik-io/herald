@@ -1,7 +1,10 @@
+#[cfg(not(feature = "chat"))]
 pub mod blocks;
+#[cfg(not(feature = "chat"))]
 pub mod cursors;
 pub mod events;
 pub mod members;
+#[cfg(not(feature = "chat"))]
 pub mod reactions;
 pub mod streams;
 pub mod tenants;
@@ -19,7 +22,7 @@ pub const NS_BLOCKS: &str = "herald.blocks";
 
 /// Initialize all namespaces on startup.
 #[cfg(test)]
-pub(crate) async fn test_store() -> std::sync::Arc<shroudb_storage::EmbeddedStore> {
+pub(crate) async fn test_store() -> std::sync::Arc<crate::store_backend::StoreBackend> {
     let dir = tempfile::tempdir().unwrap();
     let config = shroudb_storage::StorageEngineConfig {
         data_dir: dir.keep(),
@@ -30,7 +33,8 @@ pub(crate) async fn test_store() -> std::sync::Arc<shroudb_storage::EmbeddedStor
             .await
             .unwrap(),
     );
-    let store = std::sync::Arc::new(shroudb_storage::EmbeddedStore::new(engine, "test"));
+    let embedded = shroudb_storage::EmbeddedStore::new(engine, "test");
+    let store = std::sync::Arc::new(crate::store_backend::StoreBackend::Embedded(embedded));
     init_namespaces(&*store).await.unwrap();
     store
 }

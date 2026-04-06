@@ -11,7 +11,7 @@ use crate::state::AppState;
 use crate::ws::connection::now_millis;
 
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let storage_health = state.db.engine().health();
+    let storage_health = state.db.storage_health();
     let storage_ok = matches!(storage_health, shroudb_storage::engine::HealthState::Ready);
 
     let status = if storage_ok { "ok" } else { "degraded" };
@@ -42,7 +42,7 @@ pub async fn liveness() -> impl IntoResponse {
 
 /// Readiness probe -- checks storage and integration health.
 pub async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let storage_health = state.db.engine().health();
+    let storage_health = state.db.storage_health();
     let storage_ok = matches!(storage_health, shroudb_storage::engine::HealthState::Ready);
 
     let checks = serde_json::json!({

@@ -93,8 +93,16 @@ impl Default for ServerConfig {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct StoreConfig {
+    /// "embedded" (default) or "remote"
+    #[serde(default = "default_store_mode")]
+    pub mode: String,
+    /// Path for embedded mode. Ignored when mode = "remote".
     #[serde(default = "default_store_path")]
     pub path: PathBuf,
+    /// ShroudB server URI for remote mode (e.g. "tcp://shroudb.internal:5200").
+    /// Required when mode = "remote".
+    #[serde(default)]
+    pub addr: Option<String>,
     #[serde(default = "default_ttl_days")]
     pub event_ttl_days: u32,
 }
@@ -102,10 +110,16 @@ pub struct StoreConfig {
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
+            mode: default_store_mode(),
             path: default_store_path(),
+            addr: None,
             event_ttl_days: default_ttl_days(),
         }
     }
+}
+
+fn default_store_mode() -> String {
+    "embedded".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,6 +233,17 @@ impl HeraldConfig {
         }
 
         // Store config
+        match self.store.mode.as_str() {
+            "embedded" => {}
+            "remote" => {
+                if self.store.addr.as_deref().unwrap_or("").is_empty() {
+                    anyhow::bail!("store.addr is required when store.mode = \"remote\"");
+                }
+            }
+            other => {
+                anyhow::bail!("store.mode must be \"embedded\" or \"remote\", got \"{other}\"")
+            }
+        }
         if self.store.event_ttl_days == 0 {
             anyhow::bail!("store.event_ttl_days must be > 0");
         }
@@ -310,7 +335,9 @@ impl HeraldConfig {
                     .unwrap_or(30),
             },
             store: StoreConfig {
+                mode: env_or("HERALD_STORE_MODE", "embedded"),
                 path: env_or("HERALD_DATA_DIR", "./herald-data").into(),
+                addr: env("HERALD_STORE_ADDR"),
                 event_ttl_days: env("HERALD_EVENT_TTL_DAYS")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(7),

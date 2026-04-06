@@ -1,4 +1,6 @@
 pub mod admin_events;
+#[cfg(feature = "chat")]
+pub mod chat;
 pub mod config;
 pub mod http;
 pub mod integrations;
@@ -6,5 +8,6 @@ pub mod latency;
 pub mod registry;
 pub mod state;
 pub mod store;
+pub mod store_backend;
 pub mod webhook;
 pub mod ws;

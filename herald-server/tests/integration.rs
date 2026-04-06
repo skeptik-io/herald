@@ -28,7 +28,7 @@ const TENANT_B_SECRET: &str = "tenant-b-secret";
 // Test harness
 // ---------------------------------------------------------------------------
 
-async fn create_test_store() -> Arc<shroudb_storage::EmbeddedStore> {
+async fn create_test_store() -> Arc<herald_server::store_backend::StoreBackend> {
     let dir = tempfile::tempdir().unwrap();
     let config = shroudb_storage::StorageEngineConfig {
         data_dir: dir.keep(),
@@ -40,7 +40,10 @@ async fn create_test_store() -> Arc<shroudb_storage::EmbeddedStore> {
             .await
             .unwrap(),
     );
-    let store = Arc::new(shroudb_storage::EmbeddedStore::new(engine, "test"));
+    let embedded = shroudb_storage::EmbeddedStore::new(engine, "test");
+    let store = Arc::new(herald_server::store_backend::StoreBackend::Embedded(
+        embedded,
+    ));
     store::init_namespaces(&*store).await.unwrap();
     store
 }
@@ -68,7 +71,9 @@ impl TestServer {
                 ..Default::default()
             },
             store: StoreConfig {
+                mode: "embedded".to_string(),
                 path: "/tmp/herald-test".into(),
+                addr: None,
                 event_ttl_days: 7,
             },
             auth: AuthConfig {
@@ -1968,6 +1973,8 @@ async fn test_http_api_rate_limiting() {
             ..Default::default()
         },
         store: StoreConfig {
+            mode: "embedded".to_string(),
+            addr: None,
             path: "/tmp/herald-test-rate".into(),
             event_ttl_days: 7,
         },
@@ -2046,6 +2053,8 @@ async fn test_ws_sliding_window_rate_limit() {
             ..Default::default()
         },
         store: StoreConfig {
+            mode: "embedded".to_string(),
+            addr: None,
             path: "/tmp/herald-test-wsrate".into(),
             event_ttl_days: 7,
         },
@@ -2300,6 +2309,8 @@ async fn test_presence_linger_reconnect_no_offline() {
             ..Default::default()
         },
         store: StoreConfig {
+            mode: "embedded".to_string(),
+            addr: None,
             path: "/tmp/herald-test-linger".into(),
             event_ttl_days: 7,
         },
@@ -3350,6 +3361,8 @@ async fn test_webhook_event_filtering() {
             ..Default::default()
         },
         store: StoreConfig {
+            mode: "embedded".to_string(),
+            addr: None,
             path: "/tmp/herald-test-whfilter".into(),
             event_ttl_days: 7,
         },
@@ -5121,6 +5134,8 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
             ..Default::default()
         },
         store: StoreConfig {
+            mode: "embedded".to_string(),
+            addr: None,
             path: "/tmp/herald-test-quota".into(),
             event_ttl_days: 7,
         },

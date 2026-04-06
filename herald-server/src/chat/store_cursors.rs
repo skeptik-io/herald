@@ -6,7 +6,7 @@ use herald_core::event::Sequence;
 use shroudb_store::Store;
 use tokio::sync::Mutex;
 
-use super::NS_CURSORS;
+use crate::store::NS_CURSORS;
 
 fn cursor_key(tenant_id: &str, stream_id: &str, user_id: &str) -> Vec<u8> {
     format!("{tenant_id}/{stream_id}/{user_id}").into_bytes()
@@ -17,9 +17,6 @@ fn stream_prefix(tenant_id: &str, stream_id: &str) -> Vec<u8> {
 }
 
 /// Per-key lock to prevent read-modify-write races on cursor MAX semantics.
-/// Without this, two concurrent upserts for the same (tenant, stream, user) can
-/// race: both read the same current value, both compute max, and the slower
-/// writer overwrites the faster one's higher value.
 static CURSOR_LOCKS: LazyLock<DashMap<Vec<u8>, std::sync::Arc<Mutex<()>>>> =
     LazyLock::new(DashMap::new);
 
@@ -33,7 +30,6 @@ pub async fn upsert<S: Store>(
 ) -> Result<(), anyhow::Error> {
     let key = cursor_key(tenant_id, stream_id, user_id);
 
-    // Acquire per-key lock to serialize read-modify-write
     let lock = CURSOR_LOCKS
         .entry(key.clone())
         .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
@@ -168,18 +164,11 @@ mod tests {
         assert_eq!(seq2, 10);
     }
 
-    /// Concurrent upserts for the same (tenant, stream, user) must preserve
-    /// the highest value. Without the per-key lock, two concurrent upserts
-    /// can race: both read the same current value, both compute max, and the
-    /// slower writer overwrites the faster one's higher value.
     #[tokio::test]
     async fn test_cursor_concurrent_max_semantics() {
         let store = std::sync::Arc::new(crate::store::test_store().await);
-
-        // Seed at 0
         upsert(&**store, "t1", "r1", "u1", 0, 1000).await.unwrap();
 
-        // Spawn 50 concurrent upserts with values 1..=50 in random-ish order
         let mut handles = Vec::new();
         for seq in 1..=50u64 {
             let s = store.clone();
@@ -193,8 +182,6 @@ mod tests {
             h.await.unwrap();
         }
 
-        // The final value must be 50 — the highest value written.
-        // Without the lock, this could be any value that happened to write last.
         let seq = get(&**store, "t1", "r1", "u1").await.unwrap();
         assert_eq!(seq, 50, "concurrent MAX must converge to highest value");
     }

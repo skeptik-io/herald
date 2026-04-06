@@ -1,8 +1,10 @@
 pub mod admin;
+#[cfg(not(feature = "chat"))]
 pub mod blocks;
 pub mod events;
 pub mod health;
 pub mod members;
+#[cfg(not(feature = "chat"))]
 pub mod presence;
 pub mod streams;
 pub mod validation;
@@ -33,7 +35,7 @@ pub struct TokenScope(pub Option<String>);
 pub struct RequestId(pub String);
 
 pub fn router(state: Arc<AppState>) -> Router {
-    let tenant_api = Router::new()
+    let mut tenant_api = Router::new()
         .route("/streams", post(streams::create_stream))
         .route("/streams", get(streams::list_streams))
         .route("/streams/{id}", get(streams::get_stream))
@@ -51,22 +53,62 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/streams/{id}/events", post(events::inject_event))
         .route("/streams/{id}/events", get(events::list_events))
-        .route(
-            "/streams/{id}/events/{event_id}",
-            delete(events::delete_event).patch(events::edit_event),
-        )
-        .route(
-            "/streams/{id}/events/{event_id}/reactions",
-            get(events::get_reactions),
-        )
         .route("/streams/{id}/trigger", post(events::trigger_ephemeral))
-        .route("/streams/{id}/cursors", get(events::list_cursors))
-        .route("/streams/{id}/presence", get(presence::stream_presence))
-        .route("/presence/{user_id}", get(presence::user_presence))
-        .route("/blocks", post(blocks::block_user))
-        .route("/blocks", delete(blocks::unblock_user))
-        .route("/blocks/{user_id}", get(blocks::list_blocked))
-        .route("/stats", get(health::tenant_stats))
+        .route("/stats", get(health::tenant_stats));
+
+    // Chat-specific routes: event edit/delete, reactions, cursors, presence, blocks
+    #[cfg(feature = "chat")]
+    {
+        tenant_api = tenant_api
+            .route(
+                "/streams/{id}/events/{event_id}",
+                delete(crate::chat::http_events_ext::delete_event)
+                    .patch(crate::chat::http_events_ext::edit_event),
+            )
+            .route(
+                "/streams/{id}/events/{event_id}/reactions",
+                get(crate::chat::http_events_ext::get_reactions),
+            )
+            .route(
+                "/streams/{id}/cursors",
+                get(crate::chat::http_events_ext::list_cursors),
+            )
+            .route(
+                "/streams/{id}/presence",
+                get(crate::chat::http_presence::stream_presence),
+            )
+            .route(
+                "/presence/{user_id}",
+                get(crate::chat::http_presence::user_presence),
+            )
+            .route("/blocks", post(crate::chat::http_blocks::block_user))
+            .route("/blocks", delete(crate::chat::http_blocks::unblock_user))
+            .route(
+                "/blocks/{user_id}",
+                get(crate::chat::http_blocks::list_blocked),
+            );
+    }
+
+    #[cfg(not(feature = "chat"))]
+    {
+        tenant_api = tenant_api
+            .route(
+                "/streams/{id}/events/{event_id}",
+                delete(events::delete_event).patch(events::edit_event),
+            )
+            .route(
+                "/streams/{id}/events/{event_id}/reactions",
+                get(events::get_reactions),
+            )
+            .route("/streams/{id}/cursors", get(events::list_cursors))
+            .route("/streams/{id}/presence", get(presence::stream_presence))
+            .route("/presence/{user_id}", get(presence::user_presence))
+            .route("/blocks", post(blocks::block_user))
+            .route("/blocks", delete(blocks::unblock_user))
+            .route("/blocks/{user_id}", get(blocks::list_blocked));
+    }
+
+    let tenant_api = tenant_api
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1MB
         .layer(middleware::from_fn(scope_check_middleware))
         .layer(middleware::from_fn_with_state(

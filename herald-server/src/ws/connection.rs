@@ -200,6 +200,13 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "authenticated");
 
+    // Reconnect catchup: subscribes first, then queries historical events.
+    // Subscribe-before-query means live fanout and catchup can overlap — the
+    // client-side dedup set handles this. A narrow gap exists: if an event's
+    // store write is in-flight during the catchup query AND the connection's
+    // channel is full (256 msgs) when fanout fires, that event could be missed.
+    // This requires simultaneous store-write latency and channel backpressure
+    // and is accepted as at-most-once delivery semantics.
     if let Some(since) = last_seen_at {
         reconnect_catchup(
             &state,
@@ -285,16 +292,19 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "disconnected");
 
     // Clear typing state and broadcast stop for any streams this user was typing in
-    let typing_streams = state.typing.remove_user(&tenant_id, &user_id);
-    for stream_id in typing_streams {
-        let msg = ServerMessage::Typing {
-            payload: herald_core::protocol::TypingPayload {
-                stream: stream_id.clone(),
-                user_id: user_id.clone(),
-                active: false,
-            },
-        };
-        crate::ws::fanout::fanout_to_stream(&state, &tenant_id, &stream_id, &msg, None);
+    #[cfg(feature = "chat")]
+    {
+        let typing_streams = state.typing.remove_user(&tenant_id, &user_id);
+        for stream_id in typing_streams {
+            let msg = ServerMessage::Typing {
+                payload: herald_core::protocol::TypingPayload {
+                    stream: stream_id.clone(),
+                    user_id: user_id.clone(),
+                    active: false,
+                },
+            };
+            crate::ws::fanout::fanout_to_stream(&state, &tenant_id, &stream_id, &msg, None);
+        }
     }
 
     state.event_bus.push_event(
@@ -429,6 +439,11 @@ async fn reconnect_catchup(
             }
         }
 
+        #[cfg(feature = "chat")]
+        let cursor = crate::chat::store_cursors::get(&*state.db, tenant_id, stream_id, user_id)
+            .await
+            .unwrap_or(0);
+        #[cfg(not(feature = "chat"))]
         let cursor = store::cursors::get(&*state.db, tenant_id, stream_id, user_id)
             .await
             .unwrap_or(0);

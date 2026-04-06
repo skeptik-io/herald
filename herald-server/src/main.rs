@@ -43,28 +43,39 @@ async fn main() -> anyhow::Result<()> {
     // Validate configuration before proceeding
     config.validate(!single_tenant)?;
 
-    // Open ShroudB storage engine
-    let data_dir = &config.store.path;
-    if let Some(parent) = data_dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let storage_config = shroudb_storage::StorageEngineConfig {
-        data_dir: data_dir.to_path_buf(),
-        ..Default::default()
+    // Open ShroudB storage — embedded (local WAL) or remote (shared server)
+    let db: Arc<herald_server::store_backend::StoreBackend> = match config.store.mode.as_str() {
+        "remote" => {
+            let addr = config.store.addr.as_deref().unwrap(); // validated above
+            info!(addr = %addr, "connecting to remote ShroudB");
+            let remote = shroudb_client::RemoteStore::connect(addr)
+                .await
+                .map_err(|e| anyhow::anyhow!("remote store connect failed: {e}"))?;
+            info!(addr = %addr, "remote store ready");
+            Arc::new(herald_server::store_backend::StoreBackend::Remote(remote))
+        }
+        _ => {
+            let data_dir = &config.store.path;
+            if let Some(parent) = data_dir.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let storage_config = shroudb_storage::StorageEngineConfig {
+                data_dir: data_dir.to_path_buf(),
+                ..Default::default()
+            };
+            let master_key = shroudb_storage::ChainedMasterKeySource::default_chain();
+            let storage = Arc::new(
+                shroudb_storage::StorageEngine::open(storage_config, &master_key)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("storage engine failed: {e}"))?,
+            );
+            let embedded = shroudb_storage::EmbeddedStore::new(storage.clone(), "herald");
+            info!(data_dir = %data_dir.display(), "embedded store ready");
+            Arc::new(herald_server::store_backend::StoreBackend::Embedded(
+                embedded,
+            ))
+        }
     };
-
-    let master_key = shroudb_storage::ChainedMasterKeySource::default_chain();
-    let storage = Arc::new(
-        shroudb_storage::StorageEngine::open(storage_config, &master_key)
-            .await
-            .map_err(|e| anyhow::anyhow!("storage engine failed: {e}"))?,
-    );
-    let db = Arc::new(shroudb_storage::EmbeddedStore::new(
-        storage.clone(),
-        "herald",
-    ));
-    info!(data_dir = %data_dir.display(), "storage engine ready");
 
     // Initialize namespaces
     store::init_namespaces(&*db)
@@ -77,21 +88,24 @@ async fn main() -> anyhow::Result<()> {
     let tls_config = config.tls.clone();
 
     // Initialize ShroudB integrations — Sentry for authorization.
-    let sentry_store = Arc::new(shroudb_storage::EmbeddedStore::new(
-        storage.clone(),
-        "sentry",
-    ));
-
+    // Embedded Sentry is only available in embedded store mode (needs local WAL).
     let mut sentry: Option<Arc<dyn integrations::SentryOps>> =
-        match integrations::embedded_sentry::EmbeddedSentryOps::new(sentry_store).await {
-            Ok(s) => {
-                info!("Sentry engine initialized (embedded)");
-                Some(Arc::new(s))
+        if let herald_server::store_backend::StoreBackend::Embedded(ref embedded) = *db {
+            let engine = embedded.engine().clone();
+            let sentry_store = Arc::new(shroudb_storage::EmbeddedStore::new(engine, "sentry"));
+            match integrations::embedded_sentry::EmbeddedSentryOps::new(sentry_store).await {
+                Ok(s) => {
+                    info!("Sentry engine initialized (embedded)");
+                    Some(Arc::new(s) as Arc<dyn integrations::SentryOps>)
+                }
+                Err(e) => {
+                    warn!("embedded Sentry init failed: {e}");
+                    None
+                }
             }
-            Err(e) => {
-                warn!("embedded Sentry init failed: {e}");
-                None
-            }
+        } else {
+            info!("remote store mode — embedded Sentry unavailable, use [shroudb].sentry_addr");
+            None
         };
     let mut courier: Option<Arc<dyn integrations::CourierOps>> = None;
     let mut chronicle: Option<Arc<dyn integrations::ChronicleOps>> = None;
@@ -234,30 +248,33 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Typing TTL expiry — every 5 seconds
-    let typing_state = state.clone();
-    let typing_handle = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let expired = typing_state.typing.expire();
-            for (tenant_id, stream_id, user_id) in expired {
-                let msg = herald_core::protocol::ServerMessage::Typing {
-                    payload: herald_core::protocol::TypingPayload {
-                        stream: stream_id.clone(),
-                        user_id: user_id.clone(),
-                        active: false,
-                    },
-                };
-                herald_server::ws::fanout::fanout_to_stream(
-                    &typing_state,
-                    &tenant_id,
-                    &stream_id,
-                    &msg,
-                    None,
-                );
+    // Typing TTL expiry — every 5 seconds (chat feature only)
+    #[cfg(feature = "chat")]
+    let typing_handle = {
+        let typing_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let expired = typing_state.typing.expire();
+                for (tenant_id, stream_id, user_id) in expired {
+                    let msg = herald_core::protocol::ServerMessage::Typing {
+                        payload: herald_core::protocol::TypingPayload {
+                            stream: stream_id.clone(),
+                            user_id: user_id.clone(),
+                            active: false,
+                        },
+                    };
+                    herald_server::ws::fanout::fanout_to_stream(
+                        &typing_state,
+                        &tenant_id,
+                        &stream_id,
+                        &msg,
+                        None,
+                    );
+                }
             }
-        }
-    });
+        })
+    };
 
     // TTL cleanup
     let cleanup_db = state.db.clone();
@@ -342,6 +359,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        #[cfg(feature = "chat")]
         typing_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
@@ -390,6 +408,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        #[cfg(feature = "chat")]
         typing_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {

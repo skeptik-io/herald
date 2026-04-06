@@ -127,7 +127,7 @@ impl TenantMetrics {
 
 pub struct AppState {
     pub config: HeraldConfig,
-    pub db: Arc<shroudb_storage::EmbeddedStore>,
+    pub db: Arc<crate::store_backend::StoreBackend>,
     pub connections: ConnectionRegistry,
     pub streams: StreamRegistry,
     pub presence: PresenceTracker,
@@ -147,7 +147,7 @@ pub struct AppState {
 
 pub struct AppStateBuilder {
     pub config: HeraldConfig,
-    pub db: Arc<shroudb_storage::EmbeddedStore>,
+    pub db: Arc<crate::store_backend::StoreBackend>,
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,

@@ -44,19 +44,68 @@ pub async fn handle_message(
             id,
             body,
         } => {
-            handle_edit(state, ctx, tx, ref_, stream, id, body).await;
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_edit(state, ctx, tx, ref_, stream, id, body).await;
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = (stream, id, body);
+                let _ = tx
+                    .send(ServerMessage::error(
+                        ref_,
+                        ErrorCode::BadRequest,
+                        "event editing requires the chat feature",
+                    ))
+                    .await;
+            }
         }
         ClientMessage::CursorUpdate { stream, seq } => {
-            handle_cursor_update(state, ctx, stream, seq).await;
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_cursor_update(state, ctx, stream, seq).await;
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = (stream, seq);
+            }
         }
         ClientMessage::PresenceSet { ref_, status } => {
-            handle_presence_set(state, ctx, tx, ref_, status).await;
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_presence_set(state, ctx, tx, ref_, status).await;
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = status;
+                let _ = tx
+                    .send(ServerMessage::error(
+                        ref_,
+                        ErrorCode::BadRequest,
+                        "manual presence requires the chat feature",
+                    ))
+                    .await;
+            }
         }
         ClientMessage::TypingStart { stream } => {
-            handle_typing(state, ctx, &stream, true);
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_typing(state, ctx, &stream, true);
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = stream;
+            }
         }
         ClientMessage::TypingStop { stream } => {
-            handle_typing(state, ctx, &stream, false);
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_typing(state, ctx, &stream, false);
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = stream;
+            }
         }
         ClientMessage::EventsFetch {
             ref_,
@@ -67,7 +116,21 @@ pub async fn handle_message(
             handle_fetch(state, ctx, tx, ref_, stream, before, limit).await;
         }
         ClientMessage::EventDelete { ref_, stream, id } => {
-            handle_delete(state, ctx, tx, ref_, stream, id).await;
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_delete(state, ctx, tx, ref_, stream, id).await;
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = (stream, id);
+                let _ = tx
+                    .send(ServerMessage::error(
+                        ref_,
+                        ErrorCode::BadRequest,
+                        "event deletion requires the chat feature",
+                    ))
+                    .await;
+            }
         }
         ClientMessage::EventTrigger {
             ref_,
@@ -83,7 +146,24 @@ pub async fn handle_message(
             event_id,
             emoji,
         } => {
-            handle_reaction(state, ctx, tx, ref_, stream, event_id, emoji, true).await;
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_reaction(
+                    state, ctx, tx, ref_, stream, event_id, emoji, true,
+                )
+                .await;
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = (stream, event_id, emoji);
+                let _ = tx
+                    .send(ServerMessage::error(
+                        ref_,
+                        ErrorCode::BadRequest,
+                        "reactions require the chat feature",
+                    ))
+                    .await;
+            }
         }
         ClientMessage::ReactionRemove {
             ref_,
@@ -91,7 +171,24 @@ pub async fn handle_message(
             event_id,
             emoji,
         } => {
-            handle_reaction(state, ctx, tx, ref_, stream, event_id, emoji, false).await;
+            #[cfg(feature = "chat")]
+            {
+                crate::chat::ws_handler::handle_reaction(
+                    state, ctx, tx, ref_, stream, event_id, emoji, false,
+                )
+                .await;
+            }
+            #[cfg(not(feature = "chat"))]
+            {
+                let _ = (stream, event_id, emoji);
+                let _ = tx
+                    .send(ServerMessage::error(
+                        ref_,
+                        ErrorCode::BadRequest,
+                        "reactions require the chat feature",
+                    ))
+                    .await;
+            }
         }
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
@@ -176,6 +273,11 @@ async fn handle_subscribe(
             }
         }
 
+        #[cfg(feature = "chat")]
+        let cursor = crate::chat::store_cursors::get(&*state.db, tid, &stream_id, &ctx.user_id)
+            .await
+            .unwrap_or(0);
+        #[cfg(not(feature = "chat"))]
         let cursor = store::cursors::get(&*state.db, tid, &stream_id, &ctx.user_id)
             .await
             .unwrap_or(0);
@@ -261,8 +363,20 @@ async fn handle_publish(
         return;
     }
 
-    // Validate attachments in meta
+    // Validate meta size (match HTTP 16KB limit)
     if let Some(ref m) = meta {
+        if let Ok(s) = serde_json::to_string(m) {
+            if s.len() > 16_384 {
+                let _ = tx
+                    .send(ServerMessage::error(
+                        ref_,
+                        ErrorCode::BadRequest,
+                        "meta field exceeds maximum size (16384 bytes)",
+                    ))
+                    .await;
+                return;
+            }
+        }
         if let Some(attachments) = m.get("attachments") {
             if let Some(arr) = attachments.as_array() {
                 if arr.len() > 10 {
@@ -325,6 +439,12 @@ async fn handle_publish(
 
     let total_start = std::time::Instant::now();
 
+    // Sequence is allocated before storage. If the store write below fails,
+    // this seq is consumed but no event exists at it — creating a gap in the
+    // sequence. This is accepted: seq-based queries (list_after, list_before)
+    // handle gaps correctly, and the gap is harmless to consumers. Avoiding
+    // it would require post-write seq assignment which complicates the key
+    // construction (event_key needs the seq).
     let seq = state.streams.next_seq(tid, &stream);
     let now = now_millis();
     let event_id = uuid::Uuid::new_v4().to_string();
@@ -426,60 +546,6 @@ async fn handle_publish(
     state.metrics.event_total.observe_since(total_start);
 }
 
-async fn handle_cursor_update(state: &Arc<AppState>, ctx: &ConnContext, stream: String, seq: u64) {
-    let now = now_millis();
-    let _ =
-        store::cursors::upsert(&*state.db, &ctx.tenant_id, &stream, &ctx.user_id, seq, now).await;
-
-    let msg = ServerMessage::CursorMoved {
-        payload: CursorMovedPayload {
-            stream: stream.clone(),
-            user_id: ctx.user_id.clone(),
-            seq,
-        },
-    };
-    fanout_to_stream(state, &ctx.tenant_id, &stream, &msg, Some(ctx.conn_id));
-}
-
-async fn handle_presence_set(
-    state: &Arc<AppState>,
-    ctx: &ConnContext,
-    _tx: &mpsc::Sender<ServerMessage>,
-    _ref_: Option<String>,
-    status: herald_core::presence::PresenceStatus,
-) {
-    state
-        .presence
-        .set_manual(&ctx.tenant_id, &ctx.user_id, status);
-
-    let msg = ServerMessage::PresenceChanged {
-        payload: PresenceChangedPayload {
-            user_id: ctx.user_id.clone(),
-            presence: status,
-        },
-    };
-    for stream_id in state
-        .streams
-        .get_member_streams(&ctx.tenant_id, &ctx.user_id)
-    {
-        fanout_to_stream(state, &ctx.tenant_id, &stream_id, &msg, None);
-    }
-}
-
-fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, stream: &str, active: bool) {
-    state
-        .typing
-        .set_typing(&ctx.tenant_id, stream, &ctx.user_id, active);
-    let msg = ServerMessage::Typing {
-        payload: TypingPayload {
-            stream: stream.to_string(),
-            user_id: ctx.user_id.clone(),
-            active,
-        },
-    };
-    fanout_to_stream(state, &ctx.tenant_id, stream, &msg, Some(ctx.conn_id));
-}
-
 async fn handle_fetch(
     state: &Arc<AppState>,
     ctx: &ConnContext,
@@ -537,230 +603,6 @@ async fn handle_fetch(
         .await;
 }
 
-async fn handle_delete(
-    state: &Arc<AppState>,
-    ctx: &ConnContext,
-    tx: &mpsc::Sender<ServerMessage>,
-    ref_: Option<String>,
-    stream: String,
-    id: String,
-) {
-    let tid = &ctx.tenant_id;
-
-    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
-        let _ = tx
-            .send(ServerMessage::error(
-                ref_,
-                ErrorCode::NotSubscribed,
-                "not a member of this stream",
-            ))
-            .await;
-        return;
-    }
-
-    // Look up the event to verify ownership
-    let event = match store::events::get_by_id(&*state.db, tid, &id).await {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::BadRequest,
-                    "event not found",
-                ))
-                .await;
-            return;
-        }
-        Err(e) => {
-            tracing::error!("failed to look up event {id}: {e}");
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::Internal,
-                    "internal error",
-                ))
-                .await;
-            return;
-        }
-    };
-
-    // Only the sender can delete their own event (admin/owner enforcement could be added via Sentry)
-    if event.sender != ctx.user_id {
-        if let Err(e) = state
-            .authorize(tid, &ctx.user_id, "event.delete", &stream)
-            .await
-        {
-            let _ = tx
-                .send(ServerMessage::error(ref_, ErrorCode::Unauthorized, e))
-                .await;
-            return;
-        }
-    }
-
-    match store::events::delete_event(&*state.db, tid, &id).await {
-        Ok(Some(original)) => {
-            let deleted_event = ServerMessage::EventDeleted {
-                payload: EventDeletedPayload {
-                    stream: stream.clone(),
-                    id: id.clone(),
-                    seq: original.seq,
-                },
-            };
-            fanout_to_stream(state, tid, &stream, &deleted_event, None);
-
-            // Ack to sender
-            let _ = tx
-                .send(ServerMessage::EventAck {
-                    ref_,
-                    payload: EventAckPayload {
-                        id,
-                        seq: original.seq,
-                        sent_at: now_millis(),
-                    },
-                })
-                .await;
-        }
-        Ok(None) => {
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::BadRequest,
-                    "event not found",
-                ))
-                .await;
-        }
-        Err(e) => {
-            tracing::error!("failed to delete event {id}: {e}");
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::Internal,
-                    "internal error",
-                ))
-                .await;
-        }
-    }
-}
-
-async fn handle_edit(
-    state: &Arc<AppState>,
-    ctx: &ConnContext,
-    tx: &mpsc::Sender<ServerMessage>,
-    ref_: Option<String>,
-    stream: String,
-    id: String,
-    body: String,
-) {
-    let tid = &ctx.tenant_id;
-
-    if body.len() > 65_536 {
-        let _ = tx
-            .send(ServerMessage::error(
-                ref_,
-                ErrorCode::BadRequest,
-                "event body exceeds maximum length",
-            ))
-            .await;
-        return;
-    }
-
-    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
-        let _ = tx
-            .send(ServerMessage::error(
-                ref_,
-                ErrorCode::NotSubscribed,
-                "not a member of this stream",
-            ))
-            .await;
-        return;
-    }
-
-    // Look up original to check sender
-    let event = match store::events::get_by_id(&*state.db, tid, &id).await {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::BadRequest,
-                    "event not found",
-                ))
-                .await;
-            return;
-        }
-        Err(e) => {
-            tracing::error!("failed to look up event {id}: {e}");
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::Internal,
-                    "internal error",
-                ))
-                .await;
-            return;
-        }
-    };
-
-    // Only sender can edit (or Sentry authorize)
-    if event.sender != ctx.user_id {
-        if let Err(e) = state
-            .authorize(tid, &ctx.user_id, "event.edit", &stream)
-            .await
-        {
-            let _ = tx
-                .send(ServerMessage::error(ref_, ErrorCode::Unauthorized, e))
-                .await;
-            return;
-        }
-    }
-
-    let now = now_millis();
-    match store::events::edit_event(&*state.db, tid, &id, &body, now).await {
-        Ok(Some(updated)) => {
-            let edited_event = ServerMessage::EventEdited {
-                payload: EventEditedPayload {
-                    stream: stream.clone(),
-                    id: id.clone(),
-                    seq: updated.seq,
-                    body: body.clone(),
-                    edited_at: now,
-                },
-            };
-            fanout_to_stream(state, tid, &stream, &edited_event, None);
-
-            let _ = tx
-                .send(ServerMessage::EventAck {
-                    ref_,
-                    payload: EventAckPayload {
-                        id,
-                        seq: updated.seq,
-                        sent_at: now,
-                    },
-                })
-                .await;
-        }
-        Ok(None) => {
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::BadRequest,
-                    "event not found",
-                ))
-                .await;
-        }
-        Err(e) => {
-            tracing::error!("failed to edit event {id}: {e}");
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::Internal,
-                    "internal error",
-                ))
-                .await;
-        }
-    }
-}
-
 async fn handle_ephemeral_trigger(
     state: &Arc<AppState>,
     ctx: &ConnContext,
@@ -809,79 +651,5 @@ async fn handle_ephemeral_trigger(
     // Ack to sender (lightweight — no seq/id since ephemeral)
     if let Some(r) = ref_ {
         let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_reaction(
-    state: &Arc<AppState>,
-    ctx: &ConnContext,
-    tx: &mpsc::Sender<ServerMessage>,
-    ref_: Option<String>,
-    stream: String,
-    event_id: String,
-    emoji: String,
-    add: bool,
-) {
-    let tid = &ctx.tenant_id;
-    if !state.streams.is_member(tid, &stream, &ctx.user_id) {
-        let _ = tx
-            .send(ServerMessage::error(
-                ref_,
-                ErrorCode::NotSubscribed,
-                "not a member of this stream",
-            ))
-            .await;
-        return;
-    }
-    if emoji.len() > 32 {
-        let _ = tx
-            .send(ServerMessage::error(
-                ref_,
-                ErrorCode::BadRequest,
-                "emoji too long",
-            ))
-            .await;
-        return;
-    }
-
-    let result = if add {
-        store::reactions::add(&*state.db, tid, &stream, &event_id, &emoji, &ctx.user_id).await
-    } else {
-        store::reactions::remove(&*state.db, tid, &stream, &event_id, &emoji, &ctx.user_id)
-            .await
-            .map(|_| ())
-    };
-
-    match result {
-        Ok(()) => {
-            let msg = ServerMessage::ReactionChanged {
-                payload: ReactionChangedPayload {
-                    stream: stream.clone(),
-                    event_id,
-                    emoji,
-                    user_id: ctx.user_id.clone(),
-                    action: if add {
-                        "add".to_string()
-                    } else {
-                        "remove".to_string()
-                    },
-                },
-            };
-            fanout_to_stream(state, tid, &stream, &msg, None);
-            if let Some(r) = ref_ {
-                let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;
-            }
-        }
-        Err(e) => {
-            tracing::error!("reaction error: {e}");
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::Internal,
-                    "internal error",
-                ))
-                .await;
-        }
     }
 }

@@ -141,6 +141,8 @@ pub struct AppState {
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
     pub metering: Option<Arc<crate::metering::MeteringClient>>,
     pub sigil: Option<Arc<crate::signup::SigilHttpClient>>,
+    /// Per-IP rate limiter for public signup/login endpoints.
+    pub signup_rate_limits: DashMap<String, Arc<RateLimitEntry>>,
     /// Cached plan limits per tenant (from Meterd or built-in defaults).
     pub plan_limits_cache: DashMap<String, (crate::config::PlanLimits, std::time::Instant)>,
     pub metrics: Metrics,
@@ -186,6 +188,7 @@ impl AppState {
             chronicle: b.chronicle,
             metering: b.metering,
             sigil: b.sigil,
+            signup_rate_limits: DashMap::new(),
             plan_limits_cache: DashMap::new(),
             metrics: Metrics::default(),
             event_bus: EventBus::new(),

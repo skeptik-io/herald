@@ -47,7 +47,7 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Config flag to select embedded vs remote backend
   - [x] Health endpoint reflects backend type
   - [x] Integration test: server boots and operates with embedded backend
-  - [ ] Integration test: server boots and operates with remote backend (mock or real)
+  - [x] Integration test: server boots and operates with remote backend (Docker ShroudB, gated by HERALD_TEST_REMOTE_STORE)
   - [x] `cargo test --workspace` passing
 
 - [x] **H-5: Land WS handler refactor**

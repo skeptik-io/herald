@@ -1548,6 +1548,31 @@ auth_token = "${MOAT_TOKEN}"
         assert(resp.status === 409 || resp.status === 500, `duplicate email should be rejected, got ${resp.status}`);
       });
 
+      await test("signup: rate limiting on auth endpoints", async () => {
+        // Signup rate limit is 10 requests per 60 seconds per IP.
+        // Send 15 rapid requests to /login — some should get 429.
+        const promises = [];
+        for (let i = 0; i < 15; i++) {
+          promises.push(
+            fetch(`${signupBase}/login`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                email: `nonexistent-${i}@test.com`,
+                password: "doesntmatter",
+              }),
+            }).then((r) => r.status)
+          );
+        }
+        const statuses = await Promise.all(promises);
+        const got429 = statuses.filter((s) => s === 429).length;
+        // First 10 should pass (may be 401 for wrong creds), 11-15 should be 429
+        assert(got429 > 0, `should get some 429s after 10 requests, got ${got429} out of 15`);
+        // But not all — first ones should succeed (even if auth fails)
+        const nonRateLimited = statuses.filter((s) => s !== 429).length;
+        assert(nonRateLimited > 0, `first requests should not be rate limited, got ${nonRateLimited} non-429`);
+      });
+
     } finally {
       console.log("\nStopping signup server...");
       await stopSignupServer();

@@ -169,10 +169,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     };
 
     // Public self-serve auth endpoints (no auth required — Sigil handles credentials)
+    // Per-IP rate limited: 10 requests per 60 seconds across all auth endpoints.
     let signup_api = Router::new()
         .route("/signup", post(crate::signup::signup))
         .route("/login", post(crate::signup::login))
-        .route("/auth/refresh", post(crate::signup::refresh));
+        .route("/auth/refresh", post(crate::signup::refresh))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            signup_rate_limit_middleware,
+        ));
 
     Router::new()
         .merge(tenant_api)
@@ -237,6 +242,59 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
         axum::http::HeaderValue::from_static("no-referrer"),
     );
     response
+}
+
+/// Per-IP rate limiter for public signup/login endpoints.
+/// 10 requests per 60 seconds per IP address.
+const SIGNUP_RATE_LIMIT: u32 = 10;
+
+async fn signup_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // Extract client IP from X-Forwarded-For or socket addr
+    let ip = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            req.extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let entry = state
+        .signup_rate_limits
+        .entry(ip)
+        .or_insert_with(|| {
+            Arc::new(RateLimitEntry {
+                count: std::sync::atomic::AtomicU32::new(0),
+                window_start: std::sync::Mutex::new(std::time::Instant::now()),
+            })
+        })
+        .clone();
+
+    {
+        let mut start = entry.window_start.lock().unwrap_or_else(|e| e.into_inner());
+        if start.elapsed().as_secs() >= 60 {
+            *start = std::time::Instant::now();
+            entry.count.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let count = entry
+        .count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    if count > SIGNUP_RATE_LIMIT {
+        return (StatusCode::TOO_MANY_REQUESTS, "signup rate limit exceeded").into_response();
+    }
+
+    next.run(req).await
 }
 
 /// Tenant API auth: validates bearer token against api_tokens table, extracts tenant_id.

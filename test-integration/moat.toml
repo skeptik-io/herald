@@ -1,0 +1,59 @@
+# Moat config for Herald integration tests
+
+[server]
+http_bind = "0.0.0.0:8200"
+resp3_bind = "0.0.0.0:8201"
+
+[storage]
+data_dir = "/data"
+
+# ── Engines ──────────────────────────────────────────────────────
+[engines.shroudb]
+enabled = true
+
+[engines.cipher]
+enabled = true
+
+[engines.sigil]
+enabled = true
+jwt_algorithm = "ES256"
+access_ttl_secs = 900
+refresh_ttl_secs = 604800
+
+[engines.veil]
+enabled = true
+
+[engines.keep]
+enabled = true
+
+[engines.sentry]
+enabled = true
+
+[engines.courier]
+enabled = true
+
+[engines.chronicle]
+enabled = true
+
+# ── Herald Sigil schema ──────────────────────────────────────────
+[[engines.sigil.schemas]]
+name = "herald"
+[engines.sigil.schemas.definition]
+fields = [
+    { name = "email", field_type = "string", annotations = { pii = true, searchable = true } },
+    { name = "password", field_type = "string", annotations = { credential = true } },
+    { name = "tenant_id", field_type = "string", annotations = { index = true } },
+]
+
+# ── Access control ───────────────────────────────────────────────
+[access.policies.admin]
+token = "${MOAT_ADMIN_TOKEN}"
+scopes = ["*:*/*"]
+
+[access.policies.herald]
+token = "${MOAT_BACKEND_TOKEN}"
+scopes = ["*:*/*"]
+
+[access.policies.meterd]
+token = "${METERD_BACKEND_TOKEN}"
+scopes = ["*:*/*"]

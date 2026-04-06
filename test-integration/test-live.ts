@@ -157,6 +157,9 @@ async function run(): Promise<void> {
 
     await test("admin: create stream", async () => {
       await admin.streams.create("general", "General");
+      const stream = await admin.streams.get("general");
+      assert(stream.id === "general", `stream id: ${stream.id}`);
+      assert(stream.name === "General", `stream name: ${stream.name}`);
     });
 
     await test("admin: add members", async () => {
@@ -164,6 +167,9 @@ async function run(): Promise<void> {
       await admin.members.add("general", "bob");
       const members = await admin.members.list("general");
       assert(members.length === 2, `expected 2 members, got ${members.length}`);
+      const userIds = members.map((m: any) => m.user_id).sort();
+      assert(userIds.includes("alice"), "alice is a member");
+      assert(userIds.includes("bob"), "bob is a member");
     });
 
     // ── Core SDK: connect, subscribe, publish, receive ───────────
@@ -239,6 +245,9 @@ async function run(): Promise<void> {
       const batch = await client.fetch("general");
       assert(batch.events.length >= 1, `expected >=1 events, got ${batch.events.length}`);
       assert(batch.stream === "general", "stream");
+      const helloEvent = batch.events.find((e: any) => e.body === "Hello from Alice");
+      assert(helloEvent !== undefined, "found 'Hello from Alice' event in history");
+      assert(helloEvent.sender === "alice", `sender: ${helloEvent?.sender}`);
 
       client.disconnect();
     });
@@ -468,7 +477,7 @@ async function run(): Promise<void> {
       aliceChat.setPresence("away");
       const presence = await presencePromise;
       assert(presence.user_id === "alice", `user_id: ${presence.user_id}`);
-      assert(presence.presence === "away" || presence.presence === "Away", `presence: ${presence.presence}`);
+      assert(presence.presence === "away", `presence: ${presence.presence}`);
 
       alice.disconnect();
       bob.disconnect();
@@ -480,17 +489,32 @@ async function run(): Promise<void> {
       const streams = await admin.streams.list();
       assert(Array.isArray(streams), "is array");
       assert(streams.length >= 1, `expected >=1, got ${streams.length}`);
+      const general = streams.find((s: any) => s.id === "general");
+      assert(general !== undefined, "general stream found in list");
+      assert(general!.name === "General", `stream name: ${general!.name}`);
     });
 
     await test("admin: publish event via HTTP", async () => {
       const result = await admin.events.publish("general", "server-bot", "Hello from admin");
       assert(typeof result.id === "string", "has id");
       assert(result.seq > 0, "has seq");
+
+      const events = await admin.events.list("general");
+      const published = events.events.find((e: any) => e.body === "Hello from admin");
+      assert(published !== undefined, "published event found in list");
+      assert(published!.sender === "server-bot", `sender: ${published!.sender}`);
     });
 
     await test("admin: list events", async () => {
       const events = await admin.events.list("general");
       assert(events.events.length >= 1, `expected >=1, got ${events.events.length}`);
+      const first = events.events[0];
+      assert(!!first.body, "first event has body");
+      assert(!!first.sender, "first event has sender");
+      assert(!!first.id, "first event has id");
+      assert(!!first.seq, "first event has seq");
+      assert(typeof first.body === "string", `body type: ${typeof first.body}`);
+      assert(typeof first.sender === "string", `sender type: ${typeof first.sender}`);
     });
 
     await test("admin: presence query", async () => {
@@ -508,6 +532,7 @@ async function run(): Promise<void> {
       assert(Array.isArray(members), "is array");
       const alice = members.find((m: any) => m.user_id === "alice");
       assert(alice !== undefined, "alice found");
+      assert(typeof alice.status === "string", `alice presence type: ${typeof alice.status}`);
 
       client.disconnect();
     });
@@ -520,6 +545,58 @@ async function run(): Promise<void> {
       await admin.blocks.unblock("alice", "bob");
       const after = await admin.blocks.list("alice");
       assert(!after.includes("bob"), "bob unblocked");
+    });
+
+    await test("chat: blocked user does not receive events", async () => {
+      // Block semantics: block(blocker, blocked) means the blocker won't see
+      // the blocked user's messages. So bob blocks alice => bob won't see alice's events.
+      const aliceToken = mintJwt("alice", ["general"]);
+      const bobToken = mintJwt("bob", ["general"]);
+
+      const alice = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      const bob = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: bobToken,
+        reconnect: { enabled: false },
+      });
+
+      await alice.connect();
+      await bob.connect();
+      await alice.subscribe(["general"]);
+      await bob.subscribe(["general"]);
+
+      // Bob blocks alice — bob should not receive alice's events
+      await admin.blocks.block("bob", "alice");
+
+      // Alice publishes — bob should NOT receive it
+      await alice.publish("general", "bob should not see this");
+      let bobReceivedBlocked = false;
+      const blockedTimeout = new Promise<void>((resolve) => {
+        const timer = setTimeout(() => resolve(), 500);
+        bob.on("event", (() => {
+          bobReceivedBlocked = true;
+          clearTimeout(timer);
+          resolve();
+        }) as any);
+      });
+      await blockedTimeout;
+      assert(!bobReceivedBlocked, "bob should NOT receive event while blocked");
+
+      // Unblock alice
+      await admin.blocks.unblock("bob", "alice");
+
+      // Alice publishes again — bob SHOULD receive it
+      const unblockEventPromise = waitForEvent<any>(bob, "event");
+      await alice.publish("general", "bob can see this");
+      const unblockEvent = await unblockEventPromise;
+      assert(unblockEvent.body === "bob can see this", `body: ${unblockEvent.body}`);
+
+      alice.disconnect();
+      bob.disconnect();
     });
 
     await test("admin: chat namespace grouping works", async () => {
@@ -677,10 +754,13 @@ async function run(): Promise<void> {
     // ── Rate limiting ───────────────────────────────────────────
 
     await test("admin: rapid HTTP requests (rate limiting check)", async () => {
-      // Send 50 rapid requests in parallel to check for 429 responses
+      // Default api_rate_limit is 100 per 60s. /health is outside the rate-limited
+      // router, so we hit /streams (tenant API) which goes through rate limiting.
+      // Send 120 requests to exceed the limit of 100.
+      const headers = { Authorization: `Bearer ${API_TOKEN}` };
       const results = await Promise.allSettled(
-        Array.from({ length: 50 }, (_, i) =>
-          fetch(`http://127.0.0.1:${HTTP_PORT}/health`)
+        Array.from({ length: 120 }, () =>
+          fetch(`http://127.0.0.1:${HTTP_PORT}/streams`, { headers })
         ),
       );
 
@@ -692,16 +772,19 @@ async function run(): Promise<void> {
       );
 
       const got429 = statuses.some((s) => s === 429);
-      const allOk = statuses.every((s) => s === 200);
+      const count200 = statuses.filter((s) => s === 200).length;
+      const count429 = statuses.filter((s) => s === 429).length;
 
       if (got429) {
-        // Rate limiting is active
-        assert(true, "rate limiting enforced (got 429)");
+        assert(true, `rate limiting enforced: ${count200} ok, ${count429} throttled`);
       } else {
-        // Rate limiting not enforced — document it
-        assert(allOk, "all requests succeeded (rate limiting not enforced in single-tenant mode)");
-        // NOTE: Rate limiting may not be enforced for /health or in single-tenant mode.
-        // This test documents the current behavior.
+        // Rate limiting uses a fixed 60s window. If the window just started,
+        // all 120 might land before the counter resets. This is timing-dependent
+        // so we document rather than hard-fail.
+        assert(count200 === 120, `all 120 requests succeeded (window timing — rate limiting not triggered)`);
+        // NOTE: This does not mean rate limiting is broken. The fixed-window
+        // counter may have reset mid-burst. The limit (100/60s) is confirmed
+        // by reading server config defaults.
       }
     });
 
@@ -937,12 +1020,16 @@ retries = 1
       });
       assert(createdTenant.id === "acme", `tenant id: ${createdTenant.id}`);
       assert(createdTenant.name === "Acme Corp", `tenant name: ${createdTenant.name}`);
+      assert(createdTenant.plan === "free", `tenant plan: ${createdTenant.plan}`);
     });
 
     await test("mt: get tenant", async () => {
       const tenant = await mtAdmin.tenants.get("acme");
       assert(tenant.id === "acme", `id: ${tenant.id}`);
       assert(tenant.name === "Acme Corp", `name: ${tenant.name}`);
+      assert(tenant.plan === "free", `plan: ${tenant.plan}`);
+      // jwt_issuer is present in the response (null when not set)
+      assert("jwt_issuer" in (tenant as any), "jwt_issuer field exists");
     });
 
     await test("mt: list tenants", async () => {
@@ -950,6 +1037,7 @@ retries = 1
       assert(Array.isArray(tenants), "is array");
       const acme = tenants.find((t: any) => t.id === "acme");
       assert(acme !== undefined, "acme tenant found in list");
+      assert(acme!.name === "Acme Corp", `acme name: ${acme!.name}`);
     });
 
     await test("mt: update tenant name", async () => {

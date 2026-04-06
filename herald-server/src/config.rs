@@ -51,6 +51,9 @@ fn default_max_streams_per_tenant() -> u32 {
     10000
 }
 
+/// Per-tenant plan limits. When metering is enabled, these are fetched from
+/// Meterd's quota snapshot API. When metering is disabled, the global config
+/// values from `TenantLimitsConfig` and `ServerConfig` apply uniformly.
 #[derive(Debug, Clone)]
 pub struct PlanLimits {
     pub max_connections: u32,
@@ -58,58 +61,6 @@ pub struct PlanLimits {
     pub api_rate_limit: u32, // requests per 60s
     pub events_per_month: u64,
     pub retention_days: u32,
-}
-
-impl Default for PlanLimits {
-    /// Generous defaults used when Meterd is unavailable and the plan is unknown.
-    fn default() -> Self {
-        Self {
-            max_connections: 10_000,
-            max_streams: 10_000,
-            api_rate_limit: 1_000,
-            events_per_month: u64::MAX,
-            retention_days: 7,
-        }
-    }
-}
-
-impl PlanLimits {
-    /// Returns plan-specific limits for known plan tiers, or `None` for
-    /// self-hosted / unknown plans (which fall back to global config).
-    pub fn for_plan(plan: &str) -> Option<Self> {
-        match plan {
-            "free" => Some(PlanLimits {
-                max_connections: 50,
-                max_streams: 10,
-                api_rate_limit: 60,
-                events_per_month: 100_000,
-                retention_days: 7,
-            }),
-            "starter" => Some(PlanLimits {
-                max_connections: 500,
-                max_streams: 100,
-                api_rate_limit: 300,
-                events_per_month: 1_000_000,
-                retention_days: 14,
-            }),
-            "pro" => Some(PlanLimits {
-                max_connections: 5_000,
-                max_streams: 1_000,
-                api_rate_limit: 1_000,
-                events_per_month: 10_000_000,
-                retention_days: 30,
-            }),
-            "business" | "enterprise" => Some(PlanLimits {
-                max_connections: 50_000,
-                max_streams: 10_000,
-                api_rate_limit: 5_000,
-                events_per_month: 100_000_000,
-                retention_days: 90,
-            }),
-            // self-hosted or unknown plans fall back to global config
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]

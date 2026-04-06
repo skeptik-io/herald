@@ -437,9 +437,8 @@ async fn handle_publish(
         return;
     }
 
-    // Enforce events_per_month limit (local counter, fast path)
-    {
-        let plan_limits = state.get_plan_limits_cached(tid);
+    // Enforce events_per_month limit (only when metering enabled — Meterd defines the limit)
+    if let Some(plan_limits) = state.get_plan_limits_cached(tid) {
         let current = state
             .tenant_metrics
             .entry(tid.to_string())

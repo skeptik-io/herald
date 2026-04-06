@@ -435,38 +435,63 @@ impl MeteringClient {
                 self.breaker.record_success();
                 match resp.json::<Vec<QuotaSnapshotEntry>>().await {
                     Ok(entries) => {
-                        let mut limits = crate::config::PlanLimits::default();
+                        let mut max_connections: Option<u32> = None;
+                        let mut max_streams: Option<u32> = None;
+                        let mut api_rate_limit: Option<u32> = None;
+                        let mut events_per_month: Option<u64> = None;
+                        let mut retention_days: Option<u32> = None;
+
                         for entry in &entries {
                             match entry.meter_slug.as_str() {
                                 "max_connections" => {
-                                    if let Some(l) = entry.limit {
-                                        limits.max_connections = l as u32;
-                                    }
+                                    max_connections = entry.limit.map(|l| l as u32);
                                 }
                                 "max_streams" => {
-                                    if let Some(l) = entry.limit {
-                                        limits.max_streams = l as u32;
-                                    }
+                                    max_streams = entry.limit.map(|l| l as u32);
                                 }
                                 "api_rate_limit" => {
-                                    if let Some(l) = entry.limit {
-                                        limits.api_rate_limit = l as u32;
-                                    }
+                                    api_rate_limit = entry.limit.map(|l| l as u32);
                                 }
                                 "events_per_month" | "events_published" => {
-                                    if let Some(l) = entry.limit {
-                                        limits.events_per_month = l;
-                                    }
+                                    events_per_month = entry.limit;
                                 }
                                 "retention_days" => {
-                                    if let Some(l) = entry.limit {
-                                        limits.retention_days = l as u32;
-                                    }
+                                    retention_days = entry.limit.map(|l| l as u32);
                                 }
-                                _ => {}
+                                slug => {
+                                    debug!(slug, "metering: unknown meter slug in quota snapshot");
+                                }
                             }
                         }
-                        Some(limits)
+
+                        // All required meters must be present in the snapshot
+                        let missing: Vec<&str> = [
+                            max_connections.is_none().then_some("max_connections"),
+                            max_streams.is_none().then_some("max_streams"),
+                            api_rate_limit.is_none().then_some("api_rate_limit"),
+                            events_per_month.is_none().then_some("events_per_month"),
+                            retention_days.is_none().then_some("retention_days"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+
+                        if !missing.is_empty() {
+                            warn!(
+                                customer = customer_id,
+                                ?missing,
+                                "metering: quota snapshot missing expected meters"
+                            );
+                            return None;
+                        }
+
+                        Some(crate::config::PlanLimits {
+                            max_connections: max_connections.unwrap(),
+                            max_streams: max_streams.unwrap(),
+                            api_rate_limit: api_rate_limit.unwrap(),
+                            events_per_month: events_per_month.unwrap(),
+                            retention_days: retention_days.unwrap(),
+                        })
                     }
                     Err(e) => {
                         warn!(error = %e, "metering: failed to parse quota snapshot");

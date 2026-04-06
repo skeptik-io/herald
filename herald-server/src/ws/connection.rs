@@ -111,10 +111,12 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     let user_id = claims.sub.clone();
     let streams_claim = claims.streams.clone();
 
-    // Enforce per-tenant connection limit (plan-aware, cache-only for sync path)
+    // Enforce per-tenant connection limit
     let tenant_conns = state.connections.tenant_connection_count(&tenant_id);
-    let plan_limits = state.get_plan_limits_cached(&tenant_id);
-    let max_conns = plan_limits.max_connections as usize;
+    let max_conns = state
+        .get_plan_limits_cached(&tenant_id)
+        .map(|pl| pl.max_connections as usize)
+        .unwrap_or(state.config.tenant_limits.max_connections_per_tenant as usize);
     if tenant_conns >= max_conns {
         let _ = msg_tx
             .send(ServerMessage::error(

@@ -31,14 +31,17 @@ module HeraldAdmin
       EventList.new(events: events, has_more: data["has_more"] || false)
     end
 
+    # @chat Chat-specific operation — event deletion.
     def delete(stream_id, event_id)
       @t.request("DELETE", "/streams/#{esc(stream_id)}/events/#{esc(event_id)}")
     end
 
+    # @chat Chat-specific operation — event editing.
     def edit(stream_id, event_id, body)
       @t.request("PATCH", "/streams/#{esc(stream_id)}/events/#{esc(event_id)}", { body: body })
     end
 
+    # @chat Chat-specific operation — reaction queries.
     def get_reactions(stream_id, event_id)
       data = @t.request("GET", "/streams/#{esc(stream_id)}/events/#{esc(event_id)}/reactions")
       data["reactions"]

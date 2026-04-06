@@ -15,14 +15,27 @@ type Options struct {
 	Token string
 }
 
+// ChatNamespaces groups chat-specific (conversational layer) namespaces.
+type ChatNamespaces struct {
+	Presence *PresenceNamespace
+	Blocks   *BlockNamespace
+}
+
 // HeraldAdmin is the Herald HTTP admin client.
 type HeraldAdmin struct {
-	Streams  *StreamNamespace
-	Members  *MemberNamespace
-	Events   *EventNamespace
+	// Core namespaces (event transport)
+	Streams *StreamNamespace
+	Members *MemberNamespace
+	Events  *EventNamespace
+	Tenants *TenantNamespace
+
+	// Deprecated: Use Chat.Presence instead.
 	Presence *PresenceNamespace
-	Tenants  *TenantNamespace
-	Blocks   *BlockNamespace
+	// Deprecated: Use Chat.Blocks instead.
+	Blocks *BlockNamespace
+
+	// Chat groups chat-specific namespaces (conversational layer).
+	Chat *ChatNamespaces
 
 	transport *httpTransport
 }
@@ -30,13 +43,16 @@ type HeraldAdmin struct {
 // New creates a new Herald admin client.
 func New(opts Options) *HeraldAdmin {
 	t := newTransport(opts.URL, opts.Token)
+	presence := &PresenceNamespace{t: t}
+	blocks := &BlockNamespace{t: t}
 	return &HeraldAdmin{
 		Streams:   &StreamNamespace{t: t},
 		Members:   &MemberNamespace{t: t},
 		Events:    &EventNamespace{t: t},
-		Presence:  &PresenceNamespace{t: t},
+		Presence:  presence,
 		Tenants:   &TenantNamespace{t: t},
-		Blocks:    &BlockNamespace{t: t},
+		Blocks:    blocks,
+		Chat:      &ChatNamespaces{Presence: presence, Blocks: blocks},
 		transport: t,
 	}
 }
@@ -207,16 +223,19 @@ func (ns *EventNamespace) Publish(ctx context.Context, streamID, sender, body st
 	return &result, nil
 }
 
+// Delete is a chat-specific operation — event deletion.
 func (ns *EventNamespace) Delete(ctx context.Context, streamID, eventID string) error {
 	_, err := ns.t.request(ctx, "DELETE", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID), nil)
 	return err
 }
 
+// Edit is a chat-specific operation — event editing.
 func (ns *EventNamespace) Edit(ctx context.Context, streamID, eventID, body string) error {
 	_, err := ns.t.request(ctx, "PATCH", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID), map[string]string{"body": body})
 	return err
 }
 
+// GetReactions is a chat-specific operation — reaction queries.
 func (ns *EventNamespace) GetReactions(ctx context.Context, streamID, eventID string) ([]ReactionSummary, error) {
 	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID)+"/reactions", nil)
 	if err != nil {
@@ -300,6 +319,7 @@ func (ns *EventNamespace) Search(ctx context.Context, streamID, query string, li
 }
 
 // PresenceNamespace provides presence query operations.
+// This is a chat-specific namespace (conversational layer).
 type PresenceNamespace struct{ t *httpTransport }
 
 func (ns *PresenceNamespace) GetUser(ctx context.Context, userID string) (*UserPresence, error) {
@@ -522,6 +542,7 @@ func (ns *TenantNamespace) ListStreams(ctx context.Context, tenantID string) ([]
 }
 
 // BlockNamespace provides user blocking operations.
+// This is a chat-specific namespace (conversational layer).
 type BlockNamespace struct{ t *httpTransport }
 
 func (ns *BlockNamespace) Block(ctx context.Context, userID, blockedID string) error {

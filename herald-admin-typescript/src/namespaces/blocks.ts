@@ -1,5 +1,6 @@
 import type { HttpTransport } from "../transport.js";
 
+/** @chat Chat-specific namespace — user blocking operations. */
 export class BlockNamespace {
   constructor(private transport: HttpTransport) {}
 

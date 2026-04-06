@@ -106,12 +106,15 @@ class EventNamespace:
         return EventList(events=events, has_more=data.get("has_more", False))
 
     def delete(self, stream_id: str, event_id: str) -> None:
+        """Chat-specific operation — event deletion."""
         self._t.request("DELETE", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}")
 
     def edit(self, stream_id: str, event_id: str, body: str) -> None:
+        """Chat-specific operation — event editing."""
         self._t.request("PATCH", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}", {"body": body})
 
     def get_reactions(self, stream_id: str, event_id: str) -> list[dict]:
+        """Chat-specific operation — reaction queries."""
         data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}/reactions")
         return data["reactions"]
 
@@ -135,6 +138,8 @@ class EventNamespace:
 
 
 class PresenceNamespace:
+    """Chat-specific namespace — user and stream presence queries."""
+
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
@@ -199,6 +204,8 @@ class TenantNamespace:
 
 
 class BlockNamespace:
+    """Chat-specific namespace — user blocking operations."""
+
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
@@ -213,18 +220,35 @@ class BlockNamespace:
         return data["blocked"]
 
 
+@dataclass
+class _ChatNamespaces:
+    """Chat-specific namespaces (conversational layer)."""
+    presence: PresenceNamespace
+    blocks: BlockNamespace
+
+
 class HeraldAdmin:
     """Herald HTTP admin client for Python backends."""
 
     def __init__(self, url: str, token: str, *, timeout: int = 30) -> None:
         t = HttpTransport(url, token, timeout=timeout)
+        # Core namespaces (event transport)
         self.streams = StreamNamespace(t)
         self.members = MemberNamespace(t)
         self.events = EventNamespace(t)
-        self.presence = PresenceNamespace(t)
         self.tenants = TenantNamespace(t)
+        # Chat namespaces (conversational layer) — deprecated at top level, use self.chat.*
+        self.presence = PresenceNamespace(t)
         self.blocks = BlockNamespace(t)
         self._transport = t
+
+    @property
+    def chat(self) -> "_ChatNamespaces":
+        """Chat-specific namespaces (conversational layer).
+
+        Groups presence and block operations that are part of the Herald Chat product.
+        """
+        return _ChatNamespaces(presence=self.presence, blocks=self.blocks)
 
     @classmethod
     def from_options(cls, opts: HeraldAdminOptions) -> "HeraldAdmin":

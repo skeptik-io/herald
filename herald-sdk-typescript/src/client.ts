@@ -27,7 +27,7 @@ import type {
 type Handler<T> = (data: T) => void;
 
 let refCounter = 0;
-function nextRef(): string {
+export function nextRef(): string {
   return `r${++refCounter}`;
 }
 
@@ -179,32 +179,6 @@ export class HeraldClient {
     }) as Promise<EventAck>;
   }
 
-  async editEvent(stream: string, id: string, body: string): Promise<EventAck> {
-    const ref = nextRef();
-    const { body: finalBody } = this.e2ee
-      ? this.e2ee.encryptOutgoing(stream, body)
-      : { body };
-    return this.request(ref, {
-      type: "event.edit",
-      ref,
-      payload: { stream, id, body: finalBody },
-    }) as Promise<EventAck>;
-  }
-
-  addReaction(stream: string, eventId: string, emoji: string): void {
-    this.connection.send({
-      type: "reaction.add",
-      payload: { stream, event_id: eventId, emoji },
-    });
-  }
-
-  removeReaction(stream: string, eventId: string, emoji: string): void {
-    this.connection.send({
-      type: "reaction.remove",
-      payload: { stream, event_id: eventId, emoji },
-    });
-  }
-
   async fetch(
     stream: string,
     options?: { before?: number; limit?: number },
@@ -217,40 +191,6 @@ export class HeraldClient {
     }) as Promise<EventsBatch>;
   }
 
-  // ── Presence ───────────────────────────────────────────────────────
-
-  setPresence(status: "online" | "away" | "dnd"): void {
-    this.connection.send({
-      type: "presence.set",
-      payload: { status },
-    });
-  }
-
-  // ── Cursors ────────────────────────────────────────────────────────
-
-  updateCursor(stream: string, seq: number): void {
-    this.connection.send({
-      type: "cursor.update",
-      payload: { stream, seq },
-    });
-  }
-
-  // ── Typing ─────────────────────────────────────────────────────────
-
-  startTyping(stream: string): void {
-    this.connection.send({
-      type: "typing.start",
-      payload: { stream },
-    });
-  }
-
-  stopTyping(stream: string): void {
-    this.connection.send({
-      type: "typing.stop",
-      payload: { stream },
-    });
-  }
-
   // ── Ephemeral Events ────────────────────────────────────────────────
 
   /** Trigger an ephemeral event (not persisted). */
@@ -261,14 +201,21 @@ export class HeraldClient {
     });
   }
 
-  /** Delete an event. */
-  async deleteEvent(stream: string, id: string): Promise<EventAck> {
-    const ref = nextRef();
-    return this.request(ref, {
-      type: "event.delete",
-      ref,
-      payload: { stream, id },
-    }) as Promise<EventAck>;
+  // ── Frame primitives (for extension SDKs) ──────────────────────────
+
+  /** Send a fire-and-forget frame. Used by extension SDKs (e.g. herald-chat-sdk). */
+  sendFrame(frame: Record<string, unknown>): void {
+    this.connection.send(frame);
+  }
+
+  /** Send a request frame and await a response. Used by extension SDKs. */
+  requestFrame(ref: string, frame: Record<string, unknown>): Promise<unknown> {
+    return this.request(ref, frame);
+  }
+
+  /** E2EE manager for extension SDKs that need to encrypt/decrypt. */
+  get e2eeManager(): E2EEManager | null {
+    return this.e2ee;
   }
 
   // ── Events ─────────────────────────────────────────────────────────

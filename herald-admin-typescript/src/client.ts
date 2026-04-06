@@ -30,12 +30,27 @@ export interface ErrorListOptions {
  * member management, event publishing, and presence queries.
  */
 export class HeraldAdmin {
+  // --- Core namespaces (event transport) ---
   public readonly streams: StreamNamespace;
   public readonly members: MemberNamespace;
   public readonly events: EventNamespace;
-  public readonly presence: PresenceNamespace;
   public readonly tenants: TenantNamespace;
+
+  // --- Chat namespaces (conversational layer) ---
+
+  /** @deprecated Use `chat.presence` instead. */
+  public readonly presence: PresenceNamespace;
+  /** @deprecated Use `chat.blocks` instead. */
   public readonly blocks: BlockNamespace;
+
+  /**
+   * Chat-specific namespaces (conversational layer).
+   * Groups presence and block operations that are part of the Herald Chat product.
+   */
+  public readonly chat: {
+    readonly presence: PresenceNamespace;
+    readonly blocks: BlockNamespace;
+  };
 
   private transport: HttpTransport;
 
@@ -47,6 +62,7 @@ export class HeraldAdmin {
     this.presence = new PresenceNamespace(this.transport);
     this.tenants = new TenantNamespace(this.transport);
     this.blocks = new BlockNamespace(this.transport);
+    this.chat = { presence: this.presence, blocks: this.blocks };
   }
 
   async health(): Promise<HealthResponse> {

@@ -36,6 +36,7 @@ export class EventNamespace {
     return this.transport.request<EventList>("GET", path);
   }
 
+  /** @chat Chat-specific operation — event deletion. */
   async delete(streamId: string, eventId: string): Promise<void> {
     await this.transport.request(
       "DELETE",
@@ -43,6 +44,7 @@ export class EventNamespace {
     );
   }
 
+  /** @chat Chat-specific operation — event editing. */
   async edit(streamId: string, eventId: string, body: string): Promise<void> {
     await this.transport.request(
       "PATCH",
@@ -51,6 +53,7 @@ export class EventNamespace {
     );
   }
 
+  /** @chat Chat-specific operation — reaction queries. */
   async getReactions(streamId: string, eventId: string): Promise<ReactionSummary[]> {
     const res = await this.transport.request<{ reactions: ReactionSummary[] }>(
       "GET",

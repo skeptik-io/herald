@@ -41,10 +41,13 @@ export class HttpTransport {
       throw new HeraldError(code, message, resp.status);
     }
 
-    if (resp.status === 204) {
+    const contentLength = resp.headers.get("content-length");
+    if (resp.status === 204 || contentLength === "0") {
       return undefined as T;
     }
 
-    return resp.json() as Promise<T>;
+    const text = await resp.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 }

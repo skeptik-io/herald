@@ -1,6 +1,7 @@
 import type { HttpTransport } from "../transport.js";
 import type { Cursor, MemberPresenceEntry, UserPresence } from "../types.js";
 
+/** @chat Chat-specific namespace — user and stream presence queries. */
 export class PresenceNamespace {
   constructor(private transport: HttpTransport) {}
 

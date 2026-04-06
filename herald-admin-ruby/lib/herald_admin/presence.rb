@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 module HeraldAdmin
+  # @chat Chat-specific namespace — user and stream presence queries.
   class PresenceNamespace
     def initialize(transport)
       @t = transport

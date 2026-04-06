@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 module HeraldAdmin
+  # @chat Chat-specific namespace — user blocking operations.
   class BlockNamespace
     def initialize(transport)
       @t = transport

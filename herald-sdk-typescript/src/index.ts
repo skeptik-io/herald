@@ -1,4 +1,4 @@
-export { HeraldClient } from "./client.js";
+export { HeraldClient, nextRef } from "./client.js";
 export { HeraldError, ErrorCode } from "./errors.js";
 export {
   initE2EE,

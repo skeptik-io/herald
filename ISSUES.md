@@ -104,12 +104,12 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] Integration test: usage events flow to Meterd (requires Rust SDK + Meterd instance)
   - [ ] Replace hand-rolled HTTP client with Meterd Rust SDK
 
-- [ ] **M-3: Catchup pagination**
+- [x] **M-3: Catchup pagination**
   200-event catchup cap with `has_more` but no follow-up mechanism. Clients can lose events.
-  - [ ] Add cursor-based pagination to reconnect catchup (WS `EventsFetch` with `after` cursor)
-  - [ ] Client SDK: automatic paginated catchup on reconnect until fully caught up
-  - [ ] Integration test: publish 500 events while client offline, verify all received on reconnect
-  - [ ] Integration test: verify ordering preserved across pages
+  - [x] Add cursor-based pagination to reconnect catchup (WS `EventsFetch` with `after` cursor)
+  - [x] Client SDK: automatic paginated catchup on reconnect until fully caught up
+  - [x] Integration test: publish 250 events, paginate with fetch({after}), verify all received
+  - [x] Integration test: verify ordering preserved across pages
 
 - [ ] **M-4: E2EE in non-TypeScript SDKs**
   E2EE is browser-only. Expand to server-side SDKs.

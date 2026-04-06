@@ -8,3 +8,7 @@ export { useLiveness } from "./hooks/use-liveness.js";
 export { usePresence } from "./hooks/use-presence.js";
 export { ChatShell, type ChatShellProps, type ChatShellState } from "./components/chat-shell.js";
 export { NotificationShell, type NotificationShellProps } from "./components/notification-shell.js";
+export { MessageList, type MessageListProps, type MessageListState } from "./components/message-list.js";
+export { MessageInput, type MessageInputProps, type MessageInputState } from "./components/message-input.js";
+export { PresenceIndicator, type PresenceIndicatorProps, type PresenceIndicatorState } from "./components/presence-indicator.js";
+export { TypingIndicator, type TypingIndicatorProps, type TypingIndicatorState } from "./components/typing-indicator.js";

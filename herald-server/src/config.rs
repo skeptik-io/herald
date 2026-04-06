@@ -22,6 +22,9 @@ pub struct HeraldConfig {
     pub tenant_limits: TenantLimitsConfig,
     #[serde(default)]
     pub cors: Option<CorsConfig>,
+    /// Metering config is loaded from env vars, not from the TOML file.
+    #[serde(skip)]
+    pub metering: Option<crate::metering::MeteringConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +49,54 @@ fn default_max_connections_per_tenant() -> u32 {
 }
 fn default_max_streams_per_tenant() -> u32 {
     10000
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanLimits {
+    pub max_connections: u32,
+    pub max_streams: u32,
+    pub api_rate_limit: u32, // requests per 60s
+    pub events_per_month: u64,
+    pub retention_days: u32,
+}
+
+impl PlanLimits {
+    /// Returns plan-specific limits for known plan tiers, or `None` for
+    /// self-hosted / unknown plans (which fall back to global config).
+    pub fn for_plan(plan: &str) -> Option<Self> {
+        match plan {
+            "free" => Some(PlanLimits {
+                max_connections: 50,
+                max_streams: 10,
+                api_rate_limit: 60,
+                events_per_month: 100_000,
+                retention_days: 7,
+            }),
+            "starter" => Some(PlanLimits {
+                max_connections: 500,
+                max_streams: 100,
+                api_rate_limit: 300,
+                events_per_month: 1_000_000,
+                retention_days: 14,
+            }),
+            "pro" => Some(PlanLimits {
+                max_connections: 5_000,
+                max_streams: 1_000,
+                api_rate_limit: 1_000,
+                events_per_month: 10_000_000,
+                retention_days: 30,
+            }),
+            "business" | "enterprise" => Some(PlanLimits {
+                max_connections: 50_000,
+                max_streams: 10_000,
+                api_rate_limit: 5_000,
+                events_per_month: 100_000_000,
+                retention_days: 90,
+            }),
+            // self-hosted or unknown plans fall back to global config
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,17 +449,32 @@ impl HeraldConfig {
             cors: env("HERALD_CORS_ORIGINS").map(|origins| CorsConfig {
                 allowed_origins: origins.split(',').map(|s| s.trim().to_string()).collect(),
             }),
+            metering: {
+                let mc = crate::metering::MeteringConfig::from_env();
+                if mc.enabled {
+                    Some(mc)
+                } else {
+                    None
+                }
+            },
         })
     }
 
     /// Load from file if it exists, otherwise from env vars.
     pub fn load_or_env(path: &str) -> anyhow::Result<Self> {
-        if std::path::Path::new(path).exists() {
-            Self::load(path)
+        let mut config = if std::path::Path::new(path).exists() {
+            Self::load(path)?
         } else {
             tracing::info!("no config file at {path}, loading from environment variables");
-            Self::from_env()
+            Self::from_env()?
+        };
+        if config.metering.is_none() {
+            let mc = crate::metering::MeteringConfig::from_env();
+            if mc.enabled {
+                config.metering = Some(mc);
+            }
         }
+        Ok(config)
     }
 
     /// Pull secrets from ShroudB Keep and merge into config.

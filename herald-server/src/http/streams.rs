@@ -48,6 +48,32 @@ pub async fn create_stream(
 
     let tid = &tenant.0;
 
+    // Enforce per-plan stream limit
+    let max_streams = state
+        .tenant_cache
+        .get(tid)
+        .and_then(|tc| crate::config::PlanLimits::for_plan(&tc.plan))
+        .map(|pl| pl.max_streams)
+        .unwrap_or(state.config.tenant_limits.max_streams_per_tenant);
+    match store::streams::list_by_tenant(&*state.db, tid).await {
+        Ok(existing) if existing.len() >= max_streams as usize => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": format!("stream limit reached ({max_streams})")})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(tenant = tid, "failed to count streams: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response();
+        }
+        _ => {}
+    }
+
     // Check for existing stream before insert (KV put is upsert)
     if let Ok(Some(_)) = store::streams::get(&*state.db, tid, &req.id).await {
         return (

@@ -159,12 +159,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Initialize Meterd metering client if enabled.
+    let metering: Option<Arc<herald_server::metering::MeteringClient>> =
+        config.metering.as_ref().map(|mc| {
+            info!(
+                base_url = %mc.base_url,
+                flush_interval = mc.flush_interval_secs,
+                "Meterd metering enabled"
+            );
+            Arc::new(herald_server::metering::MeteringClient::new(mc.clone()))
+        });
+
+    let metering_flush_interval = config
+        .metering
+        .as_ref()
+        .map(|mc| mc.flush_interval_secs)
+        .unwrap_or(10);
+
     let state = AppState::build(AppStateBuilder {
         config,
         db,
         sentry,
         courier,
         chronicle,
+        metering: metering.clone(),
     });
 
     // Always hydrate all tenants from Store
@@ -290,6 +308,18 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Metering flush task
+    let metering_handle = metering.map(|mc| {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(metering_flush_interval)).await;
+                if let Err(e) = mc.flush().await {
+                    warn!("metering flush error: {e}");
+                }
+            }
+        })
+    });
+
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -359,6 +389,9 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        if let Some(ref h) = metering_handle {
+            h.abort();
+        }
         #[cfg(feature = "chat")]
         typing_handle.abort();
 
@@ -408,6 +441,9 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        if let Some(ref h) = metering_handle {
+            h.abort();
+        }
         #[cfg(feature = "chat")]
         typing_handle.abort();
 

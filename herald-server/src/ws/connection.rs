@@ -111,9 +111,14 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     let user_id = claims.sub.clone();
     let streams_claim = claims.streams.clone();
 
-    // Enforce per-tenant connection limit
+    // Enforce per-tenant connection limit (plan-aware)
     let tenant_conns = state.connections.tenant_connection_count(&tenant_id);
-    let max_conns = state.config.tenant_limits.max_connections_per_tenant as usize;
+    let max_conns = state
+        .tenant_cache
+        .get(&tenant_id)
+        .and_then(|tc| crate::config::PlanLimits::for_plan(&tc.plan))
+        .map(|pl| pl.max_connections as usize)
+        .unwrap_or(state.config.tenant_limits.max_connections_per_tenant as usize);
     if tenant_conns >= max_conns {
         let _ = msg_tx
             .send(ServerMessage::error(

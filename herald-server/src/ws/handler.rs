@@ -482,6 +482,10 @@ async fn handle_publish(
         .fetch_add(1, Ordering::Relaxed);
     state.increment_tenant_events(tid);
 
+    if let Some(ref metering) = state.metering {
+        metering.track("events_published", tid, 1.0, None);
+    }
+
     state.event_bus.push_event(
         crate::admin_events::EventKind::Message,
         Some(tid.to_string()),

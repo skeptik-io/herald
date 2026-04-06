@@ -5,6 +5,7 @@ pub mod config;
 pub mod http;
 pub mod integrations;
 pub mod latency;
+pub mod metering;
 pub mod registry;
 pub mod state;
 pub mod store;

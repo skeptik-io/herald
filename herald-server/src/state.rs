@@ -139,6 +139,7 @@ pub struct AppState {
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
+    pub metering: Option<Arc<crate::metering::MeteringClient>>,
     pub metrics: Metrics,
     pub event_bus: Arc<EventBus>,
     webhook_config: Option<Arc<WebhookConfig>>,
@@ -151,6 +152,7 @@ pub struct AppStateBuilder {
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
+    pub metering: Option<Arc<crate::metering::MeteringClient>>,
 }
 
 impl AppState {
@@ -178,6 +180,7 @@ impl AppState {
             sentry: b.sentry,
             courier: b.courier,
             chronicle: b.chronicle,
+            metering: b.metering,
             metrics: Metrics::default(),
             event_bus: EventBus::new(),
             webhook_config,
@@ -335,6 +338,9 @@ impl AppState {
             }
             self.event_bus.increment_webhooks();
             self.increment_tenant_webhooks(tenant_id);
+            if let Some(ref metering) = self.metering {
+                metering.track("webhooks_sent", tenant_id, 1.0, None);
+            }
             crate::webhook::deliver(
                 config.clone(),
                 self.webhook_client.clone(),

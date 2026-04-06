@@ -267,7 +267,9 @@ impl MeteringClient {
         debug!(count, "metering: flushing events to Meterd");
 
         let url = format!("{}/v1/events/batch", self.config.base_url);
-        let payload = BatchPayload { events };
+        let payload = BatchPayload {
+            events: events.clone(),
+        };
 
         let result = self
             .http
@@ -288,16 +290,29 @@ impl MeteringClient {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 self.breaker.record_failure();
+                // Re-buffer events so they aren't lost
+                if let Ok(mut buf) = self.buffer.lock() {
+                    // Prepend failed events so they're retried first
+                    let mut retry = events;
+                    retry.extend(buf.drain(..));
+                    *buf = retry;
+                }
                 warn!(
                     status = %status,
                     body = %body,
-                    "metering: Meterd batch ingest failed"
+                    "metering: Meterd batch ingest failed, {count} events re-buffered"
                 );
                 Err(format!("Meterd returned {status}: {body}").into())
             }
             Err(e) => {
                 self.breaker.record_failure();
-                warn!(error = %e, "metering: Meterd request failed");
+                // Re-buffer events so they aren't lost
+                if let Ok(mut buf) = self.buffer.lock() {
+                    let mut retry = events;
+                    retry.extend(buf.drain(..));
+                    *buf = retry;
+                }
+                warn!(error = %e, "metering: Meterd request failed, {count} events re-buffered");
                 Err(e.into())
             }
         }

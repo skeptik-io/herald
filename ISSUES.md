@@ -136,7 +136,7 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] Integration test: tenant A (7d) events expire, tenant B (30d) events survive (requires Meterd)
   - [ ] Integration test: changing retention applies to future expiry only (requires Meterd)
 
-- [ ] **M-7: Self-serve tenant provisioning**
+- [x] **M-7: Self-serve tenant provisioning**
   Tenant creation is admin-API-only. Enable product-led growth.
   - [x] POST /signup — Sigil user + Herald tenant + API token + JWT session
   - [x] POST /login — email-based auth via Moat Sigil (Veil blind index + Argon2id)

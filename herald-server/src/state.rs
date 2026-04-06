@@ -140,6 +140,7 @@ pub struct AppState {
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
     pub metering: Option<Arc<crate::metering::MeteringClient>>,
+    pub sigil: Option<Arc<crate::signup::SigilHttpClient>>,
     /// Cached plan limits per tenant (from Meterd or built-in defaults).
     pub plan_limits_cache: DashMap<String, (crate::config::PlanLimits, std::time::Instant)>,
     pub metrics: Metrics,
@@ -155,6 +156,7 @@ pub struct AppStateBuilder {
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
     pub metering: Option<Arc<crate::metering::MeteringClient>>,
+    pub sigil: Option<Arc<crate::signup::SigilHttpClient>>,
 }
 
 impl AppState {
@@ -183,6 +185,7 @@ impl AppState {
             courier: b.courier,
             chronicle: b.chronicle,
             metering: b.metering,
+            sigil: b.sigil,
             plan_limits_cache: DashMap::new(),
             metrics: Metrics::default(),
             event_bus: EventBus::new(),

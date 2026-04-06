@@ -168,9 +168,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         CorsLayer::permissive()
     };
 
+    // Public self-serve auth endpoints (no auth required — Sigil handles credentials)
+    let signup_api = Router::new()
+        .route("/signup", post(crate::signup::signup))
+        .route("/login", post(crate::signup::login))
+        .route("/auth/refresh", post(crate::signup::refresh));
+
     Router::new()
         .merge(tenant_api)
         .merge(admin_api)
+        .merge(signup_api)
         .route("/health", get(health::health))
         .route("/health/live", get(health::liveness))
         .route("/health/ready", get(health::readiness))

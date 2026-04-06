@@ -7,6 +7,7 @@ pub mod integrations;
 pub mod latency;
 pub mod metering;
 pub mod registry;
+pub mod signup;
 pub mod state;
 pub mod store;
 pub mod store_backend;

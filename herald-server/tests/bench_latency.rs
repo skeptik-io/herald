@@ -93,6 +93,7 @@ impl BenchServer {
             courier: None,
             chronicle: None,
             metering: None,
+            sigil: None,
         });
 
         state.bootstrap_single_tenant().await.unwrap();

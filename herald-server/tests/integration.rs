@@ -101,6 +101,7 @@ impl TestServer {
             courier: None,
             chronicle: None,
             metering: None,
+            sigil: None,
         });
 
         let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2006,6 +2007,7 @@ async fn test_http_api_rate_limiting() {
         sentry: None,
         courier: None,
         chronicle: None,
+        sigil: None,
         metering: None,
     });
     state.bootstrap_single_tenant().await.unwrap();
@@ -2087,6 +2089,7 @@ async fn test_ws_sliding_window_rate_limit() {
         db,
         sentry: None,
         courier: None,
+        sigil: None,
         chronicle: None,
         metering: None,
     });
@@ -2352,6 +2355,7 @@ async fn test_presence_linger_reconnect_no_offline() {
         config,
         db,
         sentry: None,
+        sigil: None,
         courier: None,
         chronicle: None,
         metering: None,
@@ -3417,6 +3421,7 @@ async fn test_webhook_event_filtering() {
     let state = AppState::build(AppStateBuilder {
         config,
         db,
+        sigil: None,
         sentry: None,
         courier: None,
         chronicle: None,
@@ -5189,6 +5194,7 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
 
     let state = AppState::build(AppStateBuilder {
         config,
+        sigil: None,
         db,
         sentry: None,
         courier: None,
@@ -6205,6 +6211,7 @@ async fn test_remote_backend_boots_and_operates() {
     };
 
     let state = AppState::build(AppStateBuilder {
+        sigil: None,
         config,
         db,
         sentry: None,

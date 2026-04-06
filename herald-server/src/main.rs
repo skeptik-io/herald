@@ -223,6 +223,16 @@ async fn main() -> anyhow::Result<()> {
         .map(|mc| mc.flush_interval_secs)
         .unwrap_or(10);
 
+    // Initialize Sigil client for self-serve signup (via Moat HTTP API).
+    let sigil: Option<Arc<herald_server::signup::SigilHttpClient>> =
+        config.shroudb.as_ref().and_then(|shroudb| {
+            let moat_url = shroudb.moat_addr.as_ref()?;
+            let client =
+                herald_server::signup::SigilHttpClient::new(moat_url, shroudb.auth_token.clone());
+            info!(moat_url = %moat_url, "Sigil client initialized (Moat HTTP)");
+            Some(Arc::new(client))
+        });
+
     let state = AppState::build(AppStateBuilder {
         config,
         db,
@@ -230,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
         courier,
         chronicle,
         metering: metering.clone(),
+        sigil,
     });
 
     // Always hydrate all tenants from Store

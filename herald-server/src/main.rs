@@ -46,7 +46,9 @@ async fn main() -> anyhow::Result<()> {
     // Open ShroudB storage — embedded (local WAL) or remote (shared server)
     let db: Arc<herald_server::store_backend::StoreBackend> = match config.store.mode.as_str() {
         "remote" => {
-            let addr = config.store.addr.as_deref().unwrap(); // validated above
+            let addr = config.store.addr.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("store.addr is required when store.mode is \"remote\"")
+            })?;
             info!(addr = %addr, "connecting to remote ShroudB");
             let remote = shroudb_client::RemoteStore::connect(addr)
                 .await

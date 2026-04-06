@@ -188,12 +188,12 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] Integration test: purge tenant, verify zero keys with tenant prefix remain
   - [ ] Integration test: purge user, verify their events/reactions/cursors removed
 
-- [ ] **L-6: WebSocket message size limit**
+- [x] **L-6: WebSocket message size limit**
   HTTP has 1MB body limit but WS has no explicit cap.
-  - [ ] Add configurable max frame size to WS handler (default 1MB)
-  - [ ] Reject oversized frames with error code
-  - [ ] Integration test: send frame exceeding limit, verify rejection
-  - [ ] Integration test: send frame at limit, verify acceptance
+  - [x] Add configurable max frame size to WS handler (default 1MB)
+  - [x] Reject oversized frames with error code
+  - [x] Integration test: send frame exceeding limit, verify rejection
+  - [x] Integration test: send frame at limit, verify acceptance
 
 - [ ] **L-7: SDK contract tests**
   No shared wire-protocol compliance tests. Risk of SDK drift.

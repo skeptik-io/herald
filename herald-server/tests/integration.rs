@@ -6121,3 +6121,201 @@ async fn test_health_shows_correct_tenant_count() {
         "health should show at least 2 tenants, got {tenant_count}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Remote backend tests
+//
+// These tests require a running ShroudB server (e.g. docker run -d -p 16399:6399
+// -e SHROUDB_MASTER_KEY=$(openssl rand -hex 32) shroudb/shroudb:latest).
+//
+// Set HERALD_TEST_REMOTE_STORE=shroudb://127.0.0.1:16399 to enable.
+// ---------------------------------------------------------------------------
+
+async fn create_remote_test_store(
+    uri: &str,
+) -> Option<Arc<herald_server::store_backend::StoreBackend>> {
+    match shroudb_client::RemoteStore::connect(uri).await {
+        Ok(remote) => {
+            let store = Arc::new(herald_server::store_backend::StoreBackend::Remote(remote));
+            store::init_namespaces(&*store).await.ok()?;
+            Some(store)
+        }
+        Err(e) => {
+            eprintln!("remote store connect failed ({uri}): {e} — skipping remote tests");
+            None
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_remote_backend_boots_and_operates() {
+    let uri = match std::env::var("HERALD_TEST_REMOTE_STORE") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("HERALD_TEST_REMOTE_STORE not set — skipping remote backend test");
+            return;
+        }
+    };
+
+    let db = match create_remote_test_store(&uri).await {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Verify health reports Ready for remote backend
+    let health = db.storage_health().await;
+    assert!(
+        matches!(health, shroudb_storage::engine::HealthState::Ready),
+        "remote store health should be Ready, got {health:?}"
+    );
+
+    let config = HeraldConfig {
+        server: ServerConfig {
+            ws_bind: "127.0.0.1:0".to_string(),
+            http_bind: "127.0.0.1:0".to_string(),
+            log_level: "warn".to_string(),
+            max_messages_per_sec: 1000,
+            api_rate_limit: 10000,
+            ..Default::default()
+        },
+        store: StoreConfig {
+            mode: "remote".to_string(),
+            path: String::new().into(),
+            addr: Some(uri.clone()),
+            event_ttl_days: 7,
+        },
+        auth: AuthConfig {
+            jwt_secret: Some(TENANT_A_SECRET.to_string()),
+            jwt_issuer: None,
+            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
+            api: ApiAuthConfig {
+                tokens: vec!["remote-test-token".to_string()],
+            },
+        },
+        presence: PresenceConfig {
+            linger_secs: 0,
+            manual_override_ttl_secs: 14400,
+        },
+        webhook: None,
+        shroudb: None,
+        tls: None,
+        tenant_limits: Default::default(),
+        cors: None,
+        metering: None,
+    };
+
+    let state = AppState::build(AppStateBuilder {
+        config,
+        db,
+        sentry: None,
+        courier: None,
+        chronicle: None,
+        metering: None,
+    });
+
+    // Bootstrap single tenant
+    state.bootstrap_single_tenant().await.unwrap();
+
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+    let http_app = herald_server::http::router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(http_listener, http_app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+
+    // Health endpoint should report storage OK
+    let health_resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(health_resp.status(), StatusCode::OK);
+    let health_body: Value = health_resp.json().await.unwrap();
+    assert_eq!(health_body["storage"], true, "storage should be healthy");
+    assert_eq!(health_body["status"], "ok");
+
+    // Create a stream via HTTP
+    let stream_resp = client
+        .post(format!("{base}/streams"))
+        .bearer_auth("remote-test-token")
+        .json(&json!({"id": "remote-test", "name": "Remote Test Stream"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stream_resp.status(),
+        StatusCode::CREATED,
+        "stream creation should succeed on remote backend"
+    );
+
+    // Add a member
+    let member_resp = client
+        .post(format!("{base}/streams/remote-test/members"))
+        .bearer_auth("remote-test-token")
+        .json(&json!({"user_id": "alice", "role": "member"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_resp.status(), StatusCode::CREATED);
+
+    // Publish an event
+    let publish_resp = client
+        .post(format!("{base}/streams/remote-test/events"))
+        .bearer_auth("remote-test-token")
+        .json(&json!({"sender": "alice", "body": "hello from remote backend"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(publish_resp.status(), StatusCode::CREATED);
+    let publish_body: Value = publish_resp.json().await.unwrap();
+    let event_id = publish_body["id"].as_str().unwrap().to_string();
+    assert!(!event_id.is_empty(), "event should have an id");
+    assert!(
+        publish_body["seq"].as_u64().unwrap() > 0,
+        "event should have seq > 0"
+    );
+
+    // List events and verify the published event is persisted
+    let list_resp = client
+        .get(format!("{base}/streams/remote-test/events"))
+        .bearer_auth("remote-test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body: Value = list_resp.json().await.unwrap();
+    let events = list_body["events"].as_array().unwrap();
+    let found = events.iter().any(|e| e["id"].as_str() == Some(&event_id));
+    assert!(found, "published event should be in list");
+    let found_event = events
+        .iter()
+        .find(|e| e["id"].as_str() == Some(&event_id))
+        .unwrap();
+    assert_eq!(
+        found_event["body"].as_str(),
+        Some("hello from remote backend")
+    );
+    assert_eq!(found_event["sender"].as_str(), Some("alice"));
+
+    // List streams and verify our stream exists
+    let streams_resp = client
+        .get(format!("{base}/streams"))
+        .bearer_auth("remote-test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streams_resp.status(), StatusCode::OK);
+    let streams_body: Value = streams_resp.json().await.unwrap();
+    let streams = streams_body["streams"].as_array().unwrap();
+    let stream_found = streams
+        .iter()
+        .any(|s| s["id"].as_str() == Some("remote-test"));
+    assert!(stream_found, "created stream should be in list");
+
+    // Cleanup: delete the stream so repeated test runs don't conflict
+    let _ = client
+        .delete(format!("{base}/streams/remote-test"))
+        .bearer_auth("remote-test-token")
+        .send()
+        .await;
+}

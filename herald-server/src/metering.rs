@@ -40,13 +40,7 @@ pub struct QuotaCheckResponse {
 #[derive(Debug, Deserialize)]
 struct QuotaSnapshotEntry {
     meter_slug: String,
-    #[allow(dead_code)]
-    current_usage: Option<u64>,
     limit: Option<u64>,
-    #[allow(dead_code)]
-    remaining: Option<u64>,
-    #[allow(dead_code)]
-    percent_used: Option<f64>,
 }
 
 /// Result of a quota check that includes overage context.
@@ -501,11 +495,11 @@ impl MeteringClient {
                         }
 
                         Some(crate::config::PlanLimits {
-                            max_connections: max_connections.unwrap(),
-                            max_streams: max_streams.unwrap(),
-                            api_rate_limit: api_rate_limit.unwrap(),
-                            events_per_month: events_per_month.unwrap(),
-                            retention_days: retention_days.unwrap(),
+                            max_connections: max_connections?,
+                            max_streams: max_streams?,
+                            api_rate_limit: api_rate_limit?,
+                            events_per_month: events_per_month?,
+                            retention_days: retention_days?,
                         })
                     }
                     Err(e) => {

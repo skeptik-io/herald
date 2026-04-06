@@ -36,9 +36,6 @@ pub struct ListEventsQuery {
     pub thread: Option<String>,
 }
 
-// Default fallback only — prefer state.event_ttl_ms(tenant_id) for per-tenant retention.
-#[allow(dead_code)]
-const DEFAULT_EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_LIMIT: u32 = 100;
 
 pub async fn inject_event(

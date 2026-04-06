@@ -14,9 +14,6 @@ use crate::ws::fanout::fanout_to_stream;
 
 const MAX_FETCH_LIMIT: u32 = 100;
 const DEFAULT_FETCH_LIMIT: u32 = 50;
-// Default fallback only — prefer state.event_ttl_ms(tenant_id) for per-tenant retention.
-#[allow(dead_code)]
-const DEFAULT_EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 pub async fn handle_message(
     state: &Arc<AppState>,

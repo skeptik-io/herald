@@ -3,9 +3,9 @@ import { useSyncExternalStore } from "react";
 import type { ScrollStateSnapshot } from "herald-chat";
 import { useChatCore } from "../context.js";
 
-export interface ChatShellProps {
+export interface HeraldChatProps {
   streamId: string;
-  children: (state: ChatShellState) => ReactNode;
+  children: (state: HeraldChatState) => ReactNode;
   /** Ref to the scrollable container element. */
   scrollRef: RefObject<HTMLElement | null>;
   /** Distance from bottom (px) to consider "at live edge". Default 50. */
@@ -14,20 +14,20 @@ export interface ChatShellProps {
   loadMoreThreshold?: number;
 }
 
-export interface ChatShellState {
+export interface HeraldChatState {
   pendingCount: number;
   atLiveEdge: boolean;
   isLoadingMore: boolean;
   scrollToBottom(): void;
 }
 
-export function ChatShell({
+export function HeraldChat({
   streamId,
   children,
   scrollRef,
   edgeThreshold = 50,
   loadMoreThreshold = 100,
-}: ChatShellProps) {
+}: HeraldChatProps) {
   const core = useChatCore();
   const prevScrollHeight = useRef(0);
   const isAnchoring = useRef(false);

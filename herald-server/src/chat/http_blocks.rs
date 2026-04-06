@@ -21,6 +21,12 @@ pub async fn block_user(
     Json(req): Json<BlockRequest>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
+    if let Err(e) = crate::http::validation::validate_id(&req.user_id, "user_id") {
+        return (*e).into_response();
+    }
+    if let Err(e) = crate::http::validation::validate_id(&req.blocked_id, "blocked_id") {
+        return (*e).into_response();
+    }
     match crate::chat::store_blocks::block(&*state.db, tid, &req.user_id, &req.blocked_id).await {
         Ok(()) => StatusCode::CREATED.into_response(),
         Err(e) => {
@@ -40,6 +46,12 @@ pub async fn unblock_user(
     Json(req): Json<BlockRequest>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
+    if let Err(e) = crate::http::validation::validate_id(&req.user_id, "user_id") {
+        return (*e).into_response();
+    }
+    if let Err(e) = crate::http::validation::validate_id(&req.blocked_id, "blocked_id") {
+        return (*e).into_response();
+    }
     match crate::chat::store_blocks::unblock(&*state.db, tid, &req.user_id, &req.blocked_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (

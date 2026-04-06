@@ -1267,12 +1267,86 @@ retries = 1
       }
     });
 
-    // NOTE: Plan-based limit enforcement tests (stream limits, connection
-    // limits, rate limit differentiation by plan) require a running Meterd
-    // instance with plans and quotas configured. When metering is disabled,
-    // all tenants use the global config limits uniformly. These tests should
-    // be added to a dedicated Meterd integration suite once the Rust SDK and
-    // Meterd test infrastructure are available.
+    // ── GDPR data deletion ─────────────────────────────────────
+
+    await test("mt: purge tenant data removes all keys", async () => {
+      // Create a tenant with streams, events, and members
+      await mtAdmin.tenants.create({
+        id: "purge-corp",
+        name: "Purge Corp",
+        jwt_secret: "purge-secret-1234",
+      });
+      const tokenResult = await mtAdmin.tenants.createToken("purge-corp");
+      const purgeAdmin = new HeraldAdmin({
+        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        token: tokenResult.token,
+      });
+      await purgeAdmin.streams.create("purge-stream", "Purge Stream");
+      await purgeAdmin.members.add("purge-stream", "alice");
+      await purgeAdmin.events.publish("purge-stream", "alice", "test event 1");
+      await purgeAdmin.events.publish("purge-stream", "alice", "test event 2");
+
+      // Purge tenant data
+      const resp = await fetch(`http://127.0.0.1:${HTTP_PORT2}/admin/tenants/purge-corp/data`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` },
+      });
+      assert(resp.ok, `purge should succeed, got ${resp.status}`);
+      const body = await resp.json() as any;
+      assert(body.deleted > 0, `should have deleted keys, got ${body.deleted}`);
+
+      // Verify tenant no longer exists
+      let notFound = false;
+      try {
+        await mtAdmin.tenants.get("purge-corp");
+      } catch {
+        notFound = true;
+      }
+      assert(notFound, "purged tenant should not be found");
+    });
+
+    await test("mt: purge user events removes only that user's data", async () => {
+      // Create a fresh tenant for this test
+      await mtAdmin.tenants.create({
+        id: "user-purge-corp",
+        name: "User Purge Corp",
+        jwt_secret: "up-secret-1234",
+      });
+      const tokenResult = await mtAdmin.tenants.createToken("user-purge-corp");
+      const upAdmin = new HeraldAdmin({
+        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        token: tokenResult.token,
+      });
+      await upAdmin.streams.create("chat-room", "Chat Room");
+      await upAdmin.members.add("chat-room", "alice");
+      await upAdmin.members.add("chat-room", "bob");
+
+      // Publish events from both users
+      const aliceEvent = await upAdmin.events.publish("chat-room", "alice", "alice msg 1");
+      const bobEvent = await upAdmin.events.publish("chat-room", "bob", "bob msg 1");
+      await upAdmin.events.publish("chat-room", "alice", "alice msg 2");
+
+      // Purge alice's data from this stream
+      const resp = await fetch(
+        `http://127.0.0.1:${HTTP_PORT2}/streams/chat-room/events?user_id=alice`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${tokenResult.token}` },
+        },
+      );
+      assert(resp.ok, `user purge should succeed, got ${resp.status}`);
+      const body = await resp.json() as any;
+      assert(body.deleted > 0, `should have deleted alice's data, got ${body.deleted}`);
+
+      // Verify bob's event still exists but alice's are gone
+      const events = await upAdmin.events.list("chat-room");
+      const bobFound = events.events.some((e: any) => e.id === bobEvent.id);
+      const aliceFound = events.events.some((e: any) => e.id === aliceEvent.id);
+      assert(bobFound, "bob's event should still exist after alice purge");
+      assert(!aliceFound, "alice's event should be gone after purge");
+    });
+
+    // NOTE: Plan-based limit enforcement tests require a running Meterd instance.
 
   } finally {
     console.log("\nStopping multi-tenant server...");

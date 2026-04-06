@@ -433,3 +433,51 @@ pub async fn delete_event(
         }
     }
 }
+
+/// GDPR: Purge all events by a user in a stream, plus their cursors,
+/// reactions, and blocks.
+#[derive(Deserialize)]
+pub struct PurgeUserQuery {
+    pub user_id: String,
+}
+
+pub async fn purge_user_events(
+    State(state): State<Arc<AppState>>,
+    Extension(tenant): Extension<TenantId>,
+    Path(stream_id): Path<String>,
+    Query(q): Query<PurgeUserQuery>,
+) -> impl IntoResponse {
+    let tid = &tenant.0;
+
+    if let Err(e) = validation::validate_id(&q.user_id, "user_id") {
+        return (*e).into_response();
+    }
+
+    match store::purge::purge_user_data(&*state.db, tid, &stream_id, &q.user_id).await {
+        Ok(deleted) => {
+            tracing::info!(
+                tenant = tid,
+                stream = %stream_id,
+                user = %q.user_id,
+                deleted,
+                "GDPR: user data purged"
+            );
+            // Remove from in-memory member registry
+            state.streams.remove_member(tid, &stream_id, &q.user_id);
+            Json(serde_json::json!({"deleted": deleted})).into_response()
+        }
+        Err(e) => {
+            tracing::error!(
+                tenant = tid,
+                stream = %stream_id,
+                user = %q.user_id,
+                "user purge failed: {e}"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "purge failed"})),
+            )
+                .into_response()
+        }
+    }
+}

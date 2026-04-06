@@ -461,3 +461,49 @@ pub async fn get_stats(
         "snapshots": snapshots,
     }))
 }
+
+/// GDPR: Purge ALL data for a tenant from all namespaces.
+pub async fn purge_tenant_data(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Verify tenant exists
+    match store::tenants::get(&*state.db, &id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "tenant not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(tenant = %id, "purge: failed to look up tenant: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Remove from in-memory caches
+    state.tenant_cache.remove(&id);
+    state.tenant_metrics.remove(&id);
+    state.plan_limits_cache.remove(&id);
+
+    match store::purge::purge_tenant(&*state.db, &id).await {
+        Ok(deleted) => {
+            tracing::info!(tenant = %id, deleted, "GDPR: tenant data purged");
+            Json(serde_json::json!({"deleted": deleted})).into_response()
+        }
+        Err(e) => {
+            tracing::error!(tenant = %id, "purge failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "purge failed"})),
+            )
+                .into_response()
+        }
+    }
+}

@@ -53,6 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/streams/{id}/events", post(events::inject_event))
         .route("/streams/{id}/events", get(events::list_events))
+        .route("/streams/{id}/events", delete(events::purge_user_events))
         .route("/streams/{id}/trigger", post(events::trigger_ephemeral))
         .route("/stats", get(health::tenant_stats));
 
@@ -126,6 +127,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/admin/tenants/{id}", get(admin::get_tenant))
         .route("/admin/tenants/{id}", patch(admin::update_tenant))
         .route("/admin/tenants/{id}", delete(admin::delete_tenant))
+        .route("/admin/tenants/{id}/data", delete(admin::purge_tenant_data))
         .route("/admin/tenants/{id}/tokens", post(admin::create_api_token))
         .route("/admin/tenants/{id}/tokens", get(admin::list_api_tokens))
         .route(

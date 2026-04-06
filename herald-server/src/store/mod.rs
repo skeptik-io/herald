@@ -4,6 +4,7 @@ pub mod blocks;
 pub mod cursors;
 pub mod events;
 pub mod members;
+pub mod purge;
 #[cfg(not(feature = "chat"))]
 pub mod reactions;
 pub mod streams;

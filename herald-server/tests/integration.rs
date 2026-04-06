@@ -2223,7 +2223,15 @@ async fn test_backpressure_increments_dropped_metric() {
     let dropped_before = server.state.metrics.events_dropped.load(Ordering::Relaxed);
 
     for _ in 0..5 {
-        herald_server::ws::fanout::fanout_to_stream(&server.state, "acme", "chat", &msg, None);
+        herald_server::ws::fanout::fanout_to_stream(
+            &server.state,
+            "acme",
+            "chat",
+            &msg,
+            None,
+            None,
+        )
+        .await;
     }
 
     let dropped_after = server.state.metrics.events_dropped.load(Ordering::Relaxed);

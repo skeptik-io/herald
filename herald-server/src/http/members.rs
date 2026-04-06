@@ -70,7 +70,7 @@ pub async fn add_member(
             role,
         },
     };
-    fanout_to_stream(&state, tid, &stream_id, &msg, None);
+    fanout_to_stream(&state, tid, &stream_id, &msg, None, None).await;
 
     state.fire_webhook(
         tid,
@@ -132,7 +132,7 @@ pub async fn remove_member(
                     role: Role::Member,
                 },
             };
-            fanout_to_stream(&state, tid, &stream_id, &msg, None);
+            fanout_to_stream(&state, tid, &stream_id, &msg, None, None).await;
 
             state.fire_webhook(
                 tid,

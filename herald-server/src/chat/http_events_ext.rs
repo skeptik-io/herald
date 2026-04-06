@@ -43,7 +43,7 @@ pub async fn edit_event(
                     edited_at: now,
                 },
             };
-            fanout_to_stream(&state, tid, &stream_id, &edited_event, None);
+            fanout_to_stream(&state, tid, &stream_id, &edited_event, None, None).await;
             StatusCode::OK.into_response()
         }
         Ok(None) => (
@@ -78,7 +78,7 @@ pub async fn delete_event(
                     seq: original.seq,
                 },
             };
-            fanout_to_stream(&state, tid, &stream_id, &deleted_event, None);
+            fanout_to_stream(&state, tid, &stream_id, &deleted_event, None, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(None) => (

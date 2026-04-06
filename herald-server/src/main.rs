@@ -295,7 +295,9 @@ async fn main() -> anyhow::Result<()> {
                         &stream_id,
                         &msg,
                         None,
-                    );
+                        Some(&user_id),
+                    )
+                    .await;
                 }
             }
         })

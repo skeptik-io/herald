@@ -27,7 +27,7 @@ pub async fn handle_message(
             handle_subscribe(state, ctx, tx, ref_, streams).await;
         }
         ClientMessage::Unsubscribe { ref_, streams } => {
-            handle_unsubscribe(state, ctx, ref_, streams);
+            handle_unsubscribe(state, ctx, ref_, streams).await;
         }
         ClientMessage::EventPublish {
             ref_,
@@ -90,7 +90,7 @@ pub async fn handle_message(
         ClientMessage::TypingStart { stream } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_typing(state, ctx, &stream, true);
+                crate::chat::ws_handler::handle_typing(state, ctx, &stream, true).await;
             }
             #[cfg(not(feature = "chat"))]
             {
@@ -100,7 +100,7 @@ pub async fn handle_message(
         ClientMessage::TypingStop { stream } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_typing(state, ctx, &stream, false);
+                crate::chat::ws_handler::handle_typing(state, ctx, &stream, false).await;
             }
             #[cfg(not(feature = "chat"))]
             {
@@ -304,7 +304,7 @@ async fn handle_subscribe(
                 count,
             },
         };
-        fanout_to_stream(state, tid, &stream_id_ref, &count_msg, None);
+        fanout_to_stream(state, tid, &stream_id_ref, &count_msg, None, None).await;
 
         // Cache channel: deliver last event to new subscriber
         if let Some(cached) = state.streams.get_last_event(tid, &stream_id_ref) {
@@ -313,7 +313,7 @@ async fn handle_subscribe(
     }
 }
 
-fn handle_unsubscribe(
+async fn handle_unsubscribe(
     state: &Arc<AppState>,
     ctx: &mut ConnContext,
     _ref_: Option<String>,
@@ -335,7 +335,7 @@ fn handle_unsubscribe(
                 count,
             },
         };
-        fanout_to_stream(state, &ctx.tenant_id, &stream_id, &count_msg, None);
+        fanout_to_stream(state, &ctx.tenant_id, &stream_id, &count_msg, None, None).await;
     }
 }
 
@@ -545,7 +545,7 @@ async fn handle_publish(
             sent_at: now,
         },
     };
-    fanout_to_stream(state, tid, &stream, &new_event, None);
+    fanout_to_stream(state, tid, &stream, &new_event, None, Some(&ctx.user_id)).await;
     state.metrics.event_fanout.observe_since(fanout_start);
 
     // Cache channel: update last event for new subscribers
@@ -673,7 +673,15 @@ async fn handle_ephemeral_trigger(
             data,
         },
     };
-    fanout_to_stream(state, tid, &stream, &msg, Some(ctx.conn_id));
+    fanout_to_stream(
+        state,
+        tid,
+        &stream,
+        &msg,
+        Some(ctx.conn_id),
+        Some(&ctx.user_id),
+    )
+    .await;
 
     // Ack to sender (lightweight — no seq/id since ephemeral)
     if let Some(r) = ref_ {

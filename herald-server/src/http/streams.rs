@@ -203,7 +203,7 @@ pub async fn delete_stream(
             let msg = herald_core::protocol::ServerMessage::StreamDeleted {
                 payload: herald_core::protocol::StreamEventPayload { stream: id.clone() },
             };
-            crate::ws::fanout::fanout_to_stream(&state, tid, &id, &msg, None);
+            crate::ws::fanout::fanout_to_stream(&state, tid, &id, &msg, None, None).await;
             state.streams.remove_stream(tid, &id);
             StatusCode::NO_CONTENT.into_response()
         }

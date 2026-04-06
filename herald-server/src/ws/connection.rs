@@ -156,7 +156,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         }),
     );
 
-    broadcast_presence_change(&state, &tenant_id, &user_id);
+    broadcast_presence_change(&state, &tenant_id, &user_id).await;
 
     // Set up watchlist from JWT claims and send initial online status
     if !claims.watchlist.is_empty() {
@@ -306,7 +306,15 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     active: false,
                 },
             };
-            crate::ws::fanout::fanout_to_stream(&state, &tenant_id, &stream_id, &msg, None);
+            crate::ws::fanout::fanout_to_stream(
+                &state,
+                &tenant_id,
+                &stream_id,
+                &msg,
+                None,
+                Some(&user_id),
+            )
+            .await;
         }
     }
 
@@ -333,7 +341,8 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 count,
             },
         };
-        crate::ws::fanout::fanout_to_stream(&state, &tenant_id, stream_id, &count_msg, None);
+        crate::ws::fanout::fanout_to_stream(&state, &tenant_id, stream_id, &count_msg, None, None)
+            .await;
     }
 
     if state
@@ -359,7 +368,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     .user_connection_count(&linger_tenant, &linger_user)
                     == 0
             {
-                broadcast_presence_change(&linger_state, &linger_tenant, &linger_user);
+                broadcast_presence_change(&linger_state, &linger_tenant, &linger_user).await;
 
                 // Notify watchlist watchers
                 let watchers = linger_state
@@ -537,7 +546,7 @@ async fn wait_for_auth(
     None
 }
 
-pub fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, user_id: &str) {
+pub async fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, user_id: &str) {
     let status = state.presence.resolve(
         tenant_id,
         user_id,
@@ -551,7 +560,15 @@ pub fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, user_id
         },
     };
     for stream_id in state.streams.get_member_streams(tenant_id, user_id) {
-        crate::ws::fanout::fanout_to_stream(state, tenant_id, &stream_id, &msg, None);
+        crate::ws::fanout::fanout_to_stream(
+            state,
+            tenant_id,
+            &stream_id,
+            &msg,
+            None,
+            Some(user_id),
+        )
+        .await;
     }
 }
 

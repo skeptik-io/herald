@@ -143,7 +143,15 @@ pub async fn inject_event(
     let exclude = req
         .exclude_connection
         .map(crate::registry::connection::ConnId);
-    fanout_to_stream(&state, tid, &stream_id, &new_event, exclude);
+    fanout_to_stream(
+        &state,
+        tid,
+        &stream_id,
+        &new_event,
+        exclude,
+        Some(&req.sender),
+    )
+    .await;
 
     // Cache channel: update last event for new subscribers
     state.streams.set_last_event(tid, &stream_id, new_event);
@@ -292,7 +300,7 @@ pub async fn edit_event(
                     edited_at: now,
                 },
             };
-            fanout_to_stream(&state, tid, &stream_id, &edited_event, None);
+            fanout_to_stream(&state, tid, &stream_id, &edited_event, None, None).await;
             StatusCode::OK.into_response()
         }
         Ok(None) => (
@@ -368,7 +376,7 @@ pub async fn trigger_ephemeral(
             data: req.data,
         },
     };
-    fanout_to_stream(&state, tid, &stream_id, &msg, exclude);
+    fanout_to_stream(&state, tid, &stream_id, &msg, exclude, None).await;
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -390,7 +398,7 @@ pub async fn delete_event(
                     seq: original.seq,
                 },
             };
-            fanout_to_stream(&state, tid, &stream_id, &deleted_event, None);
+            fanout_to_stream(&state, tid, &stream_id, &deleted_event, None, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(None) => (

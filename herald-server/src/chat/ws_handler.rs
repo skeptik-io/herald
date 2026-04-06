@@ -94,7 +94,7 @@ pub async fn handle_edit(
                     edited_at: now,
                 },
             };
-            fanout_to_stream(state, tid, &stream, &edited_event, None);
+            fanout_to_stream(state, tid, &stream, &edited_event, None, Some(&ctx.user_id)).await;
 
             let _ = tx
                 .send(ServerMessage::EventAck {
@@ -198,7 +198,15 @@ pub async fn handle_delete(
                     seq: original.seq,
                 },
             };
-            fanout_to_stream(state, tid, &stream, &deleted_event, None);
+            fanout_to_stream(
+                state,
+                tid,
+                &stream,
+                &deleted_event,
+                None,
+                Some(&ctx.user_id),
+            )
+            .await;
 
             // Ack to sender
             let _ = tx
@@ -258,7 +266,15 @@ pub async fn handle_cursor_update(
             seq,
         },
     };
-    fanout_to_stream(state, &ctx.tenant_id, &stream, &msg, Some(ctx.conn_id));
+    fanout_to_stream(
+        state,
+        &ctx.tenant_id,
+        &stream,
+        &msg,
+        Some(ctx.conn_id),
+        Some(&ctx.user_id),
+    )
+    .await;
 }
 
 pub async fn handle_presence_set(
@@ -282,11 +298,19 @@ pub async fn handle_presence_set(
         .streams
         .get_member_streams(&ctx.tenant_id, &ctx.user_id)
     {
-        fanout_to_stream(state, &ctx.tenant_id, &stream_id, &msg, None);
+        fanout_to_stream(
+            state,
+            &ctx.tenant_id,
+            &stream_id,
+            &msg,
+            None,
+            Some(&ctx.user_id),
+        )
+        .await;
     }
 }
 
-pub fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, stream: &str, active: bool) {
+pub async fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, stream: &str, active: bool) {
     state
         .typing
         .set_typing(&ctx.tenant_id, stream, &ctx.user_id, active);
@@ -297,7 +321,15 @@ pub fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, stream: &str, act
             active,
         },
     };
-    fanout_to_stream(state, &ctx.tenant_id, stream, &msg, Some(ctx.conn_id));
+    fanout_to_stream(
+        state,
+        &ctx.tenant_id,
+        stream,
+        &msg,
+        Some(ctx.conn_id),
+        Some(&ctx.user_id),
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -364,7 +396,7 @@ pub async fn handle_reaction(
                     },
                 },
             };
-            fanout_to_stream(state, tid, &stream, &msg, None);
+            fanout_to_stream(state, tid, &stream, &msg, None, Some(&ctx.user_id)).await;
             if let Some(r) = ref_ {
                 let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;
             }

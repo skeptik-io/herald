@@ -146,7 +146,21 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Generate initial API token on signup
   - [x] Integration test: signup → receive token → create stream → publish event (tested against live Moat)
   - [x] Integration test: login, wrong password, refresh token rotation, duplicate email
-  - [ ] Integration test: signup rate limiting
+  - [x] Integration test: signup rate limiting (10 req/60s per IP, tested with 15 rapid requests)
+
+---
+
+## DEFERRED — Blocked on external changes
+
+- [ ] **D-1: Sentry/Courier/Chronicle integration tests against Moat**
+  Herald's TCP clients (SentryClient, CourierClient, ChronicleClient) send raw engine commands. Moat's RESP3 port expects engine-prefixed commands (e.g., `SENTRY EVALUATE ...`). TCP clients need updates in shroudb crates to support Moat prefix routing.
+  - [ ] Update shroudb-sentry-client to prefix commands for Moat compatibility
+  - [ ] Update shroudb-courier-client to prefix commands for Moat compatibility
+  - [ ] Update shroudb-chronicle-client to prefix commands for Moat compatibility
+  - [ ] Integration test: Sentry policy evaluation against Moat
+  - [ ] Integration test: Courier notification delivery against Moat
+  - [ ] Integration test: Chronicle audit event storage against Moat
+  - [ ] Herald `moat_addr` config resolves to individual engine addresses automatically
 
 ---
 

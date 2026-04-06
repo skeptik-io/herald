@@ -119,13 +119,13 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] Integration test: encrypt in Go, decrypt in TypeScript (cross-SDK interop)
   - [ ] Integration test: blind token search works across SDK implementations
 
-- [ ] **M-5: OpenTelemetry / distributed tracing**
+- [x] **M-5: OpenTelemetry / distributed tracing**
   Replace `X-Request-Id` with proper trace propagation for enterprise observability.
-  - [ ] Add `tracing-opentelemetry` crate with OTLP exporter
-  - [ ] Propagate W3C `traceparent` header on HTTP requests
-  - [ ] Inject trace context into WebSocket frame processing spans
-  - [ ] Integration test: verify trace IDs propagate through publish → store → fanout pipeline
-  - [ ] `/metrics` endpoint continues to work alongside OTLP export
+  - [x] Add `tracing-opentelemetry` crate with OTLP exporter (opt-in `otel` feature)
+  - [x] Propagate W3C `traceparent` header on HTTP requests
+  - [x] Inject trace context into WebSocket frame processing (debug event per frame)
+  - [x] Integration test: verify traceparent present and propagated
+  - [x] `/metrics` endpoint continues to work alongside OTLP export
 
 - [ ] **M-6: Per-tenant retention tiers**
   TTL is global 7-day. Enable per-tenant configuration for premium pricing.

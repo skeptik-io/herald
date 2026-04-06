@@ -106,6 +106,28 @@ pub enum ClientMessage {
 }
 
 impl ClientMessage {
+    /// Returns the protocol type name for this message (e.g. "subscribe", "event.publish").
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Auth { .. } => "auth",
+            Self::AuthRefresh { .. } => "auth.refresh",
+            Self::Subscribe { .. } => "subscribe",
+            Self::Unsubscribe { .. } => "unsubscribe",
+            Self::EventPublish { .. } => "event.publish",
+            Self::EventEdit { .. } => "event.edit",
+            Self::EventDelete { .. } => "event.delete",
+            Self::EventsFetch { .. } => "events.fetch",
+            Self::EventTrigger { .. } => "event.trigger",
+            Self::CursorUpdate { .. } => "cursor.update",
+            Self::PresenceSet { .. } => "presence.set",
+            Self::TypingStart { .. } => "typing.start",
+            Self::TypingStop { .. } => "typing.stop",
+            Self::Ping { .. } => "ping",
+            Self::ReactionAdd { .. } => "reaction.add",
+            Self::ReactionRemove { .. } => "reaction.remove",
+        }
+    }
+
     pub fn from_raw(raw: RawFrame) -> Result<Self, String> {
         let p = &raw.payload;
         match raw.type_.as_str() {

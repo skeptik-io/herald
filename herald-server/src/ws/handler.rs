@@ -24,6 +24,13 @@ pub async fn handle_message(
     tx: &mpsc::Sender<ServerMessage>,
     msg: ClientMessage,
 ) {
+    tracing::debug!(
+        tenant = %ctx.tenant_id,
+        user = %ctx.user_id,
+        msg_type = msg.type_name(),
+        "ws frame"
+    );
+
     match msg {
         ClientMessage::Subscribe { ref_, streams } => {
             handle_subscribe(state, ctx, tx, ref_, streams).await;

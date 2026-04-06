@@ -709,6 +709,27 @@ async function run(): Promise<void> {
       alice.disconnect();
     });
 
+    // ── Trace propagation ─────────────────────────────────────────
+
+    await test("core: HTTP response includes traceparent header", async () => {
+      const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/health`);
+      const traceparent = resp.headers.get("traceparent");
+      assert(traceparent !== null, "response should include traceparent header");
+      // W3C format: version-trace_id-span_id-flags (e.g. 00-abc123...-def456...-01)
+      assert(traceparent!.startsWith("00-"), `traceparent should start with version 00: ${traceparent}`);
+      const parts = traceparent!.split("-");
+      assert(parts.length === 4, `traceparent should have 4 parts: ${traceparent}`);
+    });
+
+    await test("core: traceparent is propagated from request", async () => {
+      const incomingTp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+      const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/health`, {
+        headers: { traceparent: incomingTp },
+      });
+      const returnedTp = resp.headers.get("traceparent");
+      assert(returnedTp === incomingTp, `should propagate incoming traceparent: got ${returnedTp}`);
+    });
+
     // ── WS message size limit ─────────────────────────────────────
 
     await test("core: WS rejects oversized message", async () => {

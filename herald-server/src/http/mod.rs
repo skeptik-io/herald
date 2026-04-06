@@ -183,10 +183,19 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 /// Middleware that generates a UUID per request, injects it as an extension,
-/// adds it to the response as `X-Request-Id`, and sets security headers.
+/// Assigns a request ID, adds it to the response as `X-Request-Id`,
+/// propagates W3C `traceparent` header, and sets security headers.
 async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     req.extensions_mut().insert(RequestId(request_id.clone()));
+
+    // Propagate incoming traceparent if present
+    let traceparent = req
+        .headers()
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -194,6 +203,20 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
         axum::http::HeaderValue::from_str(&request_id)
             .unwrap_or_else(|_| axum::http::HeaderValue::from_static("unknown")),
     );
+    // Return traceparent: either propagate the incoming one or generate a new one
+    if let Some(tp) = traceparent {
+        if let Ok(val) = tp.parse() {
+            headers.insert("traceparent", val);
+        }
+    } else {
+        // Generate a W3C traceparent: version-trace_id-span_id-flags
+        let trace_id = request_id.replace('-', "");
+        let span_id = &trace_id[..16];
+        let tp = format!("00-{trace_id}-{span_id}-01");
+        if let Ok(val) = tp.parse() {
+            headers.insert("traceparent", val);
+        }
+    }
     headers.insert(
         "x-content-type-options",
         axum::http::HeaderValue::from_static("nosniff"),

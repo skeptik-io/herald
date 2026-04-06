@@ -181,7 +181,7 @@ export class HeraldClient {
 
   async fetch(
     stream: string,
-    options?: { before?: number; limit?: number },
+    options?: { before?: number; after?: number; limit?: number },
   ): Promise<EventsBatch> {
     const ref = nextRef();
     return this.request(ref, {
@@ -362,21 +362,46 @@ export class HeraldClient {
         }
         break;
 
-      case "events.batch":
-        if (ref && this.pending.has(ref)) {
-          // E2EE decrypt batch
-          if (this.e2ee && p) {
-            const batch = p as unknown as EventsBatch;
-            for (const evt of batch.events) {
-              const result = this.e2ee.decryptIncoming(batch.stream, evt.body, evt.meta);
-              evt.body = result.body;
-              evt.meta = result.meta;
-            }
+      case "events.batch": {
+        const batch = p as unknown as EventsBatch;
+        // E2EE decrypt
+        if (this.e2ee && batch) {
+          for (const evt of batch.events) {
+            const result = this.e2ee.decryptIncoming(batch.stream, evt.body, evt.meta);
+            evt.body = result.body;
+            evt.meta = result.meta;
           }
+        }
+        if (ref && this.pending.has(ref)) {
+          // Response to explicit fetch() call
           this.pending.get(ref)!.resolve(p);
           this.pending.delete(ref);
+        } else if (batch) {
+          // Server-pushed catchup batch (reconnect) — emit each event
+          for (const evt of batch.events) {
+            if (this.seenMessageIds.has(evt.id)) continue;
+            this.seenMessageIds.add(evt.id);
+            if (evt.sent_at && evt.sent_at > (this.lastSeenAt ?? 0)) {
+              this.lastSeenAt = evt.sent_at;
+            }
+            this.emit("event", evt as unknown as EventNew);
+          }
+          // Auto-paginate: if server has more events, fetch the next page
+          if (batch.has_more && batch.events.length > 0) {
+            const lastSeq = batch.events[batch.events.length - 1].seq;
+            this.fetch(batch.stream, { after: lastSeq }).then((next) => {
+              // Re-emit as server-pushed batch by synthesizing a frame
+              this.handleFrame({
+                type: "events.batch",
+                payload: next,
+              });
+            }).catch(() => {
+              // Pagination failure is non-fatal — client has partial catchup
+            });
+          }
         }
         break;
+      }
 
       case "presence.changed":
         this.emit("presence", p as unknown as PresenceChanged);

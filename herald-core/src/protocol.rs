@@ -74,6 +74,7 @@ pub enum ClientMessage {
         ref_: Option<String>,
         stream: String,
         before: Option<Sequence>,
+        after: Option<Sequence>,
         limit: Option<u32>,
     },
     EventDelete {
@@ -164,6 +165,7 @@ impl ClientMessage {
                 ref_: raw.ref_,
                 stream: str_field(p, "stream")?,
                 before: p.get("before").and_then(|v| v.as_u64()),
+                after: p.get("after").and_then(|v| v.as_u64()),
                 limit: p
                     .get("limit")
                     .and_then(|v| v.as_u64())

@@ -111,9 +111,10 @@ pub async fn handle_message(
             ref_,
             stream,
             before,
+            after,
             limit,
         } => {
-            handle_fetch(state, ctx, tx, ref_, stream, before, limit).await;
+            handle_fetch(state, ctx, tx, ref_, stream, before, after, limit).await;
         }
         ClientMessage::EventDelete { ref_, stream, id } => {
             #[cfg(feature = "chat")]
@@ -573,6 +574,7 @@ async fn handle_publish(
     state.metrics.event_total.observe_since(total_start);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_fetch(
     state: &Arc<AppState>,
     ctx: &ConnContext,
@@ -580,6 +582,7 @@ async fn handle_fetch(
     ref_: Option<String>,
     stream: String,
     before: Option<u64>,
+    after: Option<u64>,
     limit: Option<u32>,
 ) {
     let tid = &ctx.tenant_id;
@@ -596,11 +599,19 @@ async fn handle_fetch(
     }
 
     let limit = limit.unwrap_or(DEFAULT_FETCH_LIMIT).min(MAX_FETCH_LIMIT);
-    let before_seq = before.unwrap_or(i64::MAX as u64);
 
-    let events = store::events::list_before(&*state.db, tid, &stream, before_seq, limit + 1)
-        .await
-        .unwrap_or_default();
+    // `after` takes precedence — forward pagination (catchup). `before` is
+    // backward pagination (scroll-up history). They are mutually exclusive.
+    let events = if let Some(after_seq) = after {
+        store::events::list_after(&*state.db, tid, &stream, after_seq, limit + 1)
+            .await
+            .unwrap_or_default()
+    } else {
+        let before_seq = before.unwrap_or(i64::MAX as u64);
+        store::events::list_before(&*state.db, tid, &stream, before_seq, limit + 1)
+            .await
+            .unwrap_or_default()
+    };
 
     let has_more = events.len() > limit as usize;
     let events: Vec<EventNewPayload> = events

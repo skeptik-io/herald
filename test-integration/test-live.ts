@@ -55,6 +55,7 @@ ws_bind = "127.0.0.1:${WS_PORT}"
 http_bind = "127.0.0.1:${HTTP_PORT}"
 log_level = "error"
 shutdown_timeout_secs = 1
+api_rate_limit = 10000
 
 [store]
 path = "${join(dataDir, "data")}"
@@ -603,6 +604,108 @@ async function run(): Promise<void> {
       // admin.chat.presence and admin.chat.blocks should be the same instances
       assert(admin.chat.presence === admin.presence, "chat.presence === presence");
       assert(admin.chat.blocks === admin.blocks, "chat.blocks === blocks");
+    });
+
+    // ── Catchup pagination ────────────────────────────────────────
+
+    await test("core: paginated fetch retrieves all events beyond catchup limit", async () => {
+      // Create a dedicated stream for this test to avoid interference
+      await admin.streams.create("catchup-test", "Catchup Test");
+      await admin.members.add("catchup-test", "alice");
+
+      // Publish 250 events (exceeds the 200-event catchup limit)
+      const publishedIds: string[] = [];
+      for (let i = 1; i <= 250; i++) {
+        const r = await admin.events.publish("catchup-test", "bot", `event-${i}`);
+        publishedIds.push(r.id);
+      }
+
+      // Connect alice and use paginated fetch with `after` to retrieve ALL events
+      const aliceToken = mintJwt("alice", ["catchup-test"]);
+      const alice = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      await alice.connect();
+      await alice.subscribe(["catchup-test"]);
+
+      // Page through all events using after cursor
+      let allEvents: any[] = [];
+      let afterSeq = 0;
+      let pages = 0;
+      const maxPages = 20;
+
+      while (pages < maxPages) {
+        const batch = await alice.fetch("catchup-test", { after: afterSeq, limit: 100 });
+        if (batch.events.length === 0) break;
+        allEvents = allEvents.concat(batch.events);
+        afterSeq = batch.events[batch.events.length - 1].seq;
+        pages++;
+        if (!batch.has_more) break;
+      }
+
+      assert(
+        allEvents.length >= 250,
+        `should fetch all 250 events via paginated after, got ${allEvents.length}`,
+      );
+
+      // Verify all published IDs are present
+      const fetchedIds = new Set(allEvents.map((e: any) => e.id));
+      let allFound = true;
+      for (const id of publishedIds) {
+        if (!fetchedIds.has(id)) {
+          allFound = false;
+          break;
+        }
+      }
+      assert(allFound, "all published event IDs should be in paginated results");
+
+      alice.disconnect();
+    });
+
+    await test("core: paginated catchup preserves event ordering", async () => {
+      // Use the events from the previous test. Connect and fetch all events
+      // via the `after` parameter manually to verify ordering.
+      const aliceToken = mintJwt("alice", ["catchup-test"]);
+      const alice = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      await alice.connect();
+      await alice.subscribe(["catchup-test"]);
+
+      // Fetch all events in pages of 50 using `after` cursor
+      let allEvents: any[] = [];
+      let afterSeq = 0;
+      let pages = 0;
+      const maxPages = 20;
+
+      while (pages < maxPages) {
+        const batch = await alice.fetch("catchup-test", { after: afterSeq, limit: 50 });
+        if (batch.events.length === 0) break;
+        allEvents = allEvents.concat(batch.events);
+        afterSeq = batch.events[batch.events.length - 1].seq;
+        pages++;
+        if (!batch.has_more) break;
+      }
+
+      // Verify ordering: seqs should be strictly increasing
+      let ordered = true;
+      for (let i = 1; i < allEvents.length; i++) {
+        if (allEvents[i].seq <= allEvents[i - 1].seq) {
+          ordered = false;
+          break;
+        }
+      }
+      assert(ordered, `events should be in strictly increasing seq order`);
+      assert(
+        allEvents.length >= 250,
+        `should have fetched at least 250 events via pagination, got ${allEvents.length}`,
+      );
+
+      alice.disconnect();
     });
 
     // ── Error cases ──────────────────────────────────────────────

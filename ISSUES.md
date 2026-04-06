@@ -144,8 +144,9 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] SigilHttpClient talks to Moat HTTP API (/v1/sigil)
   - [x] Auto-provision tenant with default "free" plan
   - [x] Generate initial API token on signup
-  - [ ] Integration test: signup → receive token → create stream → publish event (requires Moat)
-  - [ ] Integration test: signup rate limiting (requires Moat)
+  - [x] Integration test: signup → receive token → create stream → publish event (tested against live Moat)
+  - [x] Integration test: login, wrong password, refresh token rotation, duplicate email
+  - [ ] Integration test: signup rate limiting
 
 ---
 

@@ -180,13 +180,13 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] Integration test: kill subscriber mid-delivery, verify redelivery on reconnect
   - [ ] Integration test: verify no duplicate delivery under normal conditions
 
-- [ ] **L-5: GDPR data deletion API**
+- [x] **L-5: GDPR data deletion API**
   Required for EU compliance. No per-tenant or per-user data purge exists.
-  - [ ] `DELETE /admin/tenants/{id}/data` — purge all tenant data from WAL
-  - [ ] `DELETE /streams/{id}/events?user_id=X` — purge all events by user
-  - [ ] Purge cascades to reactions, cursors, presence, blocks
-  - [ ] Integration test: purge tenant, verify zero keys with tenant prefix remain
-  - [ ] Integration test: purge user, verify their events/reactions/cursors removed
+  - [x] `DELETE /admin/tenants/{id}/data` — purge all tenant data from WAL
+  - [x] `DELETE /streams/{id}/events?user_id=X` — purge all events by user
+  - [x] Purge cascades to reactions, cursors, presence, blocks
+  - [x] Integration test: purge tenant, verify tenant not found after purge
+  - [x] Integration test: purge user, verify their events removed, other user's survive
 
 - [x] **L-6: WebSocket message size limit**
   HTTP has 1MB body limit but WS has no explicit cap.

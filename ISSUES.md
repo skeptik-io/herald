@@ -138,11 +138,14 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 - [ ] **M-7: Self-serve tenant provisioning**
   Tenant creation is admin-API-only. Enable product-led growth.
-  - [ ] Public signup endpoint (rate-limited, captcha or email verification)
-  - [ ] Auto-provision tenant with default plan and limits
-  - [ ] Generate initial API token on signup
-  - [ ] Integration test: signup → receive token → create stream → publish event
-  - [ ] Integration test: signup rate limiting
+  - [x] POST /signup — Sigil user + Herald tenant + API token + JWT session
+  - [x] POST /login — email-based auth via Moat Sigil (Veil blind index + Argon2id)
+  - [x] POST /auth/refresh — Sigil session refresh with family-based rotation
+  - [x] SigilHttpClient talks to Moat HTTP API (/v1/sigil)
+  - [x] Auto-provision tenant with default "free" plan
+  - [x] Generate initial API token on signup
+  - [ ] Integration test: signup → receive token → create stream → publish event (requires Moat)
+  - [ ] Integration test: signup rate limiting (requires Moat)
 
 ---
 

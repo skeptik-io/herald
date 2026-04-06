@@ -253,12 +253,8 @@ async fn tenant_rate_limit_middleware(
         None => return next.run(req).await,
     };
 
-    let limit = state
-        .tenant_cache
-        .get(&tenant_id)
-        .and_then(|tc| crate::config::PlanLimits::for_plan(&tc.plan))
-        .map(|pl| pl.api_rate_limit)
-        .unwrap_or(state.config.server.api_rate_limit);
+    let plan_limits = state.get_plan_limits_cached(&tenant_id);
+    let limit = plan_limits.api_rate_limit;
     let entry = state
         .api_rate_limits
         .entry(tenant_id)

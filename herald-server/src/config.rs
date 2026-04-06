@@ -60,6 +60,19 @@ pub struct PlanLimits {
     pub retention_days: u32,
 }
 
+impl Default for PlanLimits {
+    /// Generous defaults used when Meterd is unavailable and the plan is unknown.
+    fn default() -> Self {
+        Self {
+            max_connections: 10_000,
+            max_streams: 10_000,
+            api_rate_limit: 1_000,
+            events_per_month: u64::MAX,
+            retention_days: 7,
+        }
+    }
+}
+
 impl PlanLimits {
     /// Returns plan-specific limits for known plan tiers, or `None` for
     /// self-hosted / unknown plans (which fall back to global config).

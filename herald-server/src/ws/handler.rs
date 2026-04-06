@@ -437,6 +437,53 @@ async fn handle_publish(
         return;
     }
 
+    // Enforce events_per_month limit (local counter, fast path)
+    {
+        let plan_limits = state.get_plan_limits_cached(tid);
+        let current = state
+            .tenant_metrics
+            .entry(tid.to_string())
+            .or_default()
+            .events_published
+            .load(Ordering::Relaxed);
+        if current >= plan_limits.events_per_month {
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::RateLimited,
+                    format!(
+                        "monthly event limit reached ({}/{})",
+                        current, plan_limits.events_per_month
+                    ),
+                ))
+                .await;
+            return;
+        }
+    }
+
+    // Meterd quota check (remote, with circuit breaker — fails open)
+    if let Some(ref metering) = state.metering {
+        let result = metering.check_quota("events_published", tid, 1).await;
+        if !result.allowed {
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::RateLimited,
+                    "event quota exceeded",
+                ))
+                .await;
+            return;
+        }
+        if result.soft_overage {
+            tracing::warn!(
+                tenant = tid,
+                usage = ?result.current_usage,
+                limit = ?result.limit,
+                "soft quota overage — event allowed but tenant is over limit"
+            );
+        }
+    }
+
     let total_start = std::time::Instant::now();
 
     // Sequence is allocated before storage. If the store write below fails,

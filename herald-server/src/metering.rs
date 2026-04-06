@@ -1,8 +1,11 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+// ── Wire types ──────────────────────────────────────────────────────
 
 /// A single usage event to be ingested by Meterd.
 #[derive(Debug, Clone, Serialize)]
@@ -24,14 +27,130 @@ struct BatchPayload {
 
 /// Response from `POST /v1/quota/check`.
 #[derive(Debug, Deserialize)]
-struct QuotaCheckResponse {
-    allowed: bool,
+pub struct QuotaCheckResponse {
+    pub allowed: bool,
+    pub current_usage: Option<u64>,
+    pub limit: Option<u64>,
+    pub remaining: Option<u64>,
+    #[serde(default)]
+    pub enforcement: Option<String>,
+}
+
+/// A single entry from Meterd's `GET /v1/quota/snapshot` response.
+#[derive(Debug, Deserialize)]
+struct QuotaSnapshotEntry {
+    meter_slug: String,
     #[allow(dead_code)]
     current_usage: Option<u64>,
-    #[allow(dead_code)]
     limit: Option<u64>,
+    #[allow(dead_code)]
     remaining: Option<u64>,
+    #[allow(dead_code)]
+    percent_used: Option<f64>,
 }
+
+/// Result of a quota check that includes overage context.
+#[derive(Debug, Clone)]
+pub struct QuotaResult {
+    pub allowed: bool,
+    pub remaining: Option<u64>,
+    /// `true` when enforcement is `soft_cap` and usage exceeds the limit.
+    /// The request should be allowed but the caller should emit a warning.
+    pub soft_overage: bool,
+    pub current_usage: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+// ── Circuit breaker ─────────────────────────────────────────────────
+
+/// Circuit breaker states following the standard pattern.
+/// - Closed: requests flow normally, failures are counted.
+/// - Open: requests are rejected immediately (fail-open for metering).
+/// - HalfOpen: a single probe request is allowed through to test recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+struct CircuitBreaker {
+    state: Mutex<CircuitState>,
+    failure_count: AtomicU64,
+    last_failure: Mutex<Option<Instant>>,
+    /// Number of consecutive failures before the circuit opens.
+    threshold: u64,
+    /// How long the circuit stays open before transitioning to half-open.
+    cooldown: Duration,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: u64, cooldown: Duration) -> Self {
+        Self {
+            state: Mutex::new(CircuitState::Closed),
+            failure_count: AtomicU64::new(0),
+            last_failure: Mutex::new(None),
+            threshold,
+            cooldown,
+        }
+    }
+
+    /// Returns `true` if the request should be allowed through.
+    fn allow_request(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match *state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                let last = self.last_failure.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(t) = *last {
+                    if t.elapsed() >= self.cooldown {
+                        *state = CircuitState::HalfOpen;
+                        debug!("metering circuit breaker: open → half-open");
+                        return true;
+                    }
+                }
+                false
+            }
+            CircuitState::HalfOpen => {
+                // Only one probe request allowed — block the rest until we
+                // get a success or failure on the probe.
+                false
+            }
+        }
+    }
+
+    fn record_success(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if *state == CircuitState::HalfOpen {
+            info!("metering circuit breaker: half-open → closed (probe succeeded)");
+        }
+        *state = CircuitState::Closed;
+        self.failure_count.store(0, Ordering::Relaxed);
+    }
+
+    fn record_failure(&self) {
+        let count = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
+        *self.last_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if *state == CircuitState::HalfOpen || count >= self.threshold {
+            if *state != CircuitState::Open {
+                warn!(
+                    failures = count,
+                    "metering circuit breaker: → open ({count} failures)"
+                );
+            }
+            *state = CircuitState::Open;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_open(&self) -> bool {
+        *self.state.lock().unwrap() == CircuitState::Open
+    }
+}
+
+// ── Configuration ───────────────────────────────────────────────────
 
 /// Configuration for the Meterd metering integration.
 #[derive(Debug, Clone)]
@@ -66,14 +185,19 @@ impl MeteringConfig {
     }
 }
 
-/// Lightweight Meterd HTTP client with local buffering.
+// ── Client ──────────────────────────────────────────────────────────
+
+/// Lightweight Meterd HTTP client with local buffering and circuit breaker.
 ///
 /// Usage events are queued via `track()` (non-blocking) and periodically
-/// flushed to the Meterd API by a background task.
+/// flushed to the Meterd API by a background task. Quota checks are
+/// synchronous HTTP calls gated by the circuit breaker — when the breaker
+/// is open, quota checks fail-open (allow the request).
 pub struct MeteringClient {
     config: MeteringConfig,
     http: reqwest::Client,
     buffer: Mutex<Vec<IngestEvent>>,
+    breaker: CircuitBreaker,
 }
 
 impl MeteringClient {
@@ -82,6 +206,8 @@ impl MeteringClient {
             config,
             http: reqwest::Client::new(),
             buffer: Mutex::new(Vec::new()),
+            // 5 consecutive failures → open, 30s cooldown (matches CLAUDE.md rules)
+            breaker: CircuitBreaker::new(5, Duration::from_secs(30)),
         }
     }
 
@@ -117,7 +243,13 @@ impl MeteringClient {
     }
 
     /// Flush pending events to Meterd. Called periodically by background task.
+    /// Gated by circuit breaker — when open, events stay buffered.
     pub async fn flush(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.breaker.allow_request() {
+            debug!("metering: circuit breaker open, skipping flush");
+            return Ok(());
+        }
+
         let events = {
             let mut buf = self
                 .buffer
@@ -137,37 +269,62 @@ impl MeteringClient {
         let url = format!("{}/v1/events/batch", self.config.base_url);
         let payload = BatchPayload { events };
 
-        let resp = self
+        let result = self
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .json(&payload)
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
             .send()
-            .await?;
+            .await;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            warn!(
-                status = %status,
-                body = %body,
-                "metering: Meterd batch ingest failed"
-            );
-            return Err(format!("Meterd returned {status}: {body}").into());
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                self.breaker.record_success();
+                debug!(count, "metering: flushed events successfully");
+                Ok(())
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                self.breaker.record_failure();
+                warn!(
+                    status = %status,
+                    body = %body,
+                    "metering: Meterd batch ingest failed"
+                );
+                Err(format!("Meterd returned {status}: {body}").into())
+            }
+            Err(e) => {
+                self.breaker.record_failure();
+                warn!(error = %e, "metering: Meterd request failed");
+                Err(e.into())
+            }
         }
-
-        debug!(count, "metering: flushed events successfully");
-        Ok(())
     }
 
-    /// Check quota with Meterd. Returns (allowed, remaining).
+    /// Check quota with Meterd. Returns a `QuotaResult` with enforcement context.
+    ///
+    /// When the circuit breaker is open, this **fails open** — the request is
+    /// allowed through with no usage data. This matches the project rule:
+    /// "Sentry fail-open (permit when circuit trips)."
     pub async fn check_quota(
         &self,
         meter_slug: &str,
         customer_id: &str,
         requested: u64,
-    ) -> Result<(bool, Option<u64>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> QuotaResult {
+        if !self.breaker.allow_request() {
+            debug!("metering: circuit breaker open, failing open for quota check");
+            return QuotaResult {
+                allowed: true,
+                remaining: None,
+                soft_overage: false,
+                current_usage: None,
+                limit: None,
+            };
+        }
+
         let url = format!("{}/v1/quota/check", self.config.base_url);
 
         let body = serde_json::json!({
@@ -176,28 +333,159 @@ impl MeteringClient {
             "requested": requested,
         });
 
-        let resp = self
+        let result = self
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .json(&body)
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(Duration::from_secs(5))
             .send()
-            .await?;
+            .await;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let resp_body = resp.text().await.unwrap_or_default();
-            warn!(
-                status = %status,
-                body = %resp_body,
-                "metering: Meterd quota check failed"
-            );
-            return Err(format!("Meterd returned {status}: {resp_body}").into());
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                self.breaker.record_success();
+                match resp.json::<QuotaCheckResponse>().await {
+                    Ok(qr) => {
+                        let soft_overage = qr
+                            .enforcement
+                            .as_deref()
+                            .map(|e| e == "soft_cap")
+                            .unwrap_or(false)
+                            && !qr.allowed;
+                        QuotaResult {
+                            // soft_cap overages are allowed through with a warning
+                            allowed: qr.allowed || soft_overage,
+                            remaining: qr.remaining,
+                            soft_overage,
+                            current_usage: qr.current_usage,
+                            limit: qr.limit,
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "metering: failed to parse quota response, failing open");
+                        QuotaResult {
+                            allowed: true,
+                            remaining: None,
+                            soft_overage: false,
+                            current_usage: None,
+                            limit: None,
+                        }
+                    }
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                self.breaker.record_failure();
+                warn!(status = %status, "metering: Meterd quota check failed, failing open");
+                QuotaResult {
+                    allowed: true,
+                    remaining: None,
+                    soft_overage: false,
+                    current_usage: None,
+                    limit: None,
+                }
+            }
+            Err(e) => {
+                self.breaker.record_failure();
+                warn!(error = %e, "metering: Meterd quota request failed, failing open");
+                QuotaResult {
+                    allowed: true,
+                    remaining: None,
+                    soft_overage: false,
+                    current_usage: None,
+                    limit: None,
+                }
+            }
+        }
+    }
+
+    /// Fetch plan limits from Meterd's quota snapshot endpoint.
+    ///
+    /// Maps Meterd meter slugs to `PlanLimits` fields:
+    ///   - `max_connections` → meter `max_connections`
+    ///   - `max_streams` → meter `max_streams`
+    ///   - `api_rate_limit` → meter `api_rate_limit`
+    ///   - `events_per_month` → meter `events_per_month`
+    ///   - `retention_days` → meter `retention_days`
+    ///
+    /// Returns `None` if the call fails (circuit breaker or network error),
+    /// letting the caller fall back to built-in defaults.
+    pub async fn fetch_plan_limits(&self, customer_id: &str) -> Option<crate::config::PlanLimits> {
+        if !self.breaker.allow_request() {
+            debug!("metering: circuit breaker open, skipping plan limits fetch");
+            return None;
         }
 
-        let result: QuotaCheckResponse = resp.json().await?;
-        Ok((result.allowed, result.remaining))
+        let url = format!(
+            "{}/v1/quota/snapshot?customer={}",
+            self.config.base_url, customer_id
+        );
+
+        let result = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                self.breaker.record_success();
+                match resp.json::<Vec<QuotaSnapshotEntry>>().await {
+                    Ok(entries) => {
+                        let mut limits = crate::config::PlanLimits::default();
+                        for entry in &entries {
+                            match entry.meter_slug.as_str() {
+                                "max_connections" => {
+                                    if let Some(l) = entry.limit {
+                                        limits.max_connections = l as u32;
+                                    }
+                                }
+                                "max_streams" => {
+                                    if let Some(l) = entry.limit {
+                                        limits.max_streams = l as u32;
+                                    }
+                                }
+                                "api_rate_limit" => {
+                                    if let Some(l) = entry.limit {
+                                        limits.api_rate_limit = l as u32;
+                                    }
+                                }
+                                "events_per_month" | "events_published" => {
+                                    if let Some(l) = entry.limit {
+                                        limits.events_per_month = l;
+                                    }
+                                }
+                                "retention_days" => {
+                                    if let Some(l) = entry.limit {
+                                        limits.retention_days = l as u32;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(limits)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "metering: failed to parse quota snapshot");
+                        None
+                    }
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                self.breaker.record_failure();
+                warn!(status = %status, "metering: quota snapshot fetch failed");
+                None
+            }
+            Err(e) => {
+                self.breaker.record_failure();
+                warn!(error = %e, "metering: quota snapshot request failed");
+                None
+            }
+        }
     }
 
     /// Returns the number of events currently buffered.
@@ -205,6 +493,8 @@ impl MeteringClient {
         self.buffer.lock().map(|b| b.len()).unwrap_or(0)
     }
 }
+
+// ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -245,18 +535,76 @@ mod tests {
     #[tokio::test]
     async fn flush_empty_buffer_is_noop() {
         let client = MeteringClient::new(test_config());
-        // Should succeed without making any HTTP call
         let result = client.flush().await;
         assert!(result.is_ok());
     }
 
     #[test]
     fn config_from_env_defaults() {
-        // With no env vars set, should get defaults
         let config = MeteringConfig::from_env();
         assert!(!config.enabled);
         assert_eq!(config.base_url, "https://api.meterd.io");
         assert_eq!(config.flush_interval_secs, 10);
         assert_eq!(config.batch_size, 100);
+    }
+
+    #[test]
+    fn circuit_breaker_opens_after_threshold() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        assert!(cb.allow_request());
+
+        cb.record_failure();
+        cb.record_failure();
+        assert!(cb.allow_request()); // 2 failures, threshold is 3
+
+        cb.record_failure();
+        assert!(cb.is_open());
+        assert!(!cb.allow_request()); // circuit is open
+    }
+
+    #[test]
+    fn circuit_breaker_resets_on_success() {
+        let cb = CircuitBreaker::new(2, Duration::from_secs(0)); // 0s cooldown for test
+        cb.record_failure();
+        cb.record_failure();
+        assert!(cb.is_open());
+
+        // With 0s cooldown, the next allow_request should transition to half-open
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(cb.allow_request()); // half-open probe
+
+        cb.record_success();
+        assert!(!cb.is_open()); // back to closed
+        assert!(cb.allow_request());
+    }
+
+    #[tokio::test]
+    async fn check_quota_fails_open_when_circuit_open() {
+        let client = MeteringClient::new(test_config());
+        // Trip the breaker
+        for _ in 0..5 {
+            client.breaker.record_failure();
+        }
+        assert!(client.breaker.is_open());
+
+        let result = client.check_quota("events_published", "tenant-1", 1).await;
+        assert!(result.allowed); // fail-open
+        assert!(!result.soft_overage);
+    }
+
+    #[tokio::test]
+    async fn flush_skips_when_circuit_open() {
+        let client = MeteringClient::new(test_config());
+        client.track("events_published", "tenant-1", 1.0, None);
+
+        for _ in 0..5 {
+            client.breaker.record_failure();
+        }
+        assert!(client.breaker.is_open());
+
+        let result = client.flush().await;
+        assert!(result.is_ok());
+        // Events should still be buffered (not drained)
+        assert_eq!(client.pending_count(), 1);
     }
 }

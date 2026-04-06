@@ -140,6 +140,8 @@ pub struct AppState {
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
     pub metering: Option<Arc<crate::metering::MeteringClient>>,
+    /// Cached plan limits per tenant (from Meterd or built-in defaults).
+    pub plan_limits_cache: DashMap<String, (crate::config::PlanLimits, std::time::Instant)>,
     pub metrics: Metrics,
     pub event_bus: Arc<EventBus>,
     webhook_config: Option<Arc<WebhookConfig>>,
@@ -181,6 +183,7 @@ impl AppState {
             courier: b.courier,
             chronicle: b.chronicle,
             metering: b.metering,
+            plan_limits_cache: DashMap::new(),
             metrics: Metrics::default(),
             event_bus: EventBus::new(),
             webhook_config,
@@ -296,6 +299,81 @@ impl AppState {
             .map_err(|e| format!("JWT validation failed: {e}"))?;
 
         Ok((tenant_id.clone(), data.claims))
+    }
+
+    /// Get plan limits for a tenant. Resolution order:
+    /// 1. Local cache (5-minute TTL)
+    /// 2. Meterd quota snapshot (if metering enabled)
+    /// 3. Built-in plan defaults (`PlanLimits::for_plan`)
+    /// 4. Global config defaults
+    pub async fn get_plan_limits(&self, tenant_id: &str) -> crate::config::PlanLimits {
+        use crate::config::PlanLimits;
+
+        const CACHE_TTL_SECS: u64 = 300; // 5 minutes
+
+        // 1. Check cache
+        if let Some(entry) = self.plan_limits_cache.get(tenant_id) {
+            if entry.1.elapsed().as_secs() < CACHE_TTL_SECS {
+                return entry.0.clone();
+            }
+        }
+
+        // 2. Try Meterd
+        if let Some(ref metering) = self.metering {
+            if let Some(limits) = metering.fetch_plan_limits(tenant_id).await {
+                self.plan_limits_cache.insert(
+                    tenant_id.to_string(),
+                    (limits.clone(), std::time::Instant::now()),
+                );
+                return limits;
+            }
+        }
+
+        // 3. Built-in plan defaults, then global config
+        let plan = self
+            .tenant_cache
+            .get(tenant_id)
+            .map(|tc| tc.plan.clone())
+            .unwrap_or_default();
+        let limits = PlanLimits::for_plan(&plan).unwrap_or_else(|| PlanLimits {
+            max_connections: self.config.tenant_limits.max_connections_per_tenant,
+            max_streams: self.config.tenant_limits.max_streams_per_tenant,
+            api_rate_limit: self.config.server.api_rate_limit,
+            events_per_month: u64::MAX,
+            retention_days: 7,
+        });
+        self.plan_limits_cache.insert(
+            tenant_id.to_string(),
+            (limits.clone(), std::time::Instant::now()),
+        );
+        limits
+    }
+
+    /// Synchronous plan limits lookup — cache-only, no async Meterd call.
+    /// Used in hot paths (WS handler) where we can't await.
+    /// Falls back to built-in plan defaults, then global config.
+    pub fn get_plan_limits_cached(&self, tenant_id: &str) -> crate::config::PlanLimits {
+        if let Some(entry) = self.plan_limits_cache.get(tenant_id) {
+            if entry.1.elapsed().as_secs() < 300 {
+                return entry.0.clone();
+            }
+        }
+        // Fall back to built-in plan defaults
+        if let Some(limits) = self
+            .tenant_cache
+            .get(tenant_id)
+            .and_then(|tc| crate::config::PlanLimits::for_plan(&tc.plan))
+        {
+            return limits;
+        }
+        // Fall back to global config
+        crate::config::PlanLimits {
+            max_connections: self.config.tenant_limits.max_connections_per_tenant,
+            max_streams: self.config.tenant_limits.max_streams_per_tenant,
+            api_rate_limit: self.config.server.api_rate_limit,
+            events_per_month: u64::MAX,
+            retention_days: 7,
+        }
     }
 
     pub fn increment_tenant_events(&self, tenant_id: &str) {

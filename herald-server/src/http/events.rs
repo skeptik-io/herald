@@ -76,6 +76,49 @@ pub async fn inject_event(
             .into_response();
     }
 
+    // Enforce events_per_month limit (local counter, fast path)
+    {
+        let plan_limits = state.get_plan_limits_cached(tid);
+        let current = state
+            .tenant_metrics
+            .entry(tid.to_string())
+            .or_default()
+            .events_published
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if current >= plan_limits.events_per_month {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "monthly event limit reached ({}/{})",
+                        current, plan_limits.events_per_month
+                    )
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Meterd quota check (remote, with circuit breaker — fails open)
+    if let Some(ref metering) = state.metering {
+        let result = metering.check_quota("events_published", tid, 1).await;
+        if !result.allowed {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "event quota exceeded"})),
+            )
+                .into_response();
+        }
+        if result.soft_overage {
+            tracing::warn!(
+                tenant = tid,
+                usage = ?result.current_usage,
+                limit = ?result.limit,
+                "soft quota overage — event allowed but tenant is over limit"
+            );
+        }
+    }
+
     // See ws/handler.rs handle_publish for why seq gaps on storage failure are accepted.
     let seq = state.streams.next_seq(tid, &stream_id);
     let now = now_millis();
@@ -103,6 +146,10 @@ pub async fn inject_event(
     }
 
     state.increment_tenant_events(tid);
+
+    if let Some(ref metering) = state.metering {
+        metering.track("events_published", tid, 1.0, None);
+    }
 
     let new_event = ServerMessage::EventNew {
         payload: EventNewPayload {

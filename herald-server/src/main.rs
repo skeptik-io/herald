@@ -262,6 +262,13 @@ async fn main() -> anyhow::Result<()> {
                     t_webhooks,
                     t_streams,
                 );
+
+                // Report peak concurrent connections to Meterd
+                if t_connections > 0 {
+                    if let Some(ref metering) = stats_state.metering {
+                        metering.track("peak_connections", tid, t_connections as f64, None);
+                    }
+                }
             }
         }
     });

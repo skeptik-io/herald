@@ -56,6 +56,7 @@ http_bind = "127.0.0.1:${HTTP_PORT}"
 log_level = "error"
 shutdown_timeout_secs = 1
 api_rate_limit = 10000
+ws_max_message_size = 65536
 
 [store]
 path = "${join(dataDir, "data")}"
@@ -706,6 +707,52 @@ async function run(): Promise<void> {
       );
 
       alice.disconnect();
+    });
+
+    // ── WS message size limit ─────────────────────────────────────
+
+    await test("core: WS rejects oversized message", async () => {
+      const token = mintJwt("alice", ["general"]);
+      const client = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token,
+        reconnect: { enabled: false },
+      });
+      await client.connect();
+      await client.subscribe(["general"]);
+
+      // Server ws_max_message_size is 65536 (64KB). Send a message body > 64KB.
+      // The 65_536 body exceeds the WS handler's body validation (64KB for event body)
+      // and is under the WS frame limit. But the event body validation in handle_publish
+      // rejects bodies > 65536 bytes. So we should get an error.
+      const oversizedBody = "x".repeat(70_000); // 70KB > 65536 body limit
+      let rejected = false;
+      try {
+        await client.publish("general", oversizedBody);
+      } catch {
+        rejected = true;
+      }
+      assert(rejected, "oversized message should be rejected");
+
+      client.disconnect();
+    });
+
+    await test("core: WS accepts message at body limit", async () => {
+      const token = mintJwt("alice", ["general"]);
+      const client = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token,
+        reconnect: { enabled: false },
+      });
+      await client.connect();
+      await client.subscribe(["general"]);
+
+      // Send a message body just under the 65536 body limit
+      const body = "x".repeat(60_000); // 60KB, under 65536 limit
+      const ack = await client.publish("general", body);
+      assert(typeof ack.id === "string" && ack.id.length > 0, "should succeed with body at limit");
+
+      client.disconnect();
     });
 
     // ── Error cases ──────────────────────────────────────────────

@@ -11,11 +11,18 @@ pub enum StoreBackend {
 }
 
 impl StoreBackend {
-    /// Returns the embedded storage engine health, or Ready for remote (health is the server's concern).
-    pub fn storage_health(&self) -> shroudb_storage::engine::HealthState {
+    /// Check storage health. For embedded, reads engine health directly.
+    /// For remote, probes the connection with a lightweight namespace_list call.
+    pub async fn storage_health(&self) -> shroudb_storage::engine::HealthState {
         match self {
             Self::Embedded(s) => s.engine().health(),
-            Self::Remote(_) => shroudb_storage::engine::HealthState::Ready,
+            Self::Remote(s) => {
+                // Probe remote store with a lightweight operation
+                match s.namespace_list(None, 1).await {
+                    Ok(_) => shroudb_storage::engine::HealthState::Ready,
+                    Err(_) => shroudb_storage::engine::HealthState::Stale,
+                }
+            }
         }
     }
 }

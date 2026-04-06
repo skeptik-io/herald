@@ -1,0 +1,29 @@
+{
+  "name": "herald-chat-sdk",
+  "version": "0.1.0",
+  "description": "Herald Chat WebSocket SDK — chat frame extensions for herald-sdk",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "herald-sdk": "^2.0.0"
+  },
+  "devDependencies": {
+    "herald-sdk": "file:../herald-sdk-typescript",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  }
+}

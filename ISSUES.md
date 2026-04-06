@@ -129,11 +129,12 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 - [ ] **M-6: Per-tenant retention tiers**
   TTL is global 7-day. Enable per-tenant configuration for premium pricing.
-  - [ ] Add `retention_days` field to tenant config (default 7)
-  - [ ] TTL cleanup job respects per-tenant retention
-  - [ ] Admin API: set retention per tenant
-  - [ ] Integration test: tenant A (7d) events expire, tenant B (30d) events survive
-  - [ ] Integration test: changing retention applies to future expiry only
+  - [x] `retention_days` field in PlanLimits — read from Meterd, falls back to global config
+  - [x] Event insert uses per-tenant TTL via state.event_ttl_ms(tenant_id)
+  - [x] TTL cleanup job already respects per-event expiry timestamps (no changes needed)
+  - [x] Retention per tenant managed via Meterd plan configuration
+  - [ ] Integration test: tenant A (7d) events expire, tenant B (30d) events survive (requires Meterd)
+  - [ ] Integration test: changing retention applies to future expiry only (requires Meterd)
 
 - [ ] **M-7: Self-serve tenant provisioning**
   Tenant creation is admin-API-only. Enable product-led growth.

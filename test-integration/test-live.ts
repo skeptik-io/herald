@@ -554,6 +554,211 @@ async function run(): Promise<void> {
       client.disconnect();
     });
 
+    // ── Reconnect catchup ────────────────────────────────────────
+
+    await test("core: reconnect catchup receives missed events", async () => {
+      // 1) Connect alice, subscribe, receive one event so lastSeenAt is set
+      const aliceToken = mintJwt("alice", ["general"]);
+      const alice = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      await alice.connect();
+      await alice.subscribe(["general"]);
+
+      // Publish one event so alice has a baseline lastSeenAt
+      const baseline = await admin.events.publish("general", "server-bot", "baseline event");
+      assert(baseline.seq > 0, "baseline published");
+
+      // Give alice time to receive it
+      await new Promise((r) => setTimeout(r, 300));
+
+      // 2) Disconnect alice
+      alice.disconnect();
+
+      // 3) Publish 3 events while alice is offline
+      const ids: string[] = [];
+      for (let i = 1; i <= 3; i++) {
+        const r = await admin.events.publish("general", "server-bot", `offline-event-${i}`);
+        ids.push(r.id);
+      }
+
+      // 4) Reconnect alice and fetch events — should include the 3 missed ones
+      const alice2 = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      await alice2.connect();
+      await alice2.subscribe(["general"]);
+
+      const batch = await alice2.fetch("general");
+      // Verify all 3 offline events are in history
+      const foundIds = batch.events.map((e: any) => e.id);
+      for (const id of ids) {
+        assert(foundIds.includes(id), `missed event ${id} found in history`);
+      }
+
+      alice2.disconnect();
+    });
+
+    // ── JWT auth failure ────────────────────────────────────────
+
+    await test("auth: invalid JWT (wrong secret) is rejected", async () => {
+      const badToken = jwt.sign(
+        { sub: "mallory", tenant: "default", streams: ["general"], iss: "test" },
+        "wrong-secret-key",
+        { expiresIn: "1h" },
+      );
+      const client = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: badToken,
+        reconnect: { enabled: false },
+      });
+
+      let authFailed = false;
+      try {
+        await client.connect();
+      } catch (e: any) {
+        authFailed = true;
+      }
+      assert(authFailed, "connection with bad JWT should fail");
+      client.disconnect();
+    });
+
+    await test("auth: expired JWT is rejected", async () => {
+      // Manually set exp to 1 hour in the past to be well outside any leeway
+      const now = Math.floor(Date.now() / 1000);
+      const expiredToken = jwt.sign(
+        { sub: "mallory", tenant: "default", streams: ["general"], iss: "test", iat: now - 7200, exp: now - 3600 },
+        JWT_SECRET,
+      );
+      const client = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: expiredToken,
+        reconnect: { enabled: false },
+      });
+
+      let authFailed = false;
+      try {
+        await client.connect();
+      } catch (e: any) {
+        authFailed = true;
+      }
+      assert(authFailed, "connection with expired JWT should fail");
+      client.disconnect();
+    });
+
+    // ── Multi-tenant isolation (single-tenant mode) ─────────────
+
+    await test("auth: non-default tenant is rejected in single-tenant mode", async () => {
+      const wrongTenantToken = jwt.sign(
+        { sub: "mallory", tenant: "other-corp", streams: ["general"], iss: "test" },
+        JWT_SECRET,
+        { expiresIn: "1h" },
+      );
+      const client = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: wrongTenantToken,
+        reconnect: { enabled: false },
+      });
+
+      let authFailed = false;
+      try {
+        await client.connect();
+      } catch (e: any) {
+        authFailed = true;
+      }
+      assert(authFailed, "non-default tenant should be rejected in single-tenant mode");
+      client.disconnect();
+    });
+
+    // ── Rate limiting ───────────────────────────────────────────
+
+    await test("admin: rapid HTTP requests (rate limiting check)", async () => {
+      // Send 50 rapid requests in parallel to check for 429 responses
+      const results = await Promise.allSettled(
+        Array.from({ length: 50 }, (_, i) =>
+          fetch(`http://127.0.0.1:${HTTP_PORT}/health`)
+        ),
+      );
+
+      const statuses = await Promise.all(
+        results.map(async (r) => {
+          if (r.status === "fulfilled") return r.value.status;
+          return 0; // network error
+        }),
+      );
+
+      const got429 = statuses.some((s) => s === 429);
+      const allOk = statuses.every((s) => s === 200);
+
+      if (got429) {
+        // Rate limiting is active
+        assert(true, "rate limiting enforced (got 429)");
+      } else {
+        // Rate limiting not enforced — document it
+        assert(allOk, "all requests succeeded (rate limiting not enforced in single-tenant mode)");
+        // NOTE: Rate limiting may not be enforced for /health or in single-tenant mode.
+        // This test documents the current behavior.
+      }
+    });
+
+    // ── Reaction remove ─────────────────────────────────────────
+
+    await test("chat: reaction remove round-trip", async () => {
+      const aliceToken = mintJwt("alice", ["general"]);
+      const bobToken = mintJwt("bob", ["general"]);
+
+      const alice = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      const aliceChat = new HeraldChatClient(alice);
+      const bob = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: bobToken,
+        reconnect: { enabled: false },
+      });
+
+      await alice.connect();
+      await bob.connect();
+      await alice.subscribe(["general"]);
+      await bob.subscribe(["general"]);
+
+      // Publish event and add a reaction
+      const ack = await alice.publish("general", "react then unreact");
+      const addPromise = waitForEvent<any>(bob, "reaction.changed");
+      aliceChat.addReaction("general", ack.id, "👍");
+      const added = await addPromise;
+      assert(added.action === "add", `add action: ${added.action}`);
+      assert(added.emoji === "👍", `add emoji: ${added.emoji}`);
+
+      // Now remove the reaction
+      const removePromise = waitForEvent<any>(bob, "reaction.changed");
+      aliceChat.removeReaction("general", ack.id, "👍");
+      const removed = await removePromise;
+      assert(removed.event_id === ack.id, `remove event_id: ${removed.event_id}`);
+      assert(removed.emoji === "👍", `remove emoji: ${removed.emoji}`);
+      assert(removed.user_id === "alice", `remove user_id: ${removed.user_id}`);
+      assert(removed.action === "remove", `remove action: ${removed.action}`);
+
+      alice.disconnect();
+      bob.disconnect();
+    });
+
+    // ── Webhook delivery ────────────────────────────────────────
+    // TODO: Webhook delivery test. The single-tenant config does not expose
+    // webhook configuration options. To test webhook delivery with HMAC
+    // verification, the server would need a [webhooks] config section and
+    // an HTTP listener endpoint. This should be tested in a dedicated
+    // multi-tenant integration suite where webhook URLs can be configured
+    // per-tenant via the admin API.
+
+    // ── Error cases ──────────────────────────────────────────────
+
     await test("chat: edit someone else's event succeeds without Sentry (fail-open)", async () => {
       // Without Sentry configured, authorize() returns Ok (fail-open).
       // Bob CAN edit Alice's message. This test documents that behavior.

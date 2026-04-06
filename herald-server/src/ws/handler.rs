@@ -437,29 +437,6 @@ async fn handle_publish(
         return;
     }
 
-    // Enforce events_per_month limit (only when metering enabled — Meterd defines the limit)
-    if let Some(plan_limits) = state.get_plan_limits_cached(tid) {
-        let current = state
-            .tenant_metrics
-            .entry(tid.to_string())
-            .or_default()
-            .events_published
-            .load(Ordering::Relaxed);
-        if current >= plan_limits.events_per_month {
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::RateLimited,
-                    format!(
-                        "monthly event limit reached ({}/{})",
-                        current, plan_limits.events_per_month
-                    ),
-                ))
-                .await;
-            return;
-        }
-    }
-
     // Meterd quota check (remote, with circuit breaker — fails open)
     if let Some(ref metering) = state.metering {
         let result = metering.check_quota("events_published", tid, 1).await;

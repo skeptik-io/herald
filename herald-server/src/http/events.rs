@@ -76,28 +76,6 @@ pub async fn inject_event(
             .into_response();
     }
 
-    // Enforce events_per_month limit (only when metering enabled — Meterd defines the limit)
-    if let Some(plan_limits) = state.get_plan_limits_cached(tid) {
-        let current = state
-            .tenant_metrics
-            .entry(tid.to_string())
-            .or_default()
-            .events_published
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if current >= plan_limits.events_per_month {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({
-                    "error": format!(
-                        "monthly event limit reached ({}/{})",
-                        current, plan_limits.events_per_month
-                    )
-                })),
-            )
-                .into_response();
-        }
-    }
-
     // Meterd quota check (remote, with circuit breaker — fails open)
     if let Some(ref metering) = state.metering {
         let result = metering.check_quota("events_published", tid, 1).await;

@@ -1375,6 +1375,188 @@ retries = 1
     webhookServer.close();
   }
 
+  // ── Sigil signup tests (require running Moat) ──────────────────
+
+  const MOAT_URL = process.env.HERALD_TEST_MOAT_URL || "http://127.0.0.1:18200";
+  const MOAT_TOKEN = process.env.HERALD_TEST_MOAT_TOKEN || "herald-backend-token";
+
+  let moatAvailable = false;
+  try {
+    const resp = await fetch(`${MOAT_URL}/health`, { signal: AbortSignal.timeout(2000) });
+    moatAvailable = resp.ok;
+  } catch {}
+
+  if (moatAvailable) {
+    console.log(`\nMoat available at ${MOAT_URL} — running signup tests\n`);
+
+    // Start a Herald instance configured to talk to Moat
+    const SIGNUP_WS_PORT = 16220;
+    const SIGNUP_HTTP_PORT = 16221;
+    let signupProcess: ChildProcess | null = null;
+    let signupDataDir: string;
+
+    async function startSignupServer(): Promise<void> {
+      signupDataDir = await mkdtemp(join(tmpdir(), "herald-signup-test-"));
+      const configPath = join(signupDataDir, "herald.toml");
+      const config = `
+[server]
+ws_bind = "127.0.0.1:${SIGNUP_WS_PORT}"
+http_bind = "127.0.0.1:${SIGNUP_HTTP_PORT}"
+log_level = "error"
+shutdown_timeout_secs = 1
+api_rate_limit = 10000
+
+[store]
+path = "${join(signupDataDir, "data")}"
+
+[auth]
+super_admin_token = "${ADMIN_TOKEN}"
+
+[presence]
+linger_secs = 0
+manual_override_ttl_secs = 14400
+
+[shroudb]
+moat_addr = "${MOAT_URL}"
+auth_token = "${MOAT_TOKEN}"
+`;
+      await writeFile(configPath, config);
+      const binaryPath = join(process.cwd(), "..", "target", "release", "herald");
+
+      return new Promise((resolve, reject) => {
+        signupProcess = spawn(binaryPath, ["--multi-tenant", configPath], {
+          env: { ...process.env, SHROUDB_MASTER_KEY: MASTER_KEY },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        signupProcess.on("error", (err) => reject(err));
+        let attempts = 0;
+        const check = setInterval(async () => {
+          attempts++;
+          try {
+            const resp = await fetch(`http://127.0.0.1:${SIGNUP_HTTP_PORT}/health`);
+            if (resp.ok) { clearInterval(check); resolve(); }
+          } catch {
+            if (attempts > 40) { clearInterval(check); reject(new Error("signup server failed to start")); }
+          }
+        }, 250);
+      });
+    }
+
+    async function stopSignupServer(): Promise<void> {
+      if (signupProcess) {
+        signupProcess.kill("SIGTERM");
+        await new Promise<void>((r) => { signupProcess!.on("exit", () => r()); setTimeout(r, 3000); });
+        signupProcess = null;
+      }
+      try { await rm(signupDataDir, { recursive: true, force: true }); } catch {}
+    }
+
+    await startSignupServer();
+    console.log("Signup server started.\n");
+
+    try {
+      const signupBase = `http://127.0.0.1:${SIGNUP_HTTP_PORT}`;
+      const uniqueEmail = `test-${Date.now()}@example.com`;
+
+      let signupResult: any;
+
+      await test("signup: create account", async () => {
+        const resp = await fetch(`${signupBase}/signup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: uniqueEmail,
+            password: "testpassword123",
+            org_name: "Test Org",
+          }),
+        });
+        assert(resp.status === 201, `signup should return 201, got ${resp.status}`);
+        signupResult = await resp.json();
+        assert(typeof signupResult.tenant_id === "string" && signupResult.tenant_id.length > 0, "has tenant_id");
+        assert(typeof signupResult.user_id === "string" && signupResult.user_id.length > 0, "has user_id");
+        assert(typeof signupResult.api_token === "string" && signupResult.api_token.startsWith("hld_"), "has api_token");
+        assert(typeof signupResult.access_token === "string" && signupResult.access_token.length > 0, "has access_token");
+        assert(typeof signupResult.refresh_token === "string" && signupResult.refresh_token.length > 0, "has refresh_token");
+      });
+
+      await test("signup: use API token to create stream and publish", async () => {
+        const tenantAdmin = new HeraldAdmin({
+          url: signupBase,
+          token: signupResult.api_token,
+        });
+        await tenantAdmin.streams.create("my-stream", "My First Stream");
+        await tenantAdmin.members.add("my-stream", "alice");
+        const event = await tenantAdmin.events.publish("my-stream", "alice", "first message");
+        assert(typeof event.id === "string", "event has id");
+        assert(event.seq > 0, "event has seq");
+      });
+
+      await test("signup: login with email and password", async () => {
+        const resp = await fetch(`${signupBase}/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: uniqueEmail,
+            password: "testpassword123",
+          }),
+        });
+        assert(resp.status === 200, `login should return 200, got ${resp.status}`);
+        const loginResult = await resp.json() as any;
+        assert(typeof loginResult.access_token === "string" && loginResult.access_token.length > 0, "login has access_token");
+        assert(typeof loginResult.refresh_token === "string" && loginResult.refresh_token.length > 0, "login has refresh_token");
+        assert(loginResult.tenant_id === signupResult.tenant_id, "login returns same tenant_id");
+      });
+
+      await test("signup: login with wrong password fails", async () => {
+        const resp = await fetch(`${signupBase}/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: uniqueEmail,
+            password: "wrongpassword",
+          }),
+        });
+        assert(resp.status === 401, `wrong password should return 401, got ${resp.status}`);
+      });
+
+      await test("signup: refresh token rotation", async () => {
+        const resp = await fetch(`${signupBase}/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            refresh_token: signupResult.refresh_token,
+          }),
+        });
+        assert(resp.status === 200, `refresh should return 200, got ${resp.status}`);
+        const refreshResult = await resp.json() as any;
+        assert(typeof refreshResult.access_token === "string" && refreshResult.access_token.length > 0, "refresh has new access_token");
+        assert(typeof refreshResult.refresh_token === "string" && refreshResult.refresh_token.length > 0, "refresh has new refresh_token");
+        // New refresh token should be different from old one (rotated)
+        assert(refreshResult.refresh_token !== signupResult.refresh_token, "refresh token should be rotated");
+      });
+
+      await test("signup: duplicate email rejected", async () => {
+        const resp = await fetch(`${signupBase}/signup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: uniqueEmail,
+            password: "anotherpassword123",
+            org_name: "Duplicate Org",
+          }),
+        });
+        assert(resp.status === 409 || resp.status === 500, `duplicate email should be rejected, got ${resp.status}`);
+      });
+
+    } finally {
+      console.log("\nStopping signup server...");
+      await stopSignupServer();
+    }
+  } else {
+    console.log(`\nMoat not available at ${MOAT_URL} — skipping signup tests`);
+    console.log("Set HERALD_TEST_MOAT_URL to run signup tests against a Moat instance");
+  }
+
   console.log(`\n${"=".repeat(50)}`);
   console.log(`integration: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

@@ -279,7 +279,27 @@ pub async fn signup(
     let user_id = uuid::Uuid::new_v4().to_string();
     let tenant_id = uuid::Uuid::new_v4().to_string();
 
-    // 1. Create Sigil user (Argon2id-hashed password, encrypted email via Cipher, blind index via Veil)
+    // 1. Check if email is already registered (Veil blind index lookup)
+    match sigil.user_lookup(SIGIL_SCHEMA, "email", &req.email).await {
+        Ok(_existing_id) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": "email already registered"})),
+            )
+                .into_response();
+        }
+        Err(e) if e.contains("not found") => {} // good — email is available
+        Err(e) => {
+            tracing::error!(error = %e, "signup: email lookup failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "signup failed"})),
+            )
+                .into_response();
+        }
+    }
+
+    // 2. Create Sigil user (Argon2id-hashed password, encrypted email via Cipher, blind index via Veil)
     let fields = serde_json::json!({
         "email": req.email,
         "password": req.password,
@@ -287,7 +307,7 @@ pub async fn signup(
     });
 
     if let Err(e) = sigil.user_create(SIGIL_SCHEMA, &user_id, &fields).await {
-        if e.contains("duplicate") || e.contains("already exists") {
+        if e.contains("already exists") {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({"error": "email already registered"})),
@@ -430,7 +450,7 @@ pub async fn login(
             .into_response()
         }
         Err(e) => {
-            if e.contains("VERIFICATION_FAILED")
+            if e.contains("verification failed")
                 || e.contains("invalid")
                 || e.contains("locked")
                 || e.contains("not found")

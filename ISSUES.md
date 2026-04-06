@@ -80,27 +80,29 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ## MEDIUM — Competitive differentiation & monetization readiness
 
-- [ ] **M-1: Per-plan limit enforcement**
+- [x] **M-1: Per-plan limit enforcement**
   The `plan` field on tenants is stored but never checked. Rate limits and connection caps must be per-tenant-plan.
   - [x] Define plan tiers with associated limits (connections, streams, events/month, retention)
   - [x] Enforce connection limit per plan at WS auth
   - [x] Enforce rate limit per plan at HTTP middleware and WS handler
   - [x] Enforce stream count per plan at stream creation
-  - [ ] Enforce events_per_month limit (currently defined but not checked)
-  - [ ] Make plan tiers configurable (currently hardcoded in PlanLimits::for_plan)
-  - [ ] Integration test: free-tier tenant hits connection cap, upgraded tenant does not
-  - [ ] Integration test: rate limit varies by plan
+  - [x] Enforce events_per_month limit at WS and HTTP publish
+  - [x] Meterd-driven plan limits via quota snapshot with cache (overrides built-in defaults)
+  - [x] Fallback chain: cache → Meterd → built-in tiers → global config
+  - [x] Integration test: free-tier tenant hits connection cap, upgraded tenant does not
+  - [x] Integration test: free-tier tenant hits stream limit at 10
+  - [x] Integration test: rate limit varies by plan
 
 - [ ] **M-2: Billing/metering integration (Meterd)**
   Wire per-tenant usage counters to Meterd for MAU tracking and Stripe billing.
   - [x] Meterd client integration in Herald server (hand-rolled HTTP, pending Rust SDK)
   - [x] Report `events_published` per tenant per billing period
   - [x] Report `webhooks_sent` per tenant per billing period
-  - [ ] Report peak concurrent connections per tenant
-  - [ ] Wire check_quota() to enforcement points
-  - [ ] Add circuit breaker on Meterd remote calls
+  - [x] Report peak concurrent connections per tenant (every 60s in stats loop)
+  - [x] Wire check_quota() to enforcement points (WS + HTTP publish)
+  - [x] Add circuit breaker on Meterd remote calls (5 failures → open, 30s cooldown)
   - [ ] Integration test: usage events flow to Meterd (mock or real)
-  - [ ] Overage handling: soft quota warnings before hard cutoff
+  - [x] Overage handling: soft quota warnings before hard cutoff
 
 - [ ] **M-3: Catchup pagination**
   200-event catchup cap with `has_more` but no follow-up mechanism. Clients can lose events.

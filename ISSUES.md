@@ -82,19 +82,23 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 - [ ] **M-1: Per-plan limit enforcement**
   The `plan` field on tenants is stored but never checked. Rate limits and connection caps must be per-tenant-plan.
-  - [ ] Define plan tiers with associated limits (connections, streams, events/month, retention)
-  - [ ] Enforce connection limit per plan at WS auth
-  - [ ] Enforce rate limit per plan at HTTP middleware and WS handler
-  - [ ] Enforce stream count per plan at stream creation
+  - [x] Define plan tiers with associated limits (connections, streams, events/month, retention)
+  - [x] Enforce connection limit per plan at WS auth
+  - [x] Enforce rate limit per plan at HTTP middleware and WS handler
+  - [x] Enforce stream count per plan at stream creation
+  - [ ] Enforce events_per_month limit (currently defined but not checked)
+  - [ ] Make plan tiers configurable (currently hardcoded in PlanLimits::for_plan)
   - [ ] Integration test: free-tier tenant hits connection cap, upgraded tenant does not
   - [ ] Integration test: rate limit varies by plan
 
 - [ ] **M-2: Billing/metering integration (Meterd)**
   Wire per-tenant usage counters to Meterd for MAU tracking and Stripe billing.
-  - [ ] Meterd client integration in Herald server
-  - [ ] Report `events_published` per tenant per billing period
-  - [ ] Report `webhooks_sent` per tenant per billing period
+  - [x] Meterd client integration in Herald server (hand-rolled HTTP, pending Rust SDK)
+  - [x] Report `events_published` per tenant per billing period
+  - [x] Report `webhooks_sent` per tenant per billing period
   - [ ] Report peak concurrent connections per tenant
+  - [ ] Wire check_quota() to enforcement points
+  - [ ] Add circuit breaker on Meterd remote calls
   - [ ] Integration test: usage events flow to Meterd (mock or real)
   - [ ] Overage handling: soft quota warnings before hard cutoff
 

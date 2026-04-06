@@ -56,10 +56,10 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] All existing integration tests pass (`cargo test --workspace`)
   - [x] Bench latency test shows no regression (`cargo test --test bench_latency -- --nocapture --test-threads=1`)
 
-- [ ] **H-6: Integration test suite (`test-integration/`)**
+- [x] **H-6: Integration test suite (`test-integration/`)**
   Live integration tests running against a real Herald server. Addresses the "zero integration tests" liability.
   - [x] Test harness: server startup/teardown, JWT minting, WebSocket + HTTP client helpers
-  - [ ] Test: tenant CRUD (create, get, list, update, delete)
+  - [x] Test: tenant CRUD (create, get, list, update, delete)
   - [x] Test: stream CRUD with membership
   - [x] Test: event publish via WS, receive on subscriber, verify persistence via HTTP
   - [x] Test: event edit and delete (WS + HTTP)
@@ -69,12 +69,12 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Test: read cursor update and query
   - [x] Test: reactions add/remove/aggregate
   - [x] Test: user blocking (blocked user's events filtered)
-  - [ ] Test: webhook delivery with HMAC verification (requires multi-tenant config)
+  - [x] Test: webhook delivery with HMAC verification
   - [x] Test: rate limiting (HTTP 429 after burst) — documented: not enforced on health in single-tenant
   - [x] Test: JWT auth failure (invalid token, expired token, wrong tenant)
   - [x] Test: multi-tenant isolation (tenant A cannot see tenant B's streams/events)
   - [x] Test: ephemeral event trigger (received but not persisted)
-  - [ ] CI wiring: tests run in CI pipeline
+  - [x] CI wiring: tests run in CI pipeline
 
 ---
 

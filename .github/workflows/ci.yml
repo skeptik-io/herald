@@ -74,6 +74,17 @@ jobs:
         env:
           SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+      - name: Build release binary (for live integration tests)
+        run: cargo build --release
+
+      - name: Live integration tests
+        run: |
+          cd test-integration
+          npm install
+          npx tsx test-live.ts
+        env:
+          SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
       - name: Security audit
         run: cargo install cargo-audit --locked && cargo audit
         continue-on-error: true
@@ -106,3 +117,32 @@ jobs:
       - name: Ruby Admin SDK
         working-directory: herald-admin-ruby
         run: ruby -e "require_relative 'lib/herald_admin'"
+
+      - name: Chat Core SDK
+        working-directory: herald-chat-core
+        run: npm install && npx tsc --noEmit
+
+      - name: Chat SDK
+        working-directory: herald-chat-sdk-typescript
+        run: npm install && npx tsc --noEmit
+
+      - name: Chat React SDK
+        working-directory: herald-chat-react
+        run: npm install && npx tsc --noEmit
+
+      - name: Chat Core unit tests
+        working-directory: herald-chat-core
+        run: |
+          npx tsx test/chat-core.test.ts
+          npx tsx test/message-store.test.ts
+          npx tsx test/cursor-store.test.ts
+          npx tsx test/notifier.test.ts
+          npx tsx test/liveness.test.ts
+
+      - name: Chat SDK unit tests
+        working-directory: herald-chat-sdk-typescript
+        run: npx tsx test/client.test.ts
+
+      - name: Chat React unit tests
+        working-directory: herald-chat-react
+        run: npx tsx test/hooks.test.ts

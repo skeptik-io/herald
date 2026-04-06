@@ -750,12 +750,7 @@ async function run(): Promise<void> {
     });
 
     // ── Webhook delivery ────────────────────────────────────────
-    // TODO: Webhook delivery test. The single-tenant config does not expose
-    // webhook configuration options. To test webhook delivery with HMAC
-    // verification, the server would need a [webhooks] config section and
-    // an HTTP listener endpoint. This should be tested in a dedicated
-    // multi-tenant integration suite where webhook URLs can be configured
-    // per-tenant via the admin API.
+    // Tested below in multi-tenant section.
 
     // ── Error cases ──────────────────────────────────────────────
 
@@ -797,8 +792,247 @@ async function run(): Promise<void> {
     });
 
   } finally {
-    console.log("\nStopping server...");
+    console.log("\nStopping single-tenant server...");
     await stopServer();
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // Multi-tenant tests: tenant CRUD + webhook delivery
+  // ══════════════════════════════════════════════════════════════
+
+  const WS_PORT2 = 16210;
+  const HTTP_PORT2 = 16211;
+  const WEBHOOK_SECRET = "test-webhook-secret";
+  const SUPER_ADMIN_TOKEN = "test-super-admin-token";
+
+  // Webhook listener — collects received payloads
+  const webhookPayloads: Array<{ body: string; headers: Record<string, string> }> = [];
+  let webhookPort = 0;
+
+  const { createServer } = await import("node:http");
+  const webhookServer = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === "string") headers[k] = v;
+      }
+      webhookPayloads.push({ body, headers });
+      res.writeHead(200);
+      res.end("ok");
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    webhookServer.listen(0, "127.0.0.1", () => {
+      const addr = webhookServer.address();
+      if (addr && typeof addr === "object") webhookPort = addr.port;
+      resolve();
+    });
+  });
+
+  console.log(`\nWebhook listener on port ${webhookPort}`);
+
+  // Start multi-tenant server
+  let mtDataDir: string;
+  let mtProcess: ChildProcess | null = null;
+
+  async function startMultiTenantServer(): Promise<void> {
+    mtDataDir = await mkdtemp(join(tmpdir(), "herald-mt-test-"));
+
+    const configPath = join(mtDataDir, "herald.toml");
+    const config = `
+[server]
+ws_bind = "127.0.0.1:${WS_PORT2}"
+http_bind = "127.0.0.1:${HTTP_PORT2}"
+log_level = "error"
+shutdown_timeout_secs = 1
+
+[store]
+path = "${join(mtDataDir, "data")}"
+
+[auth]
+super_admin_token = "${SUPER_ADMIN_TOKEN}"
+
+[presence]
+linger_secs = 0
+manual_override_ttl_secs = 14400
+
+[webhook]
+url = "http://127.0.0.1:${webhookPort}/hook"
+secret = "${WEBHOOK_SECRET}"
+retries = 1
+`;
+    await writeFile(configPath, config);
+
+    const binaryPath = join(process.cwd(), "..", "target", "release", "herald");
+
+    return new Promise((resolve, reject) => {
+      mtProcess = spawn(binaryPath, ["--multi-tenant", configPath], {
+        env: { ...process.env, SHROUDB_MASTER_KEY: MASTER_KEY },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stderr = "";
+      mtProcess.stderr!.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      mtProcess.on("error", (err) => {
+        reject(new Error(`Failed to start multi-tenant server: ${err.message}`));
+      });
+
+      const maxAttempts = 40;
+      let attempts = 0;
+      const check = setInterval(async () => {
+        attempts++;
+        try {
+          const resp = await fetch(`http://127.0.0.1:${HTTP_PORT2}/health`);
+          if (resp.ok) {
+            clearInterval(check);
+            resolve();
+          }
+        } catch {
+          if (attempts > maxAttempts) {
+            clearInterval(check);
+            reject(new Error(`Multi-tenant server failed to start after ${maxAttempts} attempts.\nstderr: ${stderr}`));
+          }
+        }
+      }, 250);
+    });
+  }
+
+  async function stopMultiTenantServer(): Promise<void> {
+    if (mtProcess) {
+      mtProcess.kill("SIGTERM");
+      await new Promise<void>((resolve) => {
+        mtProcess!.on("exit", () => resolve());
+        setTimeout(resolve, 3000);
+      });
+      mtProcess = null;
+    }
+    try { await rm(mtDataDir, { recursive: true, force: true }); } catch {}
+  }
+
+  console.log("\nStarting multi-tenant Herald server...");
+  await startMultiTenantServer();
+  console.log("Multi-tenant server started.\n");
+
+  try {
+    const mtAdmin = new HeraldAdmin({
+      url: `http://127.0.0.1:${HTTP_PORT2}`,
+      token: SUPER_ADMIN_TOKEN,
+    });
+
+    // ── Tenant CRUD ─────────────────────────────────────────────
+
+    let createdTenant: any;
+
+    await test("mt: create tenant", async () => {
+      createdTenant = await mtAdmin.tenants.create({
+        id: "acme",
+        name: "Acme Corp",
+        jwt_secret: "acme-jwt-secret-for-testing-1234",
+      });
+      assert(createdTenant.id === "acme", `tenant id: ${createdTenant.id}`);
+      assert(createdTenant.name === "Acme Corp", `tenant name: ${createdTenant.name}`);
+    });
+
+    await test("mt: get tenant", async () => {
+      const tenant = await mtAdmin.tenants.get("acme");
+      assert(tenant.id === "acme", `id: ${tenant.id}`);
+      assert(tenant.name === "Acme Corp", `name: ${tenant.name}`);
+    });
+
+    await test("mt: list tenants", async () => {
+      const tenants = await mtAdmin.tenants.list();
+      assert(Array.isArray(tenants), "is array");
+      const acme = tenants.find((t: any) => t.id === "acme");
+      assert(acme !== undefined, "acme tenant found in list");
+    });
+
+    await test("mt: update tenant name", async () => {
+      await mtAdmin.tenants.update("acme", { name: "Acme Industries" });
+      const tenant = await mtAdmin.tenants.get("acme");
+      assert(tenant.name === "Acme Industries", `updated name: ${tenant.name}`);
+    });
+
+    await test("mt: delete tenant", async () => {
+      // Create a throwaway tenant to delete
+      await mtAdmin.tenants.create({
+        id: "deleteme",
+        name: "Delete Me",
+        jwt_secret: "deleteme-secret-for-testing-1234",
+      });
+      await mtAdmin.tenants.delete("deleteme");
+
+      let notFound = false;
+      try {
+        await mtAdmin.tenants.get("deleteme");
+      } catch (e: any) {
+        notFound = e.statusCode === 404 || e.code === "NOT_FOUND" || /not.found/i.test(e.message);
+      }
+      assert(notFound, "deleted tenant should not be found");
+    });
+
+    // ── Webhook delivery ────────────────────────────────────────
+
+    await test("mt: webhook receives published event with valid HMAC", async () => {
+      // Create an API token for the acme tenant so we can use the tenant API
+      const tokenResult = await mtAdmin.tenants.createToken("acme");
+      const acmeToken = tokenResult.token;
+
+      const acmeAdmin = new HeraldAdmin({
+        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        token: acmeToken,
+      });
+
+      // Create a stream and publish an event
+      await acmeAdmin.streams.create("webhook-test", "Webhook Test Stream");
+      await acmeAdmin.members.add("webhook-test", "alice");
+
+      // Clear any previous webhook payloads
+      webhookPayloads.length = 0;
+
+      await acmeAdmin.events.publish("webhook-test", "alice", "hello webhooks");
+
+      // Wait for webhook delivery (retries + network)
+      await new Promise((r) => setTimeout(r, 2000));
+
+      assert(webhookPayloads.length >= 1, `expected >=1 webhook payload, got ${webhookPayloads.length}`);
+
+      if (webhookPayloads.length > 0) {
+        // Find the event.new payload (skip member.joined etc.)
+        const eventPayload = webhookPayloads.find((p) => {
+          try { return JSON.parse(p.body).event === "event.new"; } catch { return false; }
+        }) ?? webhookPayloads[0];
+
+        const sigHeader = eventPayload.headers["x-herald-signature"] ?? "";
+        const timestamp = eventPayload.headers["x-herald-timestamp"] ?? "";
+
+        assert(sigHeader.startsWith("sha256="), `signature header: ${sigHeader}`);
+        assert(timestamp.length > 0, "timestamp header present");
+
+        // Verify HMAC-SHA256
+        const expectedHmac = createHmac("sha256", WEBHOOK_SECRET)
+          .update(`${timestamp}.${eventPayload.body}`)
+          .digest("hex");
+        const actualHex = sigHeader.replace("sha256=", "");
+        assert(actualHex === expectedHmac, `HMAC mismatch: got ${actualHex}, expected ${expectedHmac}`);
+
+        // Verify the body contains the event
+        const parsed = JSON.parse(eventPayload.body);
+        assert(parsed.event === "event.new", `webhook event type: ${parsed.event}`);
+        assert(parsed.body === "hello webhooks", `webhook body: ${parsed.body}`);
+        assert(parsed.stream === "webhook-test", `webhook stream: ${parsed.stream}`);
+      }
+    });
+
+  } finally {
+    console.log("\nStopping multi-tenant server...");
+    await stopMultiTenantServer();
+    webhookServer.close();
   }
 
   console.log(`\n${"=".repeat(50)}`);
@@ -808,5 +1042,5 @@ async function run(): Promise<void> {
 
 run().catch((e) => {
   console.error("Fatal:", e);
-  stopServer().then(() => process.exit(1));
+  Promise.all([stopServer()]).then(() => process.exit(1));
 });

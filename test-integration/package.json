@@ -1,0 +1,17 @@
+{
+  "name": "herald-integration-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsx test-live.ts"
+  },
+  "devDependencies": {
+    "herald-sdk": "file:../herald-sdk-typescript",
+    "herald-chat-sdk": "file:../herald-chat-sdk-typescript",
+    "herald-chat": "file:../herald-chat-core",
+    "herald-admin": "file:../herald-admin-typescript",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0",
+    "jsonwebtoken": "^9.0.0"
+  }
+}

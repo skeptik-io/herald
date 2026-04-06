@@ -14,7 +14,9 @@ use crate::ws::fanout::fanout_to_stream;
 
 const MAX_FETCH_LIMIT: u32 = 100;
 const DEFAULT_FETCH_LIMIT: u32 = 50;
-const EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+// Default fallback only — prefer state.event_ttl_ms(tenant_id) for per-tenant retention.
+#[allow(dead_code)]
+const DEFAULT_EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 pub async fn handle_message(
     state: &Arc<AppState>,
@@ -487,7 +489,8 @@ async fn handle_publish(
 
     // Store
     let store_start = std::time::Instant::now();
-    if let Err(e) = store::events::insert(&*state.db, tid, &event, now + EVENT_TTL_MS).await {
+    let ttl = state.event_ttl_ms(tid);
+    if let Err(e) = store::events::insert(&*state.db, tid, &event, now + ttl).await {
         tracing::error!("failed to store event: {e}");
         let _ = tx
             .send(ServerMessage::error(

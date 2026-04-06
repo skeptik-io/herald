@@ -36,7 +36,9 @@ pub struct ListEventsQuery {
     pub thread: Option<String>,
 }
 
-const EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+// Default fallback only — prefer state.event_ttl_ms(tenant_id) for per-tenant retention.
+#[allow(dead_code)]
+const DEFAULT_EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_LIMIT: u32 = 100;
 
 pub async fn inject_event(
@@ -119,7 +121,8 @@ pub async fn inject_event(
         sent_at: now,
     };
 
-    if let Err(e) = store::events::insert(&*state.db, tid, &event, now + EVENT_TTL_MS).await {
+    let ttl = state.event_ttl_ms(tid);
+    if let Err(e) = store::events::insert(&*state.db, tid, &event, now + ttl).await {
         tracing::error!(tenant = tid, stream = %stream_id, "failed to insert event: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

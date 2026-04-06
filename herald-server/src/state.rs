@@ -365,6 +365,17 @@ impl AppState {
             .map(|entry| entry.0.clone())
     }
 
+    /// Returns the event TTL in milliseconds for a tenant.
+    /// When metering is enabled, uses the cached plan limits from Meterd.
+    /// Otherwise, uses the global config `store.event_ttl_days`.
+    pub fn event_ttl_ms(&self, tenant_id: &str) -> i64 {
+        let days = self
+            .get_plan_limits_cached(tenant_id)
+            .map(|pl| pl.retention_days)
+            .unwrap_or(self.config.store.event_ttl_days);
+        days as i64 * 24 * 60 * 60 * 1000
+    }
+
     pub fn increment_tenant_events(&self, tenant_id: &str) {
         self.tenant_metrics
             .entry(tenant_id.to_string())

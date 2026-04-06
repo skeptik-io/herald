@@ -1,6 +1,7 @@
 {
   "name": "herald-chat-react",
   "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
   "description": "Herald Chat React bindings — hooks and headless components",
   "type": "module",
   "main": "dist/index.js",

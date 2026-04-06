@@ -133,3 +133,7 @@ Published to GitHub Packages on each release.
 Herald treats message bodies as opaque bytes. If you need encryption, encrypt before sending. If you need search, index in your own backend via webhooks.
 
 See [DOCS.md](DOCS.md) for complete reference. See [ARCHITECTURE.md](ARCHITECTURE.md) for protocol specification.
+
+## License
+
+Proprietary. Copyright (c) 2026 Herald. All rights reserved. See [LICENSE](LICENSE) for details.

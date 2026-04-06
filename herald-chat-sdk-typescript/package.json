@@ -1,6 +1,7 @@
 {
   "name": "herald-chat-sdk",
   "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
   "description": "Herald Chat WebSocket SDK — chat frame extensions for herald-sdk",
   "type": "module",
   "main": "dist/index.js",

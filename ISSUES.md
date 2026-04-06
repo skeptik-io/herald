@@ -6,11 +6,11 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ## HIGH — Blocking adoption or revenue
 
-- [ ] **H-1: Add LICENSE file**
+- [x] **H-1: Add LICENSE file**
   Choose and add a license (MIT, Apache-2.0, BSL, or proprietary). Without one, the code is "all rights reserved" and legally blocks all external use.
-  - [ ] LICENSE file added to repo root
-  - [ ] License field added to Cargo.toml and package.json files
-  - [ ] README updated with license badge/section
+  - [x] LICENSE file added to repo root
+  - [x] License field added to Cargo.toml and package.json files
+  - [x] README updated with license badge/section
 
 - [x] **H-2: Ship chat SDK layer (`herald-chat-*`)**
   Three new packages: `herald-chat-core` (framework-agnostic stores, scroll, liveness, notifier), `herald-chat-sdk-typescript` (thin client wrapper), `herald-chat-react` (provider, hooks, components).

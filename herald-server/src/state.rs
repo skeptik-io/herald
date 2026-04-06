@@ -315,12 +315,28 @@ impl AppState {
         };
 
         const CACHE_TTL_SECS: u64 = 300;
+        // Short grace period to prevent stampede: when TTL expires, one thread
+        // extends the entry by 30s so others keep using the stale value.
+        const STAMPEDE_GRACE_SECS: u64 = 30;
 
-        // Check cache (includes stale entries for circuit-open fallback)
+        // Check cache
         if let Some(entry) = self.plan_limits_cache.get(tenant_id) {
-            if entry.1.elapsed().as_secs() < CACHE_TTL_SECS {
+            let age = entry.1.elapsed().as_secs();
+            if age < CACHE_TTL_SECS {
                 return Some(entry.0.clone());
             }
+            // TTL expired but within grace window — return stale value
+            // (another thread is likely already refreshing)
+            if age < CACHE_TTL_SECS + STAMPEDE_GRACE_SECS {
+                return Some(entry.0.clone());
+            }
+        }
+
+        // Extend the stale entry's timestamp to claim the refresh slot.
+        // Other threads hitting this cache entry in the next 30s will get
+        // the stale value instead of all racing to Meterd.
+        if let Some(mut entry) = self.plan_limits_cache.get_mut(tenant_id) {
+            entry.1 = std::time::Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS);
         }
 
         // Fetch from Meterd

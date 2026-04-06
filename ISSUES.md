@@ -80,18 +80,15 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ## MEDIUM — Competitive differentiation & monetization readiness
 
-- [x] **M-1: Per-plan limit enforcement**
-  The `plan` field on tenants is stored but never checked. Rate limits and connection caps must be per-tenant-plan.
-  - [x] Define plan tiers with associated limits (connections, streams, events/month, retention)
-  - [x] Enforce connection limit per plan at WS auth
-  - [x] Enforce rate limit per plan at HTTP middleware and WS handler
-  - [x] Enforce stream count per plan at stream creation
-  - [x] Enforce events_per_month limit at WS and HTTP publish
-  - [x] Meterd-driven plan limits via quota snapshot with cache (overrides built-in defaults)
-  - [x] Fallback chain: cache → Meterd → built-in tiers → global config
-  - [x] Integration test: free-tier tenant hits connection cap, upgraded tenant does not
-  - [x] Integration test: free-tier tenant hits stream limit at 10
-  - [x] Integration test: rate limit varies by plan
+- [ ] **M-1: Per-plan limit enforcement**
+  Plan limits are defined in Meterd. When metering is enabled, Meterd is the sole authority. When disabled, global config applies uniformly.
+  - [x] Enforce connection limit per plan at WS auth (Meterd-cached or global config)
+  - [x] Enforce rate limit per plan at HTTP middleware (Meterd-cached or global config)
+  - [x] Enforce stream count per plan at stream creation (Meterd-cached or global config)
+  - [x] Meterd quota check at WS and HTTP publish (check_quota with circuit breaker, fail-open)
+  - [x] Plan limits cached per-tenant with 5-min TTL from Meterd quota snapshot
+  - [x] Block filtering enforced in event delivery (blocked user's messages not delivered)
+  - [ ] Integration test: plan-based limits with running Meterd (requires Rust SDK + Meterd instance)
 
 - [ ] **M-2: Billing/metering integration (Meterd)**
   Wire per-tenant usage counters to Meterd for MAU tracking and Stripe billing.
@@ -100,9 +97,12 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Report `webhooks_sent` per tenant per billing period
   - [x] Report peak concurrent connections per tenant (every 60s in stats loop)
   - [x] Wire check_quota() to enforcement points (WS + HTTP publish)
-  - [x] Add circuit breaker on Meterd remote calls (5 failures → open, 30s cooldown)
-  - [ ] Integration test: usage events flow to Meterd (mock or real)
+  - [x] Circuit breaker on Meterd remote calls (5 failures → open, 30s cooldown)
+  - [x] Events re-buffered on flush failure (not lost)
+  - [x] fetch_plan_limits validates all expected meters present, warns on missing
   - [x] Overage handling: soft quota warnings before hard cutoff
+  - [ ] Integration test: usage events flow to Meterd (requires Rust SDK + Meterd instance)
+  - [ ] Replace hand-rolled HTTP client with Meterd Rust SDK
 
 - [ ] **M-3: Catchup pagination**
   200-event catchup cap with `has_more` but no follow-up mechanism. Clients can lose events.

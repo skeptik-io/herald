@@ -131,6 +131,11 @@ jobs:
         working-directory: herald-admin-ruby
         run: ruby -e "require_relative 'lib/herald_admin'"
 
+      - name: Build TypeScript SDKs (dependencies for Chat SDKs)
+        run: |
+          cd herald-sdk-typescript && npm install && npx tsc && cd ..
+          cd herald-admin-typescript && npm install && npx tsc && cd ..
+
       - name: Chat Core SDK
         working-directory: herald-chat-core
         run: npm install && npx tsc --noEmit

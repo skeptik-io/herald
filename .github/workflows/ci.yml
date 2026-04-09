@@ -105,6 +105,29 @@ jobs:
         env:
           SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+      - name: Setup Go (for contract tests)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Setup Python (for contract tests)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Ruby (for contract tests)
+        uses: actions/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Contract tests (all SDKs)
+        run: |
+          cd contract-tests
+          npm install
+          npx tsx run-all.ts
+        env:
+          SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
       - name: Security audit
         run: cargo install cargo-audit --locked && cargo audit
         continue-on-error: true

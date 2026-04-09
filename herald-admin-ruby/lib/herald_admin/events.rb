@@ -54,19 +54,6 @@ module HeraldAdmin
       @t.request("POST", "/streams/#{esc(stream_id)}/trigger", body)
     end
 
-    def search(stream_id, query:, limit: nil)
-      params = ["q=#{ERB::Util.url_encode(query)}"]
-      params << "limit=#{limit}" if limit
-      qs = params.join("&")
-      data = @t.request("GET", "/streams/#{esc(stream_id)}/events/search?#{qs}")
-      events = data["events"].map do |m|
-        Event.new(id: m["id"], stream: m["stream"] || stream_id, seq: m["seq"],
-                  sender: m["sender"], body: m["body"], meta: m["meta"],
-                  parent_id: m["parent_id"], edited_at: m["edited_at"], sent_at: m["sent_at"])
-      end
-      EventList.new(events: events, has_more: data["has_more"] || false)
-    end
-
     private
 
     def esc(s) = ERB::Util.url_encode(s)

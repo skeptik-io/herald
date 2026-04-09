@@ -69,14 +69,4 @@ export class EventNamespace {
     await this.transport.request("POST", `/streams/${encodeURIComponent(streamId)}/trigger`, body);
   }
 
-  async search(
-    streamId: string,
-    query: string,
-    limit?: number,
-  ): Promise<EventList> {
-    const params = new URLSearchParams({ q: query });
-    if (limit !== undefined) params.set("limit", String(limit));
-    const path = `/streams/${encodeURIComponent(streamId)}/events/search?${params}`;
-    return this.transport.request<EventList>("GET", path);
-  }
 }

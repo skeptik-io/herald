@@ -305,23 +305,6 @@ func (ns *EventNamespace) List(ctx context.Context, streamID string, opts *Event
 	return &list, nil
 }
 
-func (ns *EventNamespace) Search(ctx context.Context, streamID, query string, limit *int) (*EventList, error) {
-	params := url.Values{"q": {query}}
-	if limit != nil {
-		params.Set("limit", fmt.Sprint(*limit))
-	}
-	path := "/streams/" + url.PathEscape(streamID) + "/events/search?" + params.Encode()
-	data, err := ns.t.request(ctx, "GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var list EventList
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, err
-	}
-	return &list, nil
-}
-
 // PresenceNamespace provides presence query operations.
 // This is a chat-specific namespace (conversational layer).
 type PresenceNamespace struct{ t *httpTransport }

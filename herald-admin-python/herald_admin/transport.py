@@ -28,7 +28,10 @@ class HttpTransport:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 if resp.status == 204:
                     return None
-                return json.loads(resp.read())
+                raw = resp.read()
+                if not raw:
+                    return None
+                return json.loads(raw)
         except urllib.error.HTTPError as e:
             code = "INTERNAL"
             message = f"HTTP {e.code}"

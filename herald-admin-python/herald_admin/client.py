@@ -127,16 +127,6 @@ class EventNamespace:
             body["exclude_connection"] = exclude_connection
         self._t.request("POST", f"/streams/{quote(stream_id, safe='')}/trigger", body)
 
-    def search(self, stream_id: str, query: str, *, limit: int | None = None) -> EventList:
-        params = [f"q={quote(query, safe='')}"]
-        if limit is not None:
-            params.append(f"limit={limit}")
-        qs = "&".join(params)
-        path = f"/streams/{quote(stream_id, safe='')}/events/search?{qs}"
-        data = self._t.request("GET", path)
-        events = [Event(id=m["id"], stream=m.get("stream", stream_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["events"]]
-        return EventList(events=events, has_more=data.get("has_more", False))
-
 
 class PresenceNamespace:
     """Chat-specific namespace — user and stream presence queries."""

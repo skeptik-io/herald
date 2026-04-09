@@ -1,0 +1,624 @@
+{
+  "version": 1,
+  "description": "Herald Admin SDK Wire-Protocol Contract Specification. Defines the expected HTTP API behaviour that every admin SDK must implement consistently.",
+  "groups": [
+    {
+      "name": "health",
+      "auth": "none",
+      "cases": [
+        {
+          "id": "health",
+          "operation": "health",
+          "expect": {
+            "fields": {
+              "status": "string",
+              "connections": "number",
+              "streams": "number",
+              "uptime_secs": "number"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "streams",
+      "auth": "api",
+      "cases": [
+        {
+          "id": "stream_create",
+          "operation": "streams.create",
+          "input": {
+            "id": "ct-stream-1",
+            "name": "Contract Stream",
+            "meta": { "env": "test" },
+            "public": false
+          },
+          "expect": {
+            "fields": {
+              "id": "string",
+              "name": "string",
+              "created_at": "number"
+            },
+            "values": {
+              "id": "ct-stream-1",
+              "name": "Contract Stream",
+              "archived": false
+            }
+          }
+        },
+        {
+          "id": "stream_create_public",
+          "operation": "streams.create",
+          "input": {
+            "id": "ct-stream-pub",
+            "name": "Public Stream",
+            "public": true
+          },
+          "expect": {
+            "fields": {
+              "id": "string",
+              "name": "string",
+              "created_at": "number"
+            },
+            "values": {
+              "id": "ct-stream-pub",
+              "name": "Public Stream",
+              "public": true
+            }
+          }
+        },
+        {
+          "id": "stream_get",
+          "operation": "streams.get",
+          "input": { "id": "ct-stream-1" },
+          "expect": {
+            "fields": {
+              "id": "string",
+              "name": "string",
+              "created_at": "number"
+            },
+            "values": {
+              "id": "ct-stream-1",
+              "name": "Contract Stream"
+            }
+          }
+        },
+        {
+          "id": "stream_list",
+          "operation": "streams.list",
+          "expect": {
+            "type": "array",
+            "min_length": 2,
+            "item_fields": {
+              "id": "string",
+              "name": "string",
+              "created_at": "number"
+            }
+          }
+        },
+        {
+          "id": "stream_update",
+          "operation": "streams.update",
+          "input": {
+            "id": "ct-stream-1",
+            "name": "Updated Stream",
+            "archived": true
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "stream_get_after_update",
+          "operation": "streams.get",
+          "input": { "id": "ct-stream-1" },
+          "expect": {
+            "values": {
+              "name": "Updated Stream",
+              "archived": true
+            }
+          }
+        },
+        {
+          "id": "stream_unarchive",
+          "operation": "streams.update",
+          "input": {
+            "id": "ct-stream-1",
+            "name": "Contract Stream",
+            "archived": false
+          },
+          "expect": { "void": true }
+        }
+      ]
+    },
+    {
+      "name": "members",
+      "auth": "api",
+      "cases": [
+        {
+          "id": "member_add",
+          "operation": "members.add",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "user_id": "ct-user-a",
+            "role": "admin"
+          },
+          "expect": {
+            "fields": {
+              "stream_id": "string",
+              "user_id": "string",
+              "role": "string",
+              "joined_at": "number"
+            },
+            "values": {
+              "stream_id": "ct-stream-1",
+              "user_id": "ct-user-a",
+              "role": "admin"
+            }
+          }
+        },
+        {
+          "id": "member_add_second",
+          "operation": "members.add",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "user_id": "ct-user-b",
+            "role": "member"
+          },
+          "expect": {
+            "fields": {
+              "stream_id": "string",
+              "user_id": "string",
+              "role": "string",
+              "joined_at": "number"
+            },
+            "values": {
+              "user_id": "ct-user-b",
+              "role": "member"
+            }
+          }
+        },
+        {
+          "id": "member_list",
+          "operation": "members.list",
+          "input": { "stream_id": "ct-stream-1" },
+          "expect": {
+            "type": "array",
+            "min_length": 2,
+            "item_fields": {
+              "stream_id": "string",
+              "user_id": "string",
+              "role": "string",
+              "joined_at": "number"
+            }
+          }
+        },
+        {
+          "id": "member_update",
+          "operation": "members.update",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "user_id": "ct-user-b",
+            "role": "owner"
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "member_remove",
+          "operation": "members.remove",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "user_id": "ct-user-b"
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "member_list_after_remove",
+          "operation": "members.list",
+          "input": { "stream_id": "ct-stream-1" },
+          "expect": {
+            "type": "array",
+            "length": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "events",
+      "auth": "api",
+      "cases": [
+        {
+          "id": "event_publish",
+          "operation": "events.publish",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "sender": "ct-user-a",
+            "body": "Hello contract tests",
+            "meta": { "type": "text" }
+          },
+          "expect": {
+            "fields": {
+              "id": "string",
+              "seq": "number",
+              "sent_at": "number"
+            }
+          },
+          "save": { "event_id": "id", "event_seq": "seq" }
+        },
+        {
+          "id": "event_publish_reply",
+          "operation": "events.publish",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "sender": "ct-user-a",
+            "body": "Reply event",
+            "parent_id": "$event_id"
+          },
+          "expect": {
+            "fields": {
+              "id": "string",
+              "seq": "number",
+              "sent_at": "number"
+            }
+          },
+          "save": { "reply_id": "id" }
+        },
+        {
+          "id": "event_list",
+          "operation": "events.list",
+          "input": {
+            "stream_id": "ct-stream-1"
+          },
+          "expect": {
+            "fields": {
+              "events": "array",
+              "has_more": "boolean"
+            },
+            "values": {
+              "has_more": false
+            },
+            "events_min_length": 2,
+            "event_fields": {
+              "id": "string",
+              "stream": "string",
+              "seq": "number",
+              "sender": "string",
+              "body": "string",
+              "sent_at": "number"
+            }
+          }
+        },
+        {
+          "id": "event_list_with_limit",
+          "operation": "events.list",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "limit": 1
+          },
+          "expect": {
+            "fields": {
+              "events": "array",
+              "has_more": "boolean"
+            },
+            "events_length": 1,
+            "values": {
+              "has_more": true
+            }
+          }
+        },
+        {
+          "id": "event_list_thread",
+          "operation": "events.list",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "thread": "$event_id"
+          },
+          "expect": {
+            "events_length": 1
+          }
+        },
+        {
+          "id": "event_edit",
+          "operation": "events.edit",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "event_id": "$event_id",
+            "body": "Hello contract tests (edited)"
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "event_list_after_edit",
+          "operation": "events.list",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "after": "$event_seq_minus_1"
+          },
+          "expect": {
+            "first_event_values": {
+              "body": "Hello contract tests (edited)"
+            },
+            "first_event_fields": {
+              "edited_at": "number"
+            }
+          }
+        },
+        {
+          "id": "event_get_reactions",
+          "operation": "events.getReactions",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "event_id": "$event_id"
+          },
+          "expect": {
+            "type": "array",
+            "length": 0
+          }
+        },
+        {
+          "id": "event_trigger",
+          "operation": "events.trigger",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "event": "typing.start",
+            "data": { "user": "ct-user-a" }
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "event_delete",
+          "operation": "events.delete",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "event_id": "$reply_id"
+          },
+          "expect": { "void": true }
+        }
+      ]
+    },
+    {
+      "name": "presence",
+      "auth": "api",
+      "cases": [
+        {
+          "id": "presence_get_user",
+          "operation": "presence.getUser",
+          "input": { "user_id": "ct-user-a" },
+          "expect": {
+            "fields": {
+              "user_id": "string",
+              "status": "string",
+              "connections": "number"
+            },
+            "values": {
+              "user_id": "ct-user-a"
+            }
+          }
+        },
+        {
+          "id": "presence_get_stream",
+          "operation": "presence.getStream",
+          "input": { "stream_id": "ct-stream-1" },
+          "expect": {
+            "type": "array"
+          }
+        },
+        {
+          "id": "presence_get_cursors",
+          "operation": "presence.getCursors",
+          "input": { "stream_id": "ct-stream-1" },
+          "expect": {
+            "type": "array"
+          }
+        }
+      ]
+    },
+    {
+      "name": "blocks",
+      "auth": "api",
+      "cases": [
+        {
+          "id": "block_user",
+          "operation": "blocks.block",
+          "input": {
+            "user_id": "ct-user-a",
+            "blocked_id": "ct-user-blocked"
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "block_list",
+          "operation": "blocks.list",
+          "input": { "user_id": "ct-user-a" },
+          "expect": {
+            "type": "array",
+            "min_length": 1,
+            "contains": "ct-user-blocked"
+          }
+        },
+        {
+          "id": "block_unblock",
+          "operation": "blocks.unblock",
+          "input": {
+            "user_id": "ct-user-a",
+            "blocked_id": "ct-user-blocked"
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "block_list_after_unblock",
+          "operation": "blocks.list",
+          "input": { "user_id": "ct-user-a" },
+          "expect": {
+            "type": "array",
+            "length": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "cleanup",
+      "auth": "api",
+      "cases": [
+        {
+          "id": "cleanup_member",
+          "operation": "members.remove",
+          "input": {
+            "stream_id": "ct-stream-1",
+            "user_id": "ct-user-a"
+          },
+          "expect": { "void": true }
+        },
+        {
+          "id": "cleanup_stream_1",
+          "operation": "streams.delete",
+          "input": { "id": "ct-stream-1" },
+          "expect": { "void": true }
+        },
+        {
+          "id": "cleanup_stream_pub",
+          "operation": "streams.delete",
+          "input": { "id": "ct-stream-pub" },
+          "expect": { "void": true }
+        },
+        {
+          "id": "verify_streams_empty",
+          "operation": "streams.list",
+          "expect": {
+            "type": "array",
+            "length": 0
+          }
+        }
+      ]
+    }
+  ],
+  "ws_frames": {
+    "description": "WebSocket frame types for reference. Tested by the browser SDK (herald-sdk-typescript), not by admin SDK contract tests.",
+    "client_to_server": [
+      {
+        "type": "subscribe",
+        "payload": { "streams": ["string"] }
+      },
+      {
+        "type": "unsubscribe",
+        "payload": { "streams": ["string"] }
+      },
+      {
+        "type": "event.publish",
+        "payload": { "stream": "string", "body": "string", "meta": "any?", "parent_id": "string?" }
+      },
+      {
+        "type": "events.fetch",
+        "payload": { "stream": "string", "before": "number?", "after": "number?", "limit": "number?" }
+      },
+      {
+        "type": "event.trigger",
+        "payload": { "stream": "string", "event": "string", "data": "any?" }
+      },
+      {
+        "type": "event.ack",
+        "payload": { "stream": "string", "seq": "number" }
+      },
+      {
+        "type": "presence.update",
+        "payload": { "status": "string" }
+      },
+      {
+        "type": "typing.start",
+        "payload": { "stream": "string" }
+      },
+      {
+        "type": "typing.stop",
+        "payload": { "stream": "string" }
+      },
+      {
+        "type": "cursor.update",
+        "payload": { "stream": "string", "seq": "number" }
+      },
+      {
+        "type": "watchlist.set",
+        "payload": { "user_ids": ["string"] }
+      }
+    ],
+    "server_to_client": [
+      {
+        "type": "auth_ok",
+        "payload": { "connection_id": "number" }
+      },
+      {
+        "type": "subscribed",
+        "payload": { "stream": "string", "seq": "number" }
+      },
+      {
+        "type": "event",
+        "payload": { "id": "string", "stream": "string", "seq": "number", "sender": "string", "body": "string", "meta": "any?", "parent_id": "string?", "sent_at": "number" }
+      },
+      {
+        "type": "event.ack",
+        "payload": { "id": "string", "seq": "number", "sent_at": "number" }
+      },
+      {
+        "type": "event.deleted",
+        "payload": { "stream": "string", "id": "string" }
+      },
+      {
+        "type": "event.edited",
+        "payload": { "stream": "string", "id": "string", "body": "string", "edited_at": "number" }
+      },
+      {
+        "type": "events.batch",
+        "payload": { "stream": "string", "events": "Event[]", "has_more": "boolean" }
+      },
+      {
+        "type": "reaction.changed",
+        "payload": { "stream": "string", "event_id": "string", "emoji": "string", "count": "number", "users": ["string"] }
+      },
+      {
+        "type": "presence",
+        "payload": { "user_id": "string", "status": "string" }
+      },
+      {
+        "type": "cursor",
+        "payload": { "stream": "string", "user_id": "string", "seq": "number" }
+      },
+      {
+        "type": "typing",
+        "payload": { "stream": "string", "user_id": "string", "active": "boolean" }
+      },
+      {
+        "type": "member.joined",
+        "payload": { "stream": "string", "user_id": "string", "role": "string" }
+      },
+      {
+        "type": "member.left",
+        "payload": { "stream": "string", "user_id": "string" }
+      },
+      {
+        "type": "stream.updated",
+        "payload": { "stream": "string" }
+      },
+      {
+        "type": "stream.deleted",
+        "payload": { "stream": "string" }
+      },
+      {
+        "type": "stream.subscriber_count",
+        "payload": { "stream": "string", "count": "number" }
+      },
+      {
+        "type": "watchlist.online",
+        "payload": { "user_id": "string" }
+      },
+      {
+        "type": "watchlist.offline",
+        "payload": { "user_id": "string" }
+      },
+      {
+        "type": "event.received",
+        "payload": { "stream": "string", "event": "string", "data": "any?" }
+      },
+      {
+        "type": "error",
+        "payload": { "code": "number", "message": "string" }
+      }
+    ]
+  }
+}

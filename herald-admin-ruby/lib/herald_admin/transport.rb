@@ -49,6 +49,7 @@ module HeraldAdmin
       end
 
       return nil if status == 204
+      return nil if resp.body.nil? || resp.body.empty?
       JSON.parse(resp.body)
     end
   end

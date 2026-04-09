@@ -111,7 +111,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`clustering`~~ | ~~L-1~~ | ~~Pub/sub backplane for cross-instance fanout (storage already shared via remote store)~~ | **done** |
 | ~~`embed-engines`~~ | ~~N-1~~ | ~~In-process engines (Sentry/Courier/Chronicle), Chronicle v1.5 upgrade, audit query API~~ | **done** |
 | ~~`at-least-once`~~ | ~~N-2~~ | ~~Opt-in ack mode for at-least-once delivery~~ | **done** |
-| `contract-tests` | N-3 | Define spec + wire all 4 existing SDKs | |
+| ~~`contract-tests`~~ | ~~N-3~~ | ~~Define spec + wire all 4 existing SDKs~~ | **done** |
 | ~~`moat-clients`~~ | ~~—~~ | ~~shroudb crate updates for Moat prefix routing~~ | **superseded by N-1** |
 | ~~`audit-log`~~ | ~~—~~ | ~~Chronicle rip-out, skeptik-audit-log integration~~ | **superseded by N-1** |
 
@@ -213,14 +213,14 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Integration test: kill subscriber mid-delivery, verify redelivery on reconnect
   - [x] Integration test: verify no duplicate delivery under normal conditions
 
-- [ ] **N-3: SDK contract tests** `session:contract-tests`
+- [x] **N-3: SDK contract tests** `session:contract-tests`
   No shared wire-protocol compliance tests. Risk of SDK drift.
-  - [ ] Define contract test spec (JSON fixtures for each API endpoint + WS frame type)
-  - [ ] TypeScript admin SDK passes contract tests
-  - [ ] Go admin SDK passes contract tests
-  - [ ] Python admin SDK passes contract tests
-  - [ ] Ruby admin SDK passes contract tests
-  - [ ] CI: contract tests run on SDK changes
+  - [x] Define contract test spec (JSON fixtures for each API endpoint + WS frame type)
+  - [x] TypeScript admin SDK passes contract tests
+  - [x] Go admin SDK passes contract tests
+  - [x] Python admin SDK passes contract tests
+  - [x] Ruby admin SDK passes contract tests
+  - [x] CI: contract tests run on SDK changes
 
 ---
 

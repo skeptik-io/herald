@@ -685,7 +685,15 @@ async fn handle_event_ack_delivery(
                 seq,
             },
         };
-        fanout_to_stream(state, &ctx.tenant_id, &stream, &msg, Some(ctx.conn_id), None).await;
+        fanout_to_stream(
+            state,
+            &ctx.tenant_id,
+            &stream,
+            &msg,
+            Some(ctx.conn_id),
+            None,
+        )
+        .await;
     }
 }
 

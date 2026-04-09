@@ -291,4 +291,4 @@ await test("handles empty string body in editEvent", async () => {
 
 // ── Summary ────────────────────────────────────────────────────────
 console.log(`\nherald-chat-sdk: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+process.exit(failed > 0 ? 1 : 0);

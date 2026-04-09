@@ -302,6 +302,11 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] Verify dependency chain resolves: herald-sdk → herald-chat-sdk → herald-chat → herald-chat-react (peer deps point to scoped `@skeptik-io/*` names)
   - [ ] Tag and verify all 5 TS packages publish successfully
 
+  **CI parallelization**
+  - [ ] Split `sdk-check` job into parallel jobs — TS browser, TS admin, Go, Python, Ruby, Chat SDK, Chat Core, Chat React are all independent type-check/build steps that currently run sequentially
+  - [ ] Chat unit tests (core, sdk, react) can run in parallel after their respective builds
+  - [ ] Contract tests can run as a separate parallel job (only needs the release binary + SDK builds)
+
 ---
 
 ## COMPLETED

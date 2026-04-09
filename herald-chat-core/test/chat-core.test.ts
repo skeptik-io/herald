@@ -1001,4 +1001,4 @@ await test("PendingMessage: retry re-sends failed message", async () => {
 
 // ── Summary ────────────────────────────────────────────────────────
 console.log(`\nchat-core: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+process.exit(failed > 0 ? 1 : 0);

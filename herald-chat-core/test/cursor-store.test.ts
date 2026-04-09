@@ -203,4 +203,4 @@ test("unread is clamped to 0 when cursor exceeds latest", () => {
 
 // ── Summary ────────────────────────────────────────────────────────
 console.log(`\ncursor-store: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+process.exit(failed > 0 ? 1 : 0);

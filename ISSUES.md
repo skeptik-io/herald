@@ -114,6 +114,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`contract-tests`~~ | ~~N-3~~ | ~~Define spec + wire all 4 existing SDKs~~ | **done** |
 | ~~`sdk-hardening`~~ | ~~N-4~~ | ~~Error handling, incomplete features, missing tests across TS chat/admin packages~~ | **done** |
 | `chat-extensions` | N-5 | Ephemeral events, per-message delivery status, event middleware | |
+| `sdk-packaging` | N-6 | READMEs for chat SDKs, publish chat packages in release pipeline | |
 | `openapi` | S-1 | `utoipa` annotations → `openapi.yaml` from Rust handlers | |
 | `admin-codegen` | S-2 | Replace hand-rolled admin SDKs with generated + add PHP, C# | |
 | `mobile-sdks` | S-3 | Swift, Kotlin, Dart WS client SDKs (hand-rolled, WS not HTTP) | |
@@ -284,6 +285,22 @@ Work items derived from market analysis and current codebase state. Each item mu
   **Validation**
   - [ ] Unit tests: ephemeral events forwarded, per-message status transitions (sent → read on remote cursor), middleware chain (enrich, skip, passthrough, ordering)
   - [ ] Existing chat-core unit tests still pass (all additions are opt-in)
+
+- [ ] **N-6: SDK packaging and documentation** `session:sdk-packaging`
+  Chat packages are not published in the release pipeline. No READMEs in any chat SDK directory. Blocks external consumption.
+
+  **READMEs**
+  - [ ] `herald-chat-sdk-typescript/README.md` — WS client wrapper, frame types, E2EE integration
+  - [ ] `herald-chat-core/README.md` — ChatCore API, stores, optimistic sends, liveness, scroll state
+  - [ ] `herald-chat-react/README.md` — Provider, hooks, render-prop components, useSyncExternalStore pattern
+  - [ ] `contract-tests/README.md` — How to run, spec format, adding new SDKs
+
+  **Release pipeline**
+  - [ ] Add `herald-chat-sdk` to `publish-npm` job — scope to `@skeptik-io/herald-chat-sdk`, build + publish
+  - [ ] Add `herald-chat-core` to `publish-npm` job — scope to `@skeptik-io/herald-chat`, build + publish
+  - [ ] Add `herald-chat-react` to `publish-npm` job — scope to `@skeptik-io/herald-chat-react`, build + publish
+  - [ ] Verify dependency chain resolves: herald-sdk → herald-chat-sdk → herald-chat → herald-chat-react (peer deps point to scoped `@skeptik-io/*` names)
+  - [ ] Tag and verify all 5 TS packages publish successfully
 
 ---
 

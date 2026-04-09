@@ -59,21 +59,21 @@ async function createTenantAndToken(): Promise<string> {
   const base = serverUrl();
   const headers = {
     "Content-Type": "application/json",
-    "Authorization": `Basic ${Buffer.from(`admin:${ADMIN_PASSWORD}`).toString("base64")}`,
+    "Authorization": `Bearer ${ADMIN_PASSWORD}`,
   };
 
-  // Create a tenant
+  // Create a tenant (may already exist as the auto-created default)
   const createRes = await fetch(`${base}/admin/tenants`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ id: "default", name: "Contract Test Tenant" }),
+    body: JSON.stringify({ id: "contract", name: "Contract Test Tenant" }),
   });
-  if (!createRes.ok) {
+  if (!createRes.ok && createRes.status !== 409) {
     throw new Error(`Failed to create tenant: ${createRes.status} ${await createRes.text()}`);
   }
 
   // Create an API token for the tenant
-  const tokenRes = await fetch(`${base}/admin/tenants/default/tokens`, {
+  const tokenRes = await fetch(`${base}/admin/tenants/contract/tokens`, {
     method: "POST",
     headers,
   });

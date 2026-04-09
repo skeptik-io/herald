@@ -502,16 +502,17 @@ async function run(): Promise<void> {
       // Bob blocks alice — bob should not receive alice's events
       await tenantAdmin.chat.blocks.block("bob", "alice");
 
-      // Set up listener BEFORE publishing to avoid race
+      // Set up listener BEFORE publishing to avoid race — check body to ignore catchup events
+      const blockedBody = `blocked-test-${Date.now()}`;
       let bobReceivedBlocked = false;
-      bob.on("event", (() => {
-        bobReceivedBlocked = true;
+      bob.on("event", ((ev: any) => {
+        if (ev.body === blockedBody) bobReceivedBlocked = true;
       }) as any);
 
       // Alice publishes — bob should NOT receive it
-      await alice.publish("general", "bob should not see this");
+      await alice.publish("general", blockedBody);
       // Wait long enough for fanout to complete (if it were going to)
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 1500));
       assert(!bobReceivedBlocked, "bob should NOT receive event while blocked");
 
       // Unblock alice

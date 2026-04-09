@@ -22,10 +22,11 @@ module HeraldAdmin
       @t.request("GET", "/admin/tenants/#{ERB::Util.url_encode(id)}")
     end
 
-    def update(id, name: nil, plan: nil)
+    def update(id, name: nil, plan: nil, event_ttl_days: nil)
       body = {}
       body[:name] = name if name
       body[:plan] = plan if plan
+      body[:event_ttl_days] = event_ttl_days if event_ttl_days
       @t.request("PATCH", "/admin/tenants/#{ERB::Util.url_encode(id)}", body)
     end
 

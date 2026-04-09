@@ -473,13 +473,16 @@ func (ns *TenantNamespace) Get(ctx context.Context, id string) (*Tenant, error) 
 	return &t, nil
 }
 
-func (ns *TenantNamespace) Update(ctx context.Context, id string, name *string, plan *string) error {
+func (ns *TenantNamespace) Update(ctx context.Context, id string, name *string, plan *string, eventTTLDays *int) error {
 	body := map[string]any{}
 	if name != nil {
 		body["name"] = *name
 	}
 	if plan != nil {
 		body["plan"] = *plan
+	}
+	if eventTTLDays != nil {
+		body["event_ttl_days"] = *eventTTLDays
 	}
 	_, err := ns.t.request(ctx, "PATCH", "/admin/tenants/"+url.PathEscape(id), body)
 	return err

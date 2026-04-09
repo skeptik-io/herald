@@ -37,7 +37,7 @@ export class TenantNamespace {
     return this.transport.request<Tenant>("GET", `/admin/tenants/${encodeURIComponent(id)}`);
   }
 
-  async update(id: string, opts: { name?: string; plan?: string; config?: unknown }): Promise<void> {
+  async update(id: string, opts: { name?: string; plan?: string; config?: unknown; event_ttl_days?: number }): Promise<void> {
     await this.transport.request("PATCH", `/admin/tenants/${encodeURIComponent(id)}`, opts);
   }
 

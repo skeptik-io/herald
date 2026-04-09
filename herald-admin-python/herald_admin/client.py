@@ -175,12 +175,14 @@ class TenantNamespace:
     def get(self, id: str) -> dict[str, Any]:
         return self._t.request("GET", f"/admin/tenants/{quote(id, safe='')}")
 
-    def update(self, id: str, *, name: str | None = None, plan: str | None = None) -> None:
+    def update(self, id: str, *, name: str | None = None, plan: str | None = None, event_ttl_days: int | None = None) -> None:
         body: dict[str, Any] = {}
         if name is not None:
             body["name"] = name
         if plan is not None:
             body["plan"] = plan
+        if event_ttl_days is not None:
+            body["event_ttl_days"] = event_ttl_days
         self._t.request("PATCH", f"/admin/tenants/{quote(id, safe='')}", body)
 
     def delete(self, id: str) -> None:

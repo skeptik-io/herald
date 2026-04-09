@@ -145,14 +145,14 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Integration test: encrypt in Go, decrypt in TypeScript (cross-SDK interop)
   - [x] Integration test: blind token search works across SDK implementations
 
-- [ ] **M-4: Per-tenant retention tiers**
+- [x] **M-4: Per-tenant retention tiers**
   TTL is global 7-day. Enable per-tenant configuration for tiered pricing.
   - [x] Event insert uses per-tenant TTL via `state.event_ttl_ms(tenant_id)`
   - [x] TTL cleanup job already respects per-event expiry timestamps
   - [x] Add `event_ttl_days` field to tenant record (stored in DB, set via admin API) — replaces Meterd-sourced retention after H-7
-  - [ ] Admin API: `PATCH /admin/tenants/{id}` accepts `event_ttl_days`
-  - [ ] Integration test: tenant A (7d) events expire, tenant B (30d) events survive
-  - [ ] Admin SDK support in all 4 SDKs
+  - [x] Admin API: `PATCH /admin/tenants/{id}` accepts `event_ttl_days`
+  - [x] Integration test: tenant A (7d) events expire, tenant B (30d) events survive
+  - [x] Admin SDK support in all 4 SDKs
 
 ---
 

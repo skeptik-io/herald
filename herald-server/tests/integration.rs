@@ -6298,3 +6298,145 @@ async fn test_remote_backend_boots_and_operates() {
         .send()
         .await;
 }
+
+/// M-4: Per-tenant retention tiers.
+/// Tenant A has 7-day TTL, tenant B has 30-day TTL.
+/// Events from both are inserted at the same time, then delete_expired is
+/// called with a timestamp 10 days later. Tenant A's events should be expired
+/// while tenant B's events survive.
+#[tokio::test]
+async fn test_per_tenant_retention_tiers() {
+    let server = TestServer::start().await;
+    let client = server.http_client();
+
+    // Create tenant A (7d retention) and tenant B (30d retention)
+    let token_a = server.create_tenant("ttl-a", TENANT_A_SECRET).await;
+    let token_b = server.create_tenant("ttl-b", TENANT_B_SECRET).await;
+
+    // Set event_ttl_days via admin API
+    let resp = client
+        .patch(server.http_url("/admin/tenants/ttl-a"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"event_ttl_days": 7}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "set ttl-a event_ttl_days=7");
+
+    let resp = client
+        .patch(server.http_url("/admin/tenants/ttl-b"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .json(&json!({"event_ttl_days": 30}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "set ttl-b event_ttl_days=30");
+
+    // Verify the TTL is reflected in GET tenant
+    let resp = client
+        .get(server.http_url("/admin/tenants/ttl-a"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["event_ttl_days"], json!(7), "ttl-a event_ttl_days should be 7");
+
+    let resp = client
+        .get(server.http_url("/admin/tenants/ttl-b"))
+        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["event_ttl_days"], json!(30), "ttl-b event_ttl_days should be 30");
+
+    // Create streams and publish events
+    server.create_stream(&token_a, "retention-test").await;
+    server.add_member(&token_a, "retention-test", "alice").await;
+    server.create_stream(&token_b, "retention-test").await;
+    server.add_member(&token_b, "retention-test", "bob").await;
+
+    // Publish events to both tenants
+    let resp = client
+        .post(server.http_url("/streams/retention-test/events"))
+        .bearer_auth(&token_a)
+        .json(&json!({"sender": "alice", "body": "short-lived event"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "publish to ttl-a");
+
+    let resp = client
+        .post(server.http_url("/streams/retention-test/events"))
+        .bearer_auth(&token_b)
+        .json(&json!({"sender": "bob", "body": "long-lived event"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "publish to ttl-b");
+
+    // Both tenants should have events right now
+    let resp = client
+        .get(server.http_url("/streams/retention-test/events"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["events"].as_array().unwrap().len(),
+        1,
+        "ttl-a should have 1 event before expiry"
+    );
+
+    let resp = client
+        .get(server.http_url("/streams/retention-test/events"))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["events"].as_array().unwrap().len(),
+        1,
+        "ttl-b should have 1 event before expiry"
+    );
+
+    // Simulate time passing: run delete_expired with a timestamp 10 days from now.
+    // Tenant A (7d) events should expire. Tenant B (30d) events should survive.
+    let ten_days_from_now =
+        herald_server::ws::connection::now_millis() + (10 * 24 * 60 * 60 * 1000);
+    let deleted = store::events::delete_expired(&*server.state.db, ten_days_from_now)
+        .await
+        .unwrap();
+    assert!(deleted > 0, "should have deleted at least 1 expired event");
+
+    // Tenant A's events should be gone
+    let resp = client
+        .get(server.http_url("/streams/retention-test/events"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["events"].as_array().unwrap().len(),
+        0,
+        "ttl-a events should be expired after 10 days"
+    );
+
+    // Tenant B's events should survive
+    let resp = client
+        .get(server.http_url("/streams/retention-test/events"))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["events"].as_array().unwrap().len(),
+        1,
+        "ttl-b events should survive after 10 days (30d retention)"
+    );
+}

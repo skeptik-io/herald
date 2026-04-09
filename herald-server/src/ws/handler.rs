@@ -198,7 +198,7 @@ pub async fn handle_message(
             }
         }
         ClientMessage::EventAckDelivery { stream, seq } => {
-            handle_event_ack_delivery(state, ctx, stream, seq);
+            handle_event_ack_delivery(state, ctx, stream, seq).await;
         }
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
@@ -661,7 +661,12 @@ async fn handle_fetch(
         .await;
 }
 
-fn handle_event_ack_delivery(state: &Arc<AppState>, ctx: &ConnContext, stream: String, seq: u64) {
+async fn handle_event_ack_delivery(
+    state: &Arc<AppState>,
+    ctx: &ConnContext,
+    stream: String,
+    seq: u64,
+) {
     tracing::debug!(
         conn = %ctx.conn_id,
         user = %ctx.user_id,
@@ -671,6 +676,16 @@ fn handle_event_ack_delivery(state: &Arc<AppState>, ctx: &ConnContext, stream: S
     );
     if state.connections.record_ack(ctx.conn_id, &stream, seq) {
         state.metrics.events_acked.fetch_add(1, Ordering::Relaxed);
+
+        // Notify other subscribers that this user has received events up to seq
+        let msg = ServerMessage::EventDelivered {
+            payload: EventDeliveredPayload {
+                stream: stream.clone(),
+                user_id: ctx.user_id.clone(),
+                seq,
+            },
+        };
+        fanout_to_stream(state, &ctx.tenant_id, &stream, &msg, Some(ctx.conn_id), None).await;
     }
 }
 

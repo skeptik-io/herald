@@ -1,6 +1,6 @@
 import type { HeraldClient, EventNew, EventEdited, EventDeleted, EventAck, EventsBatch,
   ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
-  EventReceived, SubscribedPayload } from "herald-sdk";
+  EventReceived, EventDelivered, SubscribedPayload } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
 import type { ChatCoreOptions, Message, PendingMessage, Member, ScrollStateSnapshot, LivenessState, ChatEvent, Middleware } from "./types.js";
 import { Notifier } from "./notifier.js";
@@ -47,6 +47,7 @@ export class ChatCore {
   private _onMemberJoined: Handler<MemberEvent>;
   private _onMemberLeft: Handler<MemberEvent>;
   private _onEphemeral: Handler<EventReceived>;
+  private _onDelivered: Handler<EventDelivered>;
   private _onConnected: Handler<void>;
   private _onDisconnected: Handler<void>;
 
@@ -88,6 +89,7 @@ export class ChatCore {
     this._onMemberJoined = (e) => this.handleMemberJoined(e);
     this._onMemberLeft = (e) => this.handleMemberLeft(e);
     this._onEphemeral = (e) => this.handleEphemeral(e);
+    this._onDelivered = (e) => this.handleDelivered(e);
     this._onConnected = () => this.handleConnected();
     this._onDisconnected = () => this.handleDisconnected();
   }
@@ -108,6 +110,7 @@ export class ChatCore {
     this.client.on("member.joined", this._onMemberJoined);
     this.client.on("member.left", this._onMemberLeft);
     this.client.on("event.received", this._onEphemeral);
+    this.client.on("event.delivered", this._onDelivered);
     this.client.on("connected", this._onConnected);
     this.client.on("disconnected", this._onDisconnected);
 
@@ -129,6 +132,7 @@ export class ChatCore {
     this.client.off("member.joined", this._onMemberJoined);
     this.client.off("member.left", this._onMemberLeft);
     this.client.off("event.received", this._onEphemeral);
+    this.client.off("event.delivered", this._onDelivered);
     this.client.off("connected", this._onConnected);
     this.client.off("disconnected", this._onDisconnected);
 
@@ -460,6 +464,14 @@ export class ChatCore {
       }
       byType.set(event.event, event);
       this.notifier.notify(`ephemeral:${event.stream}`);
+    });
+  }
+
+  private handleDelivered(event: EventDelivered): void {
+    this.runMiddleware({ type: "event.delivered", data: event }, () => {
+      if (event.user_id === this.userId) return; // own delivery ack, skip
+      if (this.listenOnly.has(event.stream)) return; // no stores for listen-only
+      this.messages.markDelivered(event.stream, event.seq, this.userId);
     });
   }
 

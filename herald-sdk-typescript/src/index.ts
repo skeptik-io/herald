@@ -25,6 +25,7 @@ export type {
   StreamEvent,
   StreamSubscriberCount,
   EventReceived,
+  EventDelivered,
   WatchlistEvent,
   MemberPresence,
   HeraldEvent,

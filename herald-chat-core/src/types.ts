@@ -1,13 +1,13 @@
 import type { HeraldClient, EventNew, EventEdited, EventDeleted,
   ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
-  EventReceived } from "herald-sdk";
+  EventReceived, EventDelivered } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
 
 // ---------------------------------------------------------------------------
 // Message
 // ---------------------------------------------------------------------------
 
-export type MessageStatus = "sending" | "sent" | "failed" | "read";
+export type MessageStatus = "sending" | "sent" | "delivered" | "failed" | "read";
 
 export interface Message {
   id: string;
@@ -90,6 +90,7 @@ export type ChatEvent =
   | { type: "typing"; data: TypingEvent }
   | { type: "member.joined"; data: MemberEvent }
   | { type: "member.left"; data: MemberEvent }
+  | { type: "event.delivered"; data: EventDelivered }
   | { type: "ephemeral"; data: EventReceived };
 
 export type Middleware = (event: ChatEvent, next: () => void) => void;

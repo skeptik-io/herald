@@ -210,6 +210,22 @@ export class MessageStore {
     this.bumpVersion(reaction.stream);
   }
 
+  markDelivered(streamId: string, upToSeq: number, sender: string): boolean {
+    const list = this.streams.get(streamId);
+    if (!list) return false;
+    let changed = false;
+    for (const msg of list) {
+      if (msg.seq === 0) continue; // optimistic
+      if (msg.seq > upToSeq) break; // sorted ascending
+      if (msg.sender === sender && msg.status === "sent") {
+        msg.status = "delivered";
+        changed = true;
+      }
+    }
+    if (changed) this.bumpVersion(streamId);
+    return changed;
+  }
+
   markRead(streamId: string, upToSeq: number, sender: string): boolean {
     const list = this.streams.get(streamId);
     if (!list) return false;
@@ -217,7 +233,7 @@ export class MessageStore {
     for (const msg of list) {
       if (msg.seq === 0) continue; // optimistic
       if (msg.seq > upToSeq) break; // sorted ascending, no need to continue
-      if (msg.sender === sender && msg.status === "sent") {
+      if (msg.sender === sender && (msg.status === "sent" || msg.status === "delivered")) {
         msg.status = "read";
         changed = true;
       }

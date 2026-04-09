@@ -314,6 +314,8 @@ pub enum ServerMessage {
     StreamSubscriberCount {
         payload: StreamSubscriberCountPayload,
     },
+    #[serde(rename = "event.delivered")]
+    EventDelivered { payload: EventDeliveredPayload },
     #[serde(rename = "reaction.changed")]
     ReactionChanged { payload: ReactionChangedPayload },
     #[serde(rename = "error")]
@@ -433,6 +435,13 @@ pub struct PresenceChangedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CursorMovedPayload {
+    pub stream: String,
+    pub user_id: String,
+    pub seq: Sequence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDeliveredPayload {
     pub stream: String,
     pub user_id: String,
     pub seq: Sequence,

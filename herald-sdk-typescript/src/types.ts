@@ -93,6 +93,12 @@ export interface CursorMoved {
   seq: number;
 }
 
+export interface EventDelivered {
+  stream: string;
+  user_id: string;
+  seq: number;
+}
+
 export interface MemberEvent {
   stream: string;
   user_id: string;
@@ -152,6 +158,7 @@ export type HeraldEventMap = {
   "event.edited": EventEdited;
   "reaction.changed": ReactionChanged;
   "event.received": EventReceived;
+  "event.delivered": EventDelivered;
   presence: PresenceChanged;
   cursor: CursorMoved;
   "member.joined": MemberEvent;

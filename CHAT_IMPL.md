@@ -164,6 +164,7 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 | `typing` | `handleTyping` | `typing.setTyping()` — skips own events, TTL 12s |
 | `member.joined` | `handleMemberJoined` | `members.addMember()` — idempotent, presence=online |
 | `member.left` | `handleMemberLeft` | `members.removeMember()` |
+| `event.delivered` | `handleDelivered` | Flips self-sent messages from `sent` to `delivered` when a remote subscriber acks delivery (ack-mode streams only) |
 | `event.received` | `handleEphemeral` | Stores per event type in `lastEphemeral` map, emits `ephemeral:{streamId}` |
 | `connected` | `handleConnected` | Documents that SDK re-subscribes automatically |
 | `disconnected` | `handleDisconnected` | `typing.clearAll()` + restart expiry timer |
@@ -208,7 +209,8 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 | `applyEdit(edit)` | Updates body + editedAt on existing message. |
 | `applyDelete(del)` | Sets deleted=true, clears body. Message stays as tombstone. |
 | `applyReaction(reaction)` | Adds/removes userId from emoji Set on the message's reactions Map. |
-| `markRead(streamId, upToSeq, sender)` | Walks messages, flips self-sent (msg.sender === sender) messages with seq <= upToSeq from `sent` to `read`. |
+| `markDelivered(streamId, upToSeq, sender)` | Walks messages, flips self-sent messages with `status === "sent"` and seq <= upToSeq to `delivered`. |
+| `markRead(streamId, upToSeq, sender)` | Walks messages, flips self-sent messages with `status === "sent"` or `"delivered"` and seq <= upToSeq to `read`. |
 
 ### CursorStore
 
@@ -220,9 +222,9 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 
 **Remote cursors:** Tracks other users' cursor positions per stream. When a remote cursor advances past a self-sent message's seq, that message's status flips to `read`.
 
-**Read semantics:** `status = "read"` means "at least one remote user's cursor >= this message's seq" (WhatsApp-style). This is intentional — it answers "has anyone seen this?" which is the useful signal for both 1:1 and group conversations. The `Message.status` field is a convenience enum, not a per-user tracker. For per-user granularity (e.g. "read by 3 of 5 members" or a read-receipts UI showing who read what), consumers derive it from `getRemoteCursors(streamId)` at render time — no `readBy: Set<string>` on Message because the same information is already in the cursor map.
+**Status progression:** `sending → sent → delivered → read`. The `delivered` state means "at least one remote subscriber's ack-mode client has received this event" — triggered by `event.delivered` frames from the server. Only fires on ack-mode streams; non-ack streams skip directly to `read` on cursor advance. **Read semantics:** `status = "read"` means "at least one remote user's cursor >= this message's seq" (WhatsApp-style). This is intentional — it answers "has anyone seen this?" which is the useful signal for both 1:1 and group conversations. The `Message.status` field is a convenience enum, not a per-user tracker. For per-user granularity (e.g. "read by 3 of 5 members" or a read-receipts UI showing who read what), consumers derive it from `getRemoteCursors(streamId)` at render time — no `readBy: Set<string>` on Message because the same information is already in the cursor map.
 
-**No `"delivered"` state.** Herald has no delivery receipt primitive — `"sent"` (server ack) is the strongest signal the transport provides. Adding `"delivered"` would require a new protocol frame ("client received event X"). Herald's ack mode (N-2) is for at-least-once delivery guarantees, not user-visible delivery receipts.
+**Delivery receipts** are powered by Herald's ack mode (N-2). When a subscriber's ack-mode client receives events, the server broadcasts `event.delivered { stream, user_id, seq }` to other subscribers. ChatCore flips self-sent messages from `sent` → `delivered`. On non-ack streams, no delivery receipts are generated — status progresses directly from `sent` to `read` on cursor advance.
 
 ### MemberStore
 
@@ -448,7 +450,7 @@ Wrapper around `retrySend()`/`cancelSend()`.
 ## Types
 
 ```typescript
-type MessageStatus = "sending" | "sent" | "failed" | "read";
+type MessageStatus = "sending" | "sent" | "delivered" | "failed" | "read";
 
 interface Message {
   id: string;
@@ -510,6 +512,7 @@ type ChatEvent =
   | { type: "typing"; data: TypingEvent }
   | { type: "member.joined"; data: MemberEvent }
   | { type: "member.left"; data: MemberEvent }
+  | { type: "event.delivered"; data: EventDelivered }
   | { type: "ephemeral"; data: EventReceived };
 
 type Middleware = (event: ChatEvent, next: () => void) => void;

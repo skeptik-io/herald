@@ -1194,10 +1194,11 @@ await test("middleware: receives correct ChatEvent type for each handler", async
   client.emit("cursor", { stream: "s1", user_id: "alice", seq: 1 });
   client.emit("presence", { user_id: "alice", presence: "away" });
   client.emit("event.received", { stream: "s1", event: "custom", sender: "alice" });
+  client.emit("event.delivered", { stream: "s1", user_id: "bob", seq: 1 });
 
   const expected = [
     "event", "event.edited", "event.deleted", "reaction.changed",
-    "typing", "member.joined", "member.left", "cursor", "presence", "ephemeral",
+    "typing", "member.joined", "member.left", "cursor", "presence", "ephemeral", "event.delivered",
   ];
   assert(types.length === expected.length, `got ${types.length} events, expected ${expected.length}`);
   for (let i = 0; i < expected.length; i++) {
@@ -1224,6 +1225,85 @@ await test("middleware: can intercept ephemeral events", async () => {
   client.emit("event.received", { stream: "s1", event: "custom", sender: "alice" });
   assert(intercepted, "ephemeral intercepted by middleware");
   assert(core.getLastEphemeral("s1") !== undefined, "still stored after passthrough");
+  core.destroy();
+});
+
+// ── Delivery receipts ─────────────────────────────────────────────
+
+await test("event.delivered flips self-sent message from sent to delivered", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  await core.send("s1", "hello");
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "1 message");
+  assert(msgs[0].status === "sent", "initially sent");
+
+  // Remote user's delivery ack
+  client.emit("event.delivered", { stream: "s1", user_id: "bob", seq: msgs[0].seq });
+
+  const after = core.getMessages("s1");
+  assert(after[0].status === "delivered", `expected delivered, got ${after[0].status}`);
+  core.destroy();
+});
+
+await test("event.delivered does not flip other users' messages", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "from alice", sent_at: 1 });
+
+  client.emit("event.delivered", { stream: "s1", user_id: "bob", seq: 5 });
+
+  assert(core.getMessages("s1")[0].status === "sent", "other user's message stays sent");
+  core.destroy();
+});
+
+await test("own delivery ack is ignored", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  client.emit("event.delivered", { stream: "s1", user_id: "me", seq });
+
+  assert(core.getMessages("s1")[0].status === "sent", "own delivery ack ignored");
+  core.destroy();
+});
+
+await test("delivered → read: cursor advances past delivered message", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  // First: delivered
+  client.emit("event.delivered", { stream: "s1", user_id: "bob", seq });
+  assert(core.getMessages("s1")[0].status === "delivered", "now delivered");
+
+  // Then: read (cursor advance)
+  client.emit("cursor", { stream: "s1", user_id: "bob", seq });
+  assert(core.getMessages("s1")[0].status === "read", "now read");
+  core.destroy();
+});
+
+await test("event.delivered flows through middleware", async () => {
+  const types: string[] = [];
+  const { client, core } = makeCore(undefined, {
+    middleware: [(event, next) => { types.push(event.type); next(); }],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event.delivered", { stream: "s1", user_id: "bob", seq: 1 });
+
+  assert(types.includes("event.delivered"), "middleware received event.delivered");
   core.destroy();
 });
 

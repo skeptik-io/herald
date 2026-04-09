@@ -4,6 +4,7 @@ import { E2EEManager } from "./e2ee.js";
 import { initE2EE } from "./crypto.js";
 import type {
   CursorMoved,
+  EventDelivered,
   EventReceived,
   HeraldClientOptions,
   HeraldEvent,
@@ -471,6 +472,10 @@ export class HeraldClient {
 
       case "event.received":
         this.emit("event.received", p as unknown as EventReceived);
+        break;
+
+      case "event.delivered":
+        this.emit("event.delivered", p as unknown as EventDelivered);
         break;
 
       case "stream.subscriber_count":

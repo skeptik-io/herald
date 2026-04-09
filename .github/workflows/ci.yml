@@ -87,8 +87,8 @@ jobs:
         run: |
           cd herald-sdk-typescript && npm install && npx tsc && cd ..
           cd herald-admin-typescript && npm install && npx tsc && cd ..
-          cd herald-chat-core && npm install && npx tsc && cd ..
           cd herald-chat-sdk-typescript && npm install && npx tsc && cd ..
+          cd herald-chat-core && npm install && npx tsc && cd ..
 
       - name: Live integration tests
         run: |
@@ -136,12 +136,12 @@ jobs:
           cd herald-sdk-typescript && npm install && npx tsc && cd ..
           cd herald-admin-typescript && npm install && npx tsc && cd ..
 
-      - name: Chat Core SDK
-        working-directory: herald-chat-core
-        run: npm install && npx tsc --noEmit
-
       - name: Chat SDK
         working-directory: herald-chat-sdk-typescript
+        run: npm install && npx tsc
+
+      - name: Chat Core SDK
+        working-directory: herald-chat-core
         run: npm install && npx tsc --noEmit
 
       - name: Chat React SDK

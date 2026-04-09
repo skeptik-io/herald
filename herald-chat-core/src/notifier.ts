@@ -29,7 +29,11 @@ export class Notifier {
     const set = this.listeners.get(slice);
     if (set) {
       for (const listener of set) {
-        listener();
+        try {
+          listener();
+        } catch (err) {
+          console.error(`[herald-chat] Notifier listener error on "${slice}":`, err);
+        }
       }
     }
   }

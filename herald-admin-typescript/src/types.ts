@@ -112,3 +112,57 @@ export interface AuditCountOptions {
   since?: string;
   until?: string;
 }
+
+export interface ConnectionInfo {
+  total: number;
+  by_tenant: Array<{ tenant_id: string; connections: number }>;
+}
+
+export interface AdminEventEntry {
+  id: number;
+  kind: string;
+  tenant_id?: string;
+  stream_id?: string;
+  user_id?: string;
+  detail?: string;
+  timestamp: number;
+}
+
+export interface AdminEventList {
+  events: AdminEventEntry[];
+}
+
+export interface AdminErrorEntry {
+  id: number;
+  category: string;
+  message: string;
+  detail?: string;
+  timestamp: number;
+}
+
+export interface AdminErrorList {
+  errors: AdminErrorEntry[];
+}
+
+export interface StatsSnapshot {
+  timestamp: number;
+  connections: number;
+  events_published: number;
+  webhooks_sent: number;
+  streams: number;
+}
+
+export interface AdminStats {
+  today: StatsSnapshot;
+  snapshots: StatsSnapshot[];
+}
+
+export interface TenantStats {
+  current: {
+    connections: number;
+    events_published: number;
+    webhooks_sent: number;
+    streams: number;
+  };
+  snapshots: StatsSnapshot[];
+}

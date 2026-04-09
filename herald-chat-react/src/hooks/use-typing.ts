@@ -7,6 +7,7 @@ export interface UseTypingReturn {
 }
 
 export function useTyping(streamId: string): UseTypingReturn {
+  if (!streamId) throw new Error("useTyping requires a streamId");
   const core = useChatCore();
 
   const typing = useSyncExternalStore(

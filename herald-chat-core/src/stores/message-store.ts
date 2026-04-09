@@ -50,17 +50,22 @@ export class MessageStore {
       if (this.byId.has(event.id)) continue;
       const msg = eventToMessage(event);
       this.byId.set(msg.id, msg);
-      list.push(msg);
+
+      // Binary search insert (same algorithm as appendEvent)
+      const seq = msg.seq === 0 ? Infinity : msg.seq;
+      let lo = 0;
+      let hi = list.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        const midSeq = list[mid].seq === 0 ? Infinity : list[mid].seq;
+        if (midSeq < seq) lo = mid + 1;
+        else hi = mid;
+      }
+      list.splice(lo, 0, msg);
       inserted = true;
     }
 
     if (inserted) {
-      list.sort((a, b) => {
-        if (a.seq === 0 && b.seq === 0) return 0;
-        if (a.seq === 0) return 1; // optimistic at end
-        if (b.seq === 0) return -1;
-        return a.seq - b.seq;
-      });
       this.replaceList(streamId, list);
     }
 
@@ -167,7 +172,7 @@ export class MessageStore {
 
   applyEdit(edit: EventEdited): void {
     const msg = this.byId.get(edit.id);
-    if (!msg) return;
+    if (!msg || msg.deleted) return;
     msg.body = edit.body;
     msg.editedAt = edit.edited_at;
     this.bumpVersion(edit.stream);
@@ -217,6 +222,16 @@ export class MessageStore {
 
   getOldestSeq(streamId: string): number | undefined {
     return this.oldestSeq.get(streamId);
+  }
+
+  getMessageByLocalId(localId: string): Message | undefined {
+    const pending = this.byLocalId.get(localId);
+    if (pending) return pending;
+    // After reconciliation, the message is in byId keyed by server ID but still has localId set
+    for (const msg of this.byId.values()) {
+      if (msg.localId === localId) return msg;
+    }
+    return undefined;
   }
 
   hasMoreHistory(streamId: string): boolean {

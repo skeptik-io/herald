@@ -33,7 +33,12 @@ class HttpTransport:
                     return None
                 return json.loads(raw)
         except urllib.error.HTTPError as e:
-            code = "INTERNAL"
+            _HTTP_CODES = {
+                400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN",
+                404: "NOT_FOUND", 409: "CONFLICT", 429: "RATE_LIMITED",
+                500: "INTERNAL", 503: "UNAVAILABLE",
+            }
+            code = _HTTP_CODES.get(e.code, "INTERNAL")
             message = f"HTTP {e.code}"
             try:
                 body_data = json.loads(e.read())
@@ -41,8 +46,4 @@ class HttpTransport:
                     message = body_data["error"]
             except Exception:
                 pass
-            if e.code == 401:
-                code = "UNAUTHORIZED"
-            elif e.code == 404:
-                code = "NOT_FOUND"
             raise HeraldError(code, message, e.code) from None

@@ -2,7 +2,7 @@ import type { HeraldClient, EventNew, EventEdited, EventDeleted, EventAck, Event
   ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
   SubscribedPayload } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
-import type { ChatCoreOptions, Message, Member, ScrollStateSnapshot, LivenessState } from "./types.js";
+import type { ChatCoreOptions, Message, PendingMessage, Member, ScrollStateSnapshot, LivenessState } from "./types.js";
 import { Notifier } from "./notifier.js";
 import { MessageStore } from "./stores/message-store.js";
 import { CursorStore } from "./stores/cursor-store.js";
@@ -26,6 +26,8 @@ export class ChatCore {
   private liveness: LivenessController | null = null;
   private livenessState: LivenessState = "active";
   private scrollIdleMs: number;
+  private loadMoreLimit: number;
+  private readTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private attached = false;
 
   // Track pending optimistic sends for retry/cancel
@@ -49,6 +51,7 @@ export class ChatCore {
     this.chat = options.chat;
     this.userId = options.userId;
     this.scrollIdleMs = options.scrollIdleMs ?? 1000;
+    this.loadMoreLimit = options.loadMoreLimit ?? 50;
 
     this.notifier = new Notifier();
     this.messages = new MessageStore(this.notifier);
@@ -127,6 +130,8 @@ export class ChatCore {
 
   destroy(): void {
     this.detach();
+    for (const timer of this.readTimers.values()) clearTimeout(timer);
+    this.readTimers.clear();
     this.messages.clearAll();
     this.cursors.clearAll();
     this.members.clearAll();
@@ -149,6 +154,7 @@ export class ChatCore {
 
   leaveStream(streamId: string): void {
     this.client.unsubscribe([streamId]);
+    this.cancelAutoMarkRead(streamId);
     this.messages.clear(streamId);
     this.cursors.clear(streamId);
     this.members.clear(streamId);
@@ -162,10 +168,12 @@ export class ChatCore {
     streamId: string,
     body: string,
     opts?: { meta?: unknown; parentId?: string },
-  ): Promise<string> {
+  ): Promise<PendingMessage> {
     const localId = `local:${crypto.randomUUID()}`;
     this.messages.addOptimistic(streamId, localId, this.userId, body, opts?.meta, opts?.parentId);
     this.pendingSends.set(localId, { streamId, body, ...opts });
+
+    const pending = this.createPendingMessage(localId);
 
     try {
       const ack = await this.client.publish(streamId, body, {
@@ -174,7 +182,7 @@ export class ChatCore {
       });
       this.messages.reconcile(localId, ack);
       this.pendingSends.delete(localId);
-      return ack.id;
+      return pending;
     } catch {
       this.messages.failOptimistic(localId);
       throw new Error("Send failed");
@@ -272,7 +280,9 @@ export class ChatCore {
     if (!scroll) return;
     scroll.setAtLiveEdge(atEdge);
     if (atEdge) {
-      this.autoMarkRead(streamId);
+      this.scheduleAutoMarkRead(streamId);
+    } else {
+      this.cancelAutoMarkRead(streamId);
     }
   }
 
@@ -287,7 +297,7 @@ export class ChatCore {
     try {
       const batch = await this.client.fetch(streamId, {
         before: oldest,
-        limit: 50,
+        limit: this.loadMoreLimit,
       });
       this.messages.prependBatch(streamId, batch.events, batch.has_more);
       return batch.has_more;
@@ -313,7 +323,7 @@ export class ChatCore {
     const scroll = this.scrollStates.get(event.stream);
     if (scroll) {
       if (scroll.atLiveEdge && this.livenessState !== "hidden") {
-        this.autoMarkRead(event.stream);
+        this.scheduleAutoMarkRead(event.stream);
       } else {
         scroll.incrementPending();
       }
@@ -366,6 +376,43 @@ export class ChatCore {
     // Clear ephemeral state — typing indicators are stale after disconnect
     this.typing.clearAll();
     this.typing.startExpiry(); // restart when we re-attach
+  }
+
+  private createPendingMessage(localId: string): PendingMessage {
+    const core = this;
+    return {
+      localId,
+      get status() {
+        return core.messages.getMessageByLocalId(localId)?.status ?? "failed";
+      },
+      async retry() {
+        await core.retrySend(localId);
+      },
+      cancel() {
+        core.cancelSend(localId);
+      },
+    };
+  }
+
+  private scheduleAutoMarkRead(streamId: string): void {
+    this.cancelAutoMarkRead(streamId);
+    if (this.scrollIdleMs <= 0) {
+      this.autoMarkRead(streamId);
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.readTimers.delete(streamId);
+      this.autoMarkRead(streamId);
+    }, this.scrollIdleMs);
+    this.readTimers.set(streamId, timer);
+  }
+
+  private cancelAutoMarkRead(streamId: string): void {
+    const timer = this.readTimers.get(streamId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.readTimers.delete(streamId);
+    }
   }
 
   private autoMarkRead(streamId: string): void {

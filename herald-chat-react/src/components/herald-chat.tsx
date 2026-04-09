@@ -28,6 +28,7 @@ export function HeraldChat({
   edgeThreshold = 50,
   loadMoreThreshold = 100,
 }: HeraldChatProps) {
+  if (!streamId) throw new Error("HeraldChat requires a streamId");
   const core = useChatCore();
   const prevScrollHeight = useRef(0);
   const isAnchoring = useRef(false);

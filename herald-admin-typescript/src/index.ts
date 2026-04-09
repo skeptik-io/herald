@@ -24,4 +24,12 @@ export type {
   AuditCountResponse,
   AuditQueryOptions,
   AuditCountOptions,
+  ConnectionInfo,
+  AdminEventEntry,
+  AdminEventList,
+  AdminErrorEntry,
+  AdminErrorList,
+  StatsSnapshot,
+  AdminStats,
+  TenantStats,
 } from "./types.js";

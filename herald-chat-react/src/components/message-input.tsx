@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { PendingMessage } from "herald-chat";
 import { useMessages } from "../hooks/use-messages.js";
 import { useTyping } from "../hooks/use-typing.js";
 
@@ -8,7 +9,7 @@ export interface MessageInputProps {
 }
 
 export interface MessageInputState {
-  send(body: string, opts?: { meta?: unknown; parentId?: string }): Promise<string>;
+  send(body: string, opts?: { meta?: unknown; parentId?: string }): Promise<PendingMessage>;
   sendTyping(): void;
 }
 

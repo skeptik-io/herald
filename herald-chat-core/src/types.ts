@@ -87,4 +87,6 @@ export interface ChatCoreOptions {
   liveness?: LivenessConfig;
   /** Delay (ms) before auto-marking read when at live edge. Default 1000. */
   scrollIdleMs?: number;
+  /** Number of events to fetch per loadMore() call. Default 50. */
+  loadMoreLimit?: number;
 }

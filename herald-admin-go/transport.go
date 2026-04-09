@@ -56,21 +56,23 @@ func (t *httpTransport) request(ctx context.Context, method, path string, body a
 	}
 
 	if resp.StatusCode >= 400 {
+		httpCodes := map[int]string{
+			400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN",
+			404: "NOT_FOUND", 409: "CONFLICT", 429: "RATE_LIMITED",
+			500: "INTERNAL", 503: "UNAVAILABLE",
+		}
 		code := "INTERNAL"
-		msg := string(data)
+		if c, ok := httpCodes[resp.StatusCode]; ok {
+			code = c
+		}
+		msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
 		var errResp struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(data, &errResp) == nil && errResp.Error != "" {
 			msg = errResp.Error
-		}
-		switch {
-		case resp.StatusCode == 401:
-			code = "UNAUTHORIZED"
-		case resp.StatusCode == 404:
-			code = "NOT_FOUND"
-		case resp.StatusCode == 429:
-			code = "RATE_LIMITED"
+		} else if len(data) > 0 {
+			msg = string(data)
 		}
 		return nil, &HeraldError{Code: code, Message: msg, Status: resp.StatusCode}
 	}

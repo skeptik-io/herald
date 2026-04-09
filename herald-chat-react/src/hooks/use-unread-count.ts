@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { useChatCore } from "../context.js";
 
 export function useUnreadCount(streamId: string): number {
+  if (!streamId) throw new Error("useUnreadCount requires a streamId");
   const core = useChatCore();
 
   return useSyncExternalStore(

@@ -9,7 +9,7 @@
  *   4. Verifying delegation from hook actions to ChatCore methods
  */
 
-import type { Message, Member, LivenessState } from "herald-chat";
+import type { Message, Member, PendingMessage, LivenessState } from "herald-chat";
 
 let passed = 0;
 let failed = 0;
@@ -96,9 +96,9 @@ function createMockCore() {
     },
 
     // -- Actions --
-    async send(streamId: string, body: string, opts?: { meta?: unknown; parentId?: string }): Promise<string> {
+    async send(streamId: string, body: string, opts?: { meta?: unknown; parentId?: string }): Promise<PendingMessage> {
       calls.push({ method: "send", args: [streamId, body, opts] });
-      return "evt_123";
+      return { localId: "local:test", get status() { return "sent" as const; }, async retry() {}, cancel() {} };
     },
     async edit(streamId: string, eventId: string, body: string): Promise<void> {
       calls.push({ method: "edit", args: [streamId, eventId, body] });
@@ -217,7 +217,8 @@ await test("useMessages — getMessages returns empty for unknown stream", () =>
 await test("useMessages — send delegates to core.send", async () => {
   const mock = createMockCore();
   const result = await mock.core.send("s1", "hello", { meta: { bold: true }, parentId: "evt_0" });
-  assertEqual(result, "evt_123", "returns event id");
+  assertEqual(result.localId, "local:test", "returns PendingMessage with localId");
+  assertEqual(result.status, "sent", "status is sent");
   const call = mock.calls.find(c => c.method === "send");
   assert(call !== undefined, "send was called");
   assertEqual(call!.args[0], "s1", "correct stream");
@@ -472,8 +473,8 @@ await test("simulated useMessages flow: subscribe, read, act", async () => {
   assertEqual(value[0].body, "test message", "correct body in snapshot");
 
   // 2. Perform actions (what useCallback wrappers do)
-  const eventId = await mock.core.send(streamId, "new msg");
-  assertEqual(eventId, "evt_123", "send returns id");
+  const pending = await mock.core.send(streamId, "new msg");
+  assertEqual(pending.localId, "local:test", "send returns PendingMessage");
 
   await mock.core.edit(streamId, "evt_99", "edited");
   const editCall = mock.calls.find(c => c.method === "edit");

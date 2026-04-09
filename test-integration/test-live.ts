@@ -531,7 +531,7 @@ async function run(): Promise<void> {
       await client.connect();
       await client.subscribe(["general"]);
 
-      const members = await admin.presence.getStream("general");
+      const members = await admin.chat.presence.getStream("general");
       assert(Array.isArray(members), "is array");
       const alice = members.find((m: any) => m.user_id === "alice");
       assert(alice !== undefined, "alice found");
@@ -541,12 +541,12 @@ async function run(): Promise<void> {
     });
 
     await test("admin: block/unblock user", async () => {
-      await admin.blocks.block("alice", "bob");
-      const blocked = await admin.blocks.list("alice");
+      await admin.chat.blocks.block("alice", "bob");
+      const blocked = await admin.chat.blocks.list("alice");
       assert(blocked.includes("bob"), "bob is blocked");
 
-      await admin.blocks.unblock("alice", "bob");
-      const after = await admin.blocks.list("alice");
+      await admin.chat.blocks.unblock("alice", "bob");
+      const after = await admin.chat.blocks.list("alice");
       assert(!after.includes("bob"), "bob unblocked");
     });
 
@@ -573,7 +573,7 @@ async function run(): Promise<void> {
       await bob.subscribe(["general"]);
 
       // Bob blocks alice — bob should not receive alice's events
-      await admin.blocks.block("bob", "alice");
+      await admin.chat.blocks.block("bob", "alice");
 
       // Alice publishes — bob should NOT receive it
       await alice.publish("general", "bob should not see this");
@@ -590,7 +590,7 @@ async function run(): Promise<void> {
       assert(!bobReceivedBlocked, "bob should NOT receive event while blocked");
 
       // Unblock alice
-      await admin.blocks.unblock("bob", "alice");
+      await admin.chat.blocks.unblock("bob", "alice");
 
       // Alice publishes again — bob SHOULD receive it
       const unblockEventPromise = waitForEvent<any>(bob, "event");
@@ -600,12 +600,6 @@ async function run(): Promise<void> {
 
       alice.disconnect();
       bob.disconnect();
-    });
-
-    await test("admin: chat namespace grouping works", async () => {
-      // admin.chat.presence and admin.chat.blocks should be the same instances
-      assert(admin.chat.presence === admin.presence, "chat.presence === presence");
-      assert(admin.chat.blocks === admin.blocks, "chat.blocks === blocks");
     });
 
     // ── Catchup pagination ────────────────────────────────────────

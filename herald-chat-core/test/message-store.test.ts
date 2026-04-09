@@ -293,14 +293,14 @@ test("applyDelete for unknown id is a no-op", () => {
   store.applyDelete({ stream: "s1", id: "nonexistent", seq: 1 });
 });
 
-test("edit after delete still applies", () => {
+test("edit after delete is rejected (tombstone guard)", () => {
   const { store } = makeStore();
   store.appendEvent(makeEvent({ id: "e1", seq: 1, stream: "s1", body: "orig" }));
   store.applyDelete({ stream: "s1", id: "e1", seq: 1 });
   store.applyEdit({ stream: "s1", id: "e1", seq: 1, body: "ghost edit", edited_at: 1 });
-  // Documents current behavior: edit still applies to deleted message
-  assert(store.getMessages("s1")[0].body === "ghost edit", "edit applies after delete");
+  assert(store.getMessages("s1")[0].body === "", "body stays empty");
   assert(store.getMessages("s1")[0].deleted === true, "still deleted");
+  assert(store.getMessages("s1")[0].editedAt === undefined, "no editedAt on tombstone");
 });
 
 // ── Reactions ──────────────────────────────────────────────────────

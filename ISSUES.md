@@ -112,6 +112,11 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`embed-engines`~~ | ~~N-1~~ | ~~In-process engines (Sentry/Courier/Chronicle), Chronicle v1.5 upgrade, audit query API~~ | **done** |
 | ~~`at-least-once`~~ | ~~N-2~~ | ~~Opt-in ack mode for at-least-once delivery~~ | **done** |
 | ~~`contract-tests`~~ | ~~N-3~~ | ~~Define spec + wire all 4 existing SDKs~~ | **done** |
+| ~~`sdk-hardening`~~ | ~~N-4~~ | ~~Error handling, incomplete features, missing tests across TS chat/admin packages~~ | **done** |
+| `chat-extensions` | N-5 | Ephemeral events, per-message delivery status, event middleware | |
+| `openapi` | S-1 | `utoipa` annotations → `openapi.yaml` from Rust handlers | |
+| `admin-codegen` | S-2 | Replace hand-rolled admin SDKs with generated + add PHP, C# | |
+| `mobile-sdks` | S-3 | Swift, Kotlin, Dart WS client SDKs (hand-rolled, WS not HTTP) | |
 | ~~`moat-clients`~~ | ~~—~~ | ~~shroudb crate updates for Moat prefix routing~~ | **superseded by N-1** |
 | ~~`audit-log`~~ | ~~—~~ | ~~Chronicle rip-out, skeptik-audit-log integration~~ | **superseded by N-1** |
 
@@ -222,6 +227,64 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Ruby admin SDK passes contract tests
   - [x] CI: contract tests run on SDK changes
 
+- [x] **N-4: SDK hardening** `session:sdk-hardening`
+  Audit found error handling gaps, incomplete features, and missing tests across the three TypeScript chat/admin packages. Fix everything before codegen replaces the admin SDK and before external consumption of chat packages.
+
+  **herald-admin-typescript**
+  - [x] Fix silent JSON parse failures — empty catch in transport masks real errors; throw or propagate
+  - [x] Complete HTTP error mapping — handle 400, 403, 409, 429, 500, 503 (not just 401/404)
+  - [x] Type `Promise<unknown>` methods — `connections()`, `adminEvents()`, `errors()`, `stats()` need typed responses
+  - [x] Migrate test-integration off deprecated top-level `presence`/`blocks` → `chat.*`, then remove
+  - [x] Add timeout configuration to `HeraldAdminOptions` (propagate to fetch via AbortSignal)
+  - [x] Contract tests still pass, CI green
+
+  **herald-chat-core**
+  - [x] Wire `scrollIdleMs` — debounce `autoMarkRead()` calls in `setAtLiveEdge()` and `handleEvent()` by the configured delay instead of firing immediately. Clear timer when user scrolls away from edge. Test: cursor not sent instantly, only after idle.
+  - [x] Wire `PendingMessage` — implement wrapper class delegating to existing `retrySend()`/`cancelSend()`, change `send()` return type from `Promise<string>` to `Promise<PendingMessage>`, update react hook
+  - [x] Fix `prependBatch` insertion — use binary insertion (O(n)) instead of `Array.sort` (O(n log n)), consistent with `appendEvent`
+  - [x] Guard edit-after-delete — reject body update if `deleted: true`
+  - [x] Make Notifier resilient — wrap each listener call in try/catch so one bad listener doesn't break the loop
+  - [x] Make `loadMore` limit configurable — accept as `ChatCoreOptions.loadMoreLimit`, default 50
+  - [x] Unit tests pass, no regressions
+
+  **herald-chat-react**
+  - [x] Add input validation — undefined `streamId` throws early with useful error
+  - [x] `send()` returns `PendingMessage` — consumers use status/retry/cancel instead of raw promises
+  - [x] Hook + component tests pass, CI green
+
+  **Cross-cutting**
+  - [x] Existing integration tests pass
+  - [x] All existing contract tests pass
+
+- [ ] **N-5: ChatCore completeness** `session:chat-extensions`
+  ChatCore handles the chat-generic transport/state layer but has gaps in features that any chat SDK is expected to provide. Specifically: ephemeral events are silently dropped, there's no per-message delivery status, and the event processing pipeline is closed (no middleware for consumers to layer domain logic on top). These are chat primitives, not application-specific features.
+
+  **Ephemeral event support**
+  - [ ] Register `event.received` handler — currently the only SDK event type ChatCore ignores
+  - [ ] Forward through middleware chain, then emit on `ephemeral:{streamId}` Notifier slice
+
+  **Lightweight stream subscriptions**
+  - [ ] Add `listen(streamId)` — subscribes to stream via the same transport, events flow through middleware and Notifier, but no stores initialized (no MessageStore, CursorStore, ScrollState overhead)
+  - [ ] Covers inbox/notification rooms (e.g. `user:{userId}`) without forcing consumers onto a separate raw HeraldClient. Same middleware chain, same Notifier slices
+  - [ ] `unlisten(streamId)` to unsubscribe. `leaveStream` remains for full-state streams
+
+  **Per-message read status**
+  - [ ] Extend `Message.status`: add `read` → `sending | sent | failed | read`
+  - [ ] Track remote cursors in CursorStore (`remoteCursors: Map<streamId, Map<userId, seq>>`). Wire `handleCursor` (currently a no-op) to update remote cursor positions
+  - [ ] When a remote cursor advances past a self-sent message's seq, flip that message's status to `read`. Reactive via Notifier
+  - [ ] Group chat semantics: `status = "read"` means "at least one remote user's cursor >= this seq." Consumers needing per-user granularity derive it from the remote cursor data in CursorStore directly
+  - [ ] No `delivered` state — Herald has no delivery receipt primitive (would require a new protocol frame). `sent` (server ack) is the strongest signal the transport provides
+
+  **Event middleware**
+  - [ ] Define `ChatEvent` discriminated union over all 10 event types (event, edited, deleted, reaction, presence, cursor, typing, member.joined, member.left, ephemeral)
+  - [ ] Add `middleware?: Array<(event: ChatEvent, next: () => void) => void>` to `ChatCoreOptions`
+  - [ ] `next()` applies the store mutation synchronously. Enrichment before `next()`, side-effects after. Skipping `next()` drops the event
+  - [ ] Middleware sees raw events, not computed effects. Cursor → read-status flips happen inside the store update. Consumers reacting to computed state changes (e.g. "message marked read") use Notifier `subscribe()`, not middleware
+
+  **Validation**
+  - [ ] Unit tests: ephemeral events forwarded, per-message status transitions (sent → read on remote cursor), middleware chain (enrich, skip, passthrough, ordering)
+  - [ ] Existing chat-core unit tests still pass (all additions are opt-in)
+
 ---
 
 ## COMPLETED
@@ -252,21 +315,44 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ---
 
-## DEFERRED — SDK expansion (not progressing Herald core)
+## NEXT — SDK codegen pipeline
 
-- [ ] **D-3: Mobile SDKs (Swift, Kotlin, Dart)** `session:one-per-sdk`
-  Blocks native mobile adoption.
-  - [ ] Swift WebSocket client SDK with reconnect, presence, cursors
-  - [ ] Kotlin WebSocket client SDK with reconnect, presence, cursors
-  - [ ] Dart/Flutter WebSocket client SDK with reconnect, presence, cursors
-  - [ ] E2EE support in each mobile SDK
-  - [ ] Integration test per SDK: connect, publish, receive, reconnect catchup
+Hand-rolling SDKs does not scale. Four admin SDKs already drift (the contract tests caught a dead `events.search` method on all four). Before adding mobile or server SDKs, the API surface must be machine-described and SDKs generated from a single source of truth.
 
-- [ ] **D-4: PHP / .NET admin SDKs** `session:together`
-  Expands addressable market to Laravel/WordPress and enterprise .NET.
-  - [ ] PHP admin SDK (zero-dependency, curl-based)
-  - [ ] C#/.NET admin SDK (HttpClient-based)
-  - [ ] Integration test per SDK: full tenant API coverage
+- [ ] **S-1: OpenAPI spec from Rust handlers** `session:openapi`
+  Add `utoipa` annotations to every HTTP handler in `herald-server/src/http/` and `herald-server/src/chat/`. Generate `openapi.yaml` as a build artifact. This becomes the single source of truth for the Herald HTTP API.
+  - [ ] Add `utoipa` and `utoipa-axum` dependencies to Cargo.toml
+  - [ ] Annotate all tenant-scoped endpoints (streams, members, events, trigger, presence, cursors, blocks)
+  - [ ] Annotate all admin endpoints (tenants, tokens, audit, connections, stats, errors)
+  - [ ] Annotate health/liveness/readiness/metrics endpoints
+  - [ ] Define request/response schemas via `ToSchema` derives or manual `utoipa::ToSchema` impls
+  - [ ] Serve `/openapi.json` endpoint (opt-in, behind feature flag)
+  - [ ] CI: generate `openapi.yaml` and commit to repo root as versioned artifact
+  - [ ] Validate generated spec against contract-tests/spec/spec.json (no endpoint drift)
+  - [ ] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
+
+- [ ] **S-2: Admin SDK codegen** `session:admin-codegen`
+  Replace hand-rolled admin SDKs with generated ones. Use openapi-generator (or a lighter alternative if openapi-generator output quality is unacceptable — evaluate during this session). Generated SDKs must pass the existing contract tests with zero behavioral diff.
+  - [ ] Evaluate codegen tooling: openapi-generator vs Kiota vs custom templates. Pick one.
+  - [ ] Define generator config + mustache/template overrides for Herald SDK style (namespaced clients, chat grouping, error types)
+  - [ ] Generate TypeScript admin SDK, diff against hand-rolled, pass contract tests
+  - [ ] Generate Go admin SDK, diff against hand-rolled, pass contract tests
+  - [ ] Generate Python admin SDK, diff against hand-rolled, pass contract tests
+  - [ ] Generate Ruby admin SDK, diff against hand-rolled, pass contract tests
+  - [ ] Generate PHP admin SDK, pass contract tests
+  - [ ] Generate C#/.NET admin SDK, pass contract tests
+  - [ ] CI: codegen runs on OpenAPI spec changes, generated code committed
+  - [ ] Remove hand-rolled admin SDK source (replaced by generated)
+  - [ ] Contract tests pass for all 6 admin SDKs
+
+- [ ] **S-3: Mobile client SDKs (Swift, Kotlin, Dart)** `session:mobile-sdks`
+  WebSocket client SDKs for native mobile. These are **not** admin SDKs (no codegen from OpenAPI — the WS protocol is not HTTP). Hand-rolled but informed by the WS frame spec in contract-tests/spec/spec.json.
+  - [ ] Swift WebSocket client SDK with reconnect, presence, cursors, ack mode
+  - [ ] Kotlin WebSocket client SDK with reconnect, presence, cursors, ack mode
+  - [ ] Dart/Flutter WebSocket client SDK with reconnect, presence, cursors, ack mode
+  - [ ] E2EE support in each mobile SDK (x25519 + AES-256-GCM, interop with TS/Go/Python/Ruby)
+  - [ ] Integration test per SDK: connect, subscribe, publish, receive, reconnect catchup, ack
+  - [ ] CI: type check / build each SDK
 
 ---
 

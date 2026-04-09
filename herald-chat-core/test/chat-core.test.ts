@@ -154,6 +154,7 @@ function makeCore(clientOpts?: MockClientOptions, coreOpts?: Partial<ChatCoreOpt
     client: client as unknown as HeraldClient,
     chat: chatClient as unknown as HeraldChatClient,
     userId: "me",
+    scrollIdleMs: 0, // disable debounce by default for test determinism
     ...coreOpts,
   });
   return { client, chatClient, core };
@@ -479,13 +480,14 @@ await test("send creates optimistic message, reconciles on ack", async () => {
   assert(msgs[0].body === "hello", "body");
   assert(msgs[0].sender === "me", "sender is userId");
 
-  const serverId = await promise;
-  assert(serverId.startsWith("srv_"), "server id");
+  const pending = await promise;
+  assert(pending.localId.startsWith("local:"), "has localId");
+  assert(pending.status === "sent", "status is sent after resolve");
 
   const after = core.getMessages("s1");
   assert(after.length === 1, "still 1 after reconcile");
   assert(after[0].status === "sent", "sent");
-  assert(after[0].id === serverId, "server id assigned");
+  assert(after[0].id.startsWith("srv_"), "server id assigned");
   assert(after[0].seq > 0, "seq assigned");
 
   // Verify publish was called with correct args
@@ -850,6 +852,150 @@ await test("getLivenessState returns active when no liveness configured", async 
   const { core } = makeCore();
   core.attach();
   assert(core.getLivenessState() === "active", "default active");
+  core.destroy();
+});
+
+// ── scrollIdleMs debounce ──────────────────────────────────────────
+
+await test("scrollIdleMs debounce: cursor not sent immediately", async () => {
+  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 100 });
+  core.attach();
+  await core.joinStream("s1");
+
+  // Publish an event while at live edge
+  client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
+
+  // Cursor should NOT have been sent yet (debounce pending)
+  assert(chatClient.cursorCalls.length === 0, "no cursor sent yet");
+
+  core.destroy();
+});
+
+await test("scrollIdleMs debounce: cursor sent after delay", async () => {
+  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 50 });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
+  assert(chatClient.cursorCalls.length === 0, "not sent immediately");
+
+  // Wait for debounce
+  await new Promise((r) => setTimeout(r, 80));
+  assert(chatClient.cursorCalls.length === 1, "cursor sent after delay");
+  assert(chatClient.cursorCalls[0].seq === 1, "correct seq");
+
+  core.destroy();
+});
+
+await test("scrollIdleMs debounce: scroll away cancels pending cursor", async () => {
+  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 100 });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
+  assert(chatClient.cursorCalls.length === 0, "not sent yet");
+
+  // Scroll away from live edge — should cancel the pending timer
+  core.setAtLiveEdge("s1", false);
+
+  // Wait longer than the debounce
+  await new Promise((r) => setTimeout(r, 150));
+  assert(chatClient.cursorCalls.length === 0, "cursor never sent after scroll-away");
+
+  core.destroy();
+});
+
+await test("scrollIdleMs debounce: rapid events coalesce into one cursor update", async () => {
+  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 50 });
+  core.attach();
+  await core.joinStream("s1");
+
+  // Rapid-fire 5 events
+  for (let i = 1; i <= 5; i++) {
+    client.emit("event", { id: `e${i}`, seq: i, stream: "s1", sender: "bob", body: `msg ${i}`, sent_at: i, meta: null });
+  }
+
+  // Wait for debounce
+  await new Promise((r) => setTimeout(r, 80));
+  // Should send only one cursor update for the latest seq
+  assert(chatClient.cursorCalls.length === 1, `expected 1 cursor call, got ${chatClient.cursorCalls.length}`);
+  assert(chatClient.cursorCalls[0].seq === 5, "cursor sent for latest seq");
+
+  core.destroy();
+});
+
+await test("scrollIdleMs: 0 fires cursor immediately (no debounce)", async () => {
+  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 0 });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
+  assert(chatClient.cursorCalls.length === 1, "cursor sent immediately");
+
+  core.destroy();
+});
+
+// ── PendingMessage interface ───────────────────────────────────────
+
+await test("PendingMessage: status reflects message state", async () => {
+  const { core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  const pending = await core.send("s1", "hello");
+  assert(pending.localId.startsWith("local:"), "has localId");
+  assert(pending.status === "sent", "status is sent after ack");
+});
+
+await test("PendingMessage: cancel removes the message", async () => {
+  const { core } = makeCore({ publishError: new Error("fail") });
+  core.attach();
+  await core.joinStream("s1");
+
+  let pending;
+  try {
+    pending = await core.send("s1", "hello");
+  } catch {
+    // Expected — send fails
+  }
+
+  // Message should be in failed state
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "failed msg in list");
+  assert(msgs[0].status === "failed", "status is failed");
+
+  // Cancel via the localId (from the failed message)
+  core.cancelSend(msgs[0].localId!);
+  assert(core.getMessages("s1").length === 0, "message removed after cancel");
+
+  core.destroy();
+});
+
+await test("PendingMessage: retry re-sends failed message", async () => {
+  // First send fails, retry succeeds
+  const { core } = makeCore({ publishError: new Error("fail") });
+  core.attach();
+  await core.joinStream("s1");
+
+  try { await core.send("s1", "hello"); } catch {}
+
+  const failedMsg = core.getMessages("s1")[0];
+  assert(failedMsg.status === "failed", "initially failed");
+  const failedLocalId = failedMsg.localId!;
+
+  // Now allow retry to succeed by creating a new core (simpler test)
+  // Instead, let's test the retry path is callable
+  try {
+    await core.retrySend(failedLocalId);
+  } catch {
+    // Expected to fail again since publishError is still set
+  }
+
+  // The old message should be replaced with a new optimistic
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "still 1 message");
+  assert(msgs[0].localId !== failedLocalId, "new localId after retry");
+
   core.destroy();
 });
 

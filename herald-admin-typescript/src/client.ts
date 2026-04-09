@@ -6,7 +6,14 @@ import { PresenceNamespace } from "./namespaces/presence.js";
 import { StreamNamespace } from "./namespaces/rooms.js";
 import { TenantNamespace } from "./namespaces/tenants.js";
 import { BlockNamespace } from "./namespaces/blocks.js";
-import type { HealthResponse } from "./types.js";
+import type {
+  AdminEventList,
+  AdminErrorList,
+  AdminStats,
+  ConnectionInfo,
+  HealthResponse,
+  TenantStats,
+} from "./types.js";
 
 export interface HeraldAdminOptions {
   /** Herald HTTP API URL, e.g. http://localhost:6201 */
@@ -15,6 +22,8 @@ export interface HeraldAdminOptions {
   token: string;
   /** Tenant ID for tenant-scoped namespaces (audit). */
   tenantId?: string;
+  /** Request timeout in milliseconds. Default 30000. */
+  timeoutMs?: number;
 }
 
 export interface AdminEventListOptions {
@@ -40,13 +49,6 @@ export class HeraldAdmin {
   public readonly tenants: TenantNamespace;
   public readonly audit: AuditNamespace | undefined;
 
-  // --- Chat namespaces (conversational layer) ---
-
-  /** @deprecated Use `chat.presence` instead. */
-  public readonly presence: PresenceNamespace;
-  /** @deprecated Use `chat.blocks` instead. */
-  public readonly blocks: BlockNamespace;
-
   /**
    * Chat-specific namespaces (conversational layer).
    * Groups presence and block operations that are part of the Herald Chat product.
@@ -59,14 +61,15 @@ export class HeraldAdmin {
   private transport: HttpTransport;
 
   constructor(options: HeraldAdminOptions) {
-    this.transport = new HttpTransport(options.url, options.token);
+    this.transport = new HttpTransport(options.url, options.token, options.timeoutMs);
     this.streams = new StreamNamespace(this.transport);
     this.members = new MemberNamespace(this.transport);
     this.events = new EventNamespace(this.transport);
-    this.presence = new PresenceNamespace(this.transport);
     this.tenants = new TenantNamespace(this.transport);
-    this.blocks = new BlockNamespace(this.transport);
-    this.chat = { presence: this.presence, blocks: this.blocks };
+    this.chat = {
+      presence: new PresenceNamespace(this.transport),
+      blocks: new BlockNamespace(this.transport),
+    };
     this.audit = options.tenantId
       ? new AuditNamespace(this.transport, options.tenantId)
       : undefined;
@@ -76,27 +79,31 @@ export class HeraldAdmin {
     return this.transport.request<HealthResponse>("GET", "/health");
   }
 
-  async connections(): Promise<unknown> {
-    return this.transport.request("GET", "/admin/connections");
+  async connections(): Promise<ConnectionInfo> {
+    return this.transport.request<ConnectionInfo>("GET", "/admin/connections");
   }
 
-  async adminEvents(opts?: AdminEventListOptions): Promise<unknown> {
+  async adminEvents(opts?: AdminEventListOptions): Promise<AdminEventList> {
     let path = "/admin/events";
     if (opts?.limit != null) {
       path += `?limit=${opts.limit}`;
     }
-    return this.transport.request("GET", path);
+    return this.transport.request<AdminEventList>("GET", path);
   }
 
-  async errors(opts?: ErrorListOptions): Promise<unknown> {
+  async errors(opts?: ErrorListOptions): Promise<AdminErrorList> {
     const params = new URLSearchParams();
     if (opts?.limit != null) params.set("limit", String(opts.limit));
     if (opts?.category) params.set("category", opts.category);
     const qs = params.toString();
-    return this.transport.request("GET", `/admin/errors${qs ? `?${qs}` : ""}`);
+    return this.transport.request<AdminErrorList>("GET", `/admin/errors${qs ? `?${qs}` : ""}`);
   }
 
-  async stats(): Promise<unknown> {
-    return this.transport.request("GET", "/admin/stats");
+  async stats(): Promise<AdminStats> {
+    return this.transport.request<AdminStats>("GET", "/admin/stats");
+  }
+
+  async tenantStats(): Promise<TenantStats> {
+    return this.transport.request<TenantStats>("GET", "/stats");
   }
 }

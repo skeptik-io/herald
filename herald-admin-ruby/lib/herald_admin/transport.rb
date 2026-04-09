@@ -35,16 +35,19 @@ module HeraldAdmin
 
       status = resp.code.to_i
       if status >= 400
-        code = "INTERNAL"
-        message = resp.body
+        http_codes = {
+          400 => "BAD_REQUEST", 401 => "UNAUTHORIZED", 403 => "FORBIDDEN",
+          404 => "NOT_FOUND", 409 => "CONFLICT", 429 => "RATE_LIMITED",
+          500 => "INTERNAL", 503 => "UNAVAILABLE"
+        }
+        code = http_codes.fetch(status, "INTERNAL")
+        message = "HTTP #{status}"
         begin
           data = JSON.parse(resp.body)
           message = data["error"] if data["error"]
         rescue JSON::ParserError
-          # raw text
+          message = resp.body if resp.body && !resp.body.empty?
         end
-        code = "UNAUTHORIZED" if status == 401
-        code = "NOT_FOUND" if status == 404
         raise HeraldError.new(code, message, status: status)
       end
 

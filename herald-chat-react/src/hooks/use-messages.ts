@@ -1,16 +1,17 @@
 import { useSyncExternalStore, useCallback } from "react";
-import type { Message } from "herald-chat";
+import type { Message, PendingMessage } from "herald-chat";
 import { useChatCore } from "../context.js";
 
 export interface UseMessagesReturn {
   messages: Message[];
-  send(body: string, opts?: { meta?: unknown; parentId?: string }): Promise<string>;
+  send(body: string, opts?: { meta?: unknown; parentId?: string }): Promise<PendingMessage>;
   edit(eventId: string, body: string): Promise<void>;
   deleteEvent(eventId: string): Promise<void>;
   loadMore(): Promise<boolean>;
 }
 
 export function useMessages(streamId: string): UseMessagesReturn {
+  if (!streamId) throw new Error("useMessages requires a streamId");
   const core = useChatCore();
 
   const messages = useSyncExternalStore(

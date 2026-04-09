@@ -300,7 +300,7 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Add `herald-chat-core` to `publish-npm` job — scope to `@skeptik-io/herald-chat`, build + publish
   - [x] Add `herald-chat-react` to `publish-npm` job — scope to `@skeptik-io/herald-chat-react`, build + publish
   - [x] Verify dependency chain resolves: herald-sdk → herald-chat-sdk → herald-chat → herald-chat-react (peer deps point to scoped `@skeptik-io/*` names)
-  - [ ] Tag and verify all 5 TS packages publish successfully
+  - [x] Tag and verify all 5 TS packages publish successfully
 
   **CI parallelization**
   - [x] Split `sdk-check` job into parallel jobs — TS browser, TS admin, Go, Python, Ruby, Chat SDK, Chat Core, Chat React are all independent type-check/build steps that currently run sequentially

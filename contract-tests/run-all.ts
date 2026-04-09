@@ -66,14 +66,16 @@ async function createTenantAndToken(): Promise<string> {
   const createRes = await fetch(`${base}/admin/tenants`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ id: "contract", name: "Contract Test Tenant" }),
+    body: JSON.stringify({ name: "Contract Test Tenant" }),
   });
   if (!createRes.ok && createRes.status !== 409) {
     throw new Error(`Failed to create tenant: ${createRes.status} ${await createRes.text()}`);
   }
+  const createBody = await createRes.json() as { id: string };
+  const tenantId = createBody.id;
 
   // Create an API token for the tenant
-  const tokenRes = await fetch(`${base}/admin/tenants/contract/tokens`, {
+  const tokenRes = await fetch(`${base}/admin/tenants/${tenantId}/tokens`, {
     method: "POST",
     headers,
     body: JSON.stringify({}),

@@ -151,8 +151,8 @@ class TenantNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def create(self, id: str, name: str, *, plan: str | None = None) -> dict[str, Any]:
-        body: dict[str, Any] = {"id": id, "name": name}
+    def create(self, name: str, *, plan: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"name": name}
         if plan is not None:
             body["plan"] = plan
         return self._t.request("POST", "/admin/tenants", body)

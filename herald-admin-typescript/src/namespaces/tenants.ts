@@ -14,7 +14,6 @@ export interface TenantWithSecret extends Tenant {
 }
 
 export interface CreateTenantOptions {
-  id: string;
   name: string;
   plan?: string;
 }

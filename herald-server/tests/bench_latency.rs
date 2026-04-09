@@ -110,17 +110,18 @@ impl BenchServer {
         let resp = client
             .post(format!("http://127.0.0.1:{port}/admin/tenants"))
             .bearer_auth(ADMIN_PASSWORD)
-            .json(&json!({"id": "bench", "name": "bench", "plan": "pro"}))
+            .json(&json!({"name": "bench", "plan": "pro"}))
             .send()
             .await
             .unwrap();
         let body: serde_json::Value = resp.json().await.unwrap();
+        let tenant_id = body["id"].as_str().unwrap().to_string();
         let key = body["key"].as_str().unwrap().to_string();
         let secret = body["secret"].as_str().unwrap().to_string();
 
         let resp = client
             .post(format!(
-                "http://127.0.0.1:{port}/admin/tenants/bench/tokens"
+                "http://127.0.0.1:{port}/admin/tenants/{tenant_id}/tokens"
             ))
             .bearer_auth(ADMIN_PASSWORD)
             .send()

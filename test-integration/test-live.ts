@@ -186,14 +186,13 @@ async function run(): Promise<void> {
 
     // Create a test tenant — returns key+secret
     const testTenant = await admin.tenants.create({
-      id: "test",
       name: "Integration Test Tenant",
     });
     tenantKey = testTenant.key;
     tenantSecret = testTenant.secret;
 
     // Create an API token for the test tenant so we can use tenant-scoped admin endpoints
-    const apiTokenResult = await admin.tenants.createToken("test");
+    const apiTokenResult = await admin.tenants.createToken(testTenant.id);
     const tenantAdmin = new HeraldAdmin({
       url: `http://127.0.0.1:${PORT}`,
       token: apiTokenResult.token,
@@ -1212,10 +1211,9 @@ retries = 1
 
     await test("mt: create tenant", async () => {
       createdTenant = await mtAdmin.tenants.create({
-        id: "acme",
         name: "Acme Corp",
       });
-      assert(createdTenant.id === "acme", `tenant id: ${createdTenant.id}`);
+      assert(typeof createdTenant.id === "string" && createdTenant.id.length > 0, `tenant id: ${createdTenant.id}`);
       assert(createdTenant.name === "Acme Corp", `tenant name: ${createdTenant.name}`);
       assert(createdTenant.plan === "free", `tenant plan: ${createdTenant.plan}`);
       assert(typeof createdTenant.key === "string" && createdTenant.key.length > 0, "tenant has key");
@@ -1223,8 +1221,8 @@ retries = 1
     });
 
     await test("mt: get tenant", async () => {
-      const tenant = await mtAdmin.tenants.get("acme");
-      assert(tenant.id === "acme", `id: ${tenant.id}`);
+      const tenant = await mtAdmin.tenants.get(createdTenant.id);
+      assert(tenant.id === createdTenant.id, `id: ${tenant.id}`);
       assert(tenant.name === "Acme Corp", `name: ${tenant.name}`);
       assert(tenant.plan === "free", `plan: ${tenant.plan}`);
       assert(typeof tenant.key === "string", "tenant has key field");
@@ -1233,28 +1231,27 @@ retries = 1
     await test("mt: list tenants", async () => {
       const tenants = await mtAdmin.tenants.list();
       assert(Array.isArray(tenants), "is array");
-      const acme = tenants.find((t: any) => t.id === "acme");
+      const acme = tenants.find((t: any) => t.id === createdTenant.id);
       assert(acme !== undefined, "acme tenant found in list");
       assert(acme!.name === "Acme Corp", `acme name: ${acme!.name}`);
     });
 
     await test("mt: update tenant name", async () => {
-      await mtAdmin.tenants.update("acme", { name: "Acme Industries" });
-      const tenant = await mtAdmin.tenants.get("acme");
+      await mtAdmin.tenants.update(createdTenant.id, { name: "Acme Industries" });
+      const tenant = await mtAdmin.tenants.get(createdTenant.id);
       assert(tenant.name === "Acme Industries", `updated name: ${tenant.name}`);
     });
 
     await test("mt: delete tenant", async () => {
       // Create a throwaway tenant to delete
-      await mtAdmin.tenants.create({
-        id: "deleteme",
+      const deleteTenant = await mtAdmin.tenants.create({
         name: "Delete Me",
       });
-      await mtAdmin.tenants.delete("deleteme");
+      await mtAdmin.tenants.delete(deleteTenant.id);
 
       let notFound = false;
       try {
-        await mtAdmin.tenants.get("deleteme");
+        await mtAdmin.tenants.get(deleteTenant.id);
       } catch (e: any) {
         notFound = e.statusCode === 404 || e.code === "NOT_FOUND" || /not.found/i.test(e.message);
       }
@@ -1265,7 +1262,7 @@ retries = 1
 
     await test("mt: webhook receives published event with valid HMAC", async () => {
       // Create an API token for the acme tenant so we can use the tenant API
-      const tokenResult = await mtAdmin.tenants.createToken("acme");
+      const tokenResult = await mtAdmin.tenants.createToken(createdTenant.id);
       const acmeToken = tokenResult.token;
 
       const acmeAdmin = new HeraldAdmin({
@@ -1319,10 +1316,9 @@ retries = 1
     await test("mt: purge tenant data removes all keys", async () => {
       // Create a tenant with streams, events, and members
       const purgeTenant = await mtAdmin.tenants.create({
-        id: "purge-corp",
         name: "Purge Corp",
       });
-      const tokenResult = await mtAdmin.tenants.createToken("purge-corp");
+      const tokenResult = await mtAdmin.tenants.createToken(purgeTenant.id);
       const purgeAdmin = new HeraldAdmin({
         url: `http://127.0.0.1:${PORT2}`,
         token: tokenResult.token,
@@ -1333,7 +1329,7 @@ retries = 1
       await purgeAdmin.events.publish("purge-stream", "alice", "test event 2");
 
       // Purge tenant data
-      const resp = await fetch(`http://127.0.0.1:${PORT2}/admin/tenants/purge-corp/data`, {
+      const resp = await fetch(`http://127.0.0.1:${PORT2}/admin/tenants/${purgeTenant.id}/data`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` },
       });
@@ -1344,7 +1340,7 @@ retries = 1
       // Verify tenant no longer exists
       let notFound = false;
       try {
-        await mtAdmin.tenants.get("purge-corp");
+        await mtAdmin.tenants.get(purgeTenant.id);
       } catch {
         notFound = true;
       }
@@ -1354,10 +1350,9 @@ retries = 1
     await test("mt: purge user events removes only that user's data", async () => {
       // Create a fresh tenant for this test
       const upTenant = await mtAdmin.tenants.create({
-        id: "user-purge-corp",
         name: "User Purge Corp",
       });
-      const tokenResult = await mtAdmin.tenants.createToken("user-purge-corp");
+      const tokenResult = await mtAdmin.tenants.createToken(upTenant.id);
       const upAdmin = new HeraldAdmin({
         url: `http://127.0.0.1:${PORT2}`,
         token: tokenResult.token,
@@ -1393,13 +1388,14 @@ retries = 1
 
     // ── Audit query tests ──────────────────────────────────────
 
+    let auditTenant: any;
+
     await test("mt: audit query returns events for tenant operations", async () => {
       // Create a tenant that will generate audit events
-      const auditTenant = await mtAdmin.tenants.create({
-        id: "audit-corp",
+      auditTenant = await mtAdmin.tenants.create({
         name: "Audit Corp",
       });
-      const tokenResult = await mtAdmin.tenants.createToken("audit-corp");
+      const tokenResult = await mtAdmin.tenants.createToken(auditTenant.id);
 
       // Perform some operations to generate audit events
       const auditAdmin = new HeraldAdmin({
@@ -1414,7 +1410,7 @@ retries = 1
 
       // Query audit log for this tenant
       const resp = await fetch(
-        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit`,
+        `http://127.0.0.1:${PORT2}/admin/tenants/${auditTenant.id}/audit`,
         { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `audit query should succeed, got ${resp.status}`);
@@ -1432,7 +1428,7 @@ retries = 1
 
     await test("mt: audit count returns count for tenant", async () => {
       const resp = await fetch(
-        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit/count`,
+        `http://127.0.0.1:${PORT2}/admin/tenants/${auditTenant.id}/audit/count`,
         { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `audit count should succeed, got ${resp.status}`);
@@ -1443,7 +1439,7 @@ retries = 1
 
     await test("mt: audit query with operation filter", async () => {
       const resp = await fetch(
-        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit?operation=stream.create`,
+        `http://127.0.0.1:${PORT2}/admin/tenants/${auditTenant.id}/audit?operation=stream.create`,
         { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `filtered audit query should succeed, got ${resp.status}`);
@@ -1460,21 +1456,21 @@ retries = 1
     await test("mt: audit query tenant isolation", async () => {
       // Query audit for a different tenant — should return no audit-corp events
       const resp = await fetch(
-        `http://127.0.0.1:${PORT2}/admin/tenants/test-corp/audit`,
+        `http://127.0.0.1:${PORT2}/admin/tenants/${createdTenant.id}/audit`,
         { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `cross-tenant audit query should succeed, got ${resp.status}`);
       const body = (await resp.json()) as any;
       // Should not contain audit-corp events
       const hasCrossLeak = body.events.some(
-        (e: any) => e.tenant_id === "audit-corp",
+        (e: any) => e.tenant_id === auditTenant.id,
       );
       assert(!hasCrossLeak, "tenant A audit should not contain tenant B events");
     });
 
     await test("mt: audit captures all admin operations", async () => {
       const resp = await fetch(
-        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit?limit=100`,
+        `http://127.0.0.1:${PORT2}/admin/tenants/${auditTenant.id}/audit?limit=100`,
         { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `audit query should succeed`);

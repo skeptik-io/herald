@@ -6,8 +6,8 @@ module HeraldAdmin
       @t = transport
     end
 
-    def create(id, name, plan: nil)
-      body = { id: id, name: name }
+    def create(name, plan: nil)
+      body = { name: name }
       body[:plan] = plan if plan
       @t.request("POST", "/admin/tenants", body)
     end

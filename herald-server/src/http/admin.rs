@@ -19,7 +19,6 @@ use crate::ws::connection::now_millis;
 
 #[derive(Deserialize)]
 pub struct CreateTenantRequest {
-    pub id: String,
     pub name: String,
     #[serde(default)]
     pub plan: Option<String>,
@@ -37,25 +36,14 @@ pub async fn create_tenant(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTenantRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = validation::validate_id(&req.id, "tenant id") {
-        return (*e).into_response();
-    }
     if let Err(e) = validation::validate_name(&req.name, "tenant name") {
         return (*e).into_response();
     }
 
-    // Check for existing tenant before insert (KV put is upsert)
-    if let Ok(Some(_)) = store::tenants::get(&*state.db, &req.id).await {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "failed to create tenant"})),
-        )
-            .into_response();
-    }
-
+    let id = uuid::Uuid::new_v4().to_string();
     let (key, secret) = store::tenants::generate_tenant_credentials();
     let tenant = Tenant {
-        id: req.id,
+        id,
         name: req.name,
         key: key.clone(),
         secret: secret.clone(),

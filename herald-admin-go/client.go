@@ -420,8 +420,8 @@ func (h *HeraldAdmin) Stats(ctx context.Context) (json.RawMessage, error) {
 // TenantNamespace provides tenant management operations via /admin/tenants.
 type TenantNamespace struct{ t *httpTransport }
 
-func (ns *TenantNamespace) Create(ctx context.Context, id, name string, plan *string) (*CreateTenantResponse, error) {
-	body := map[string]string{"id": id, "name": name}
+func (ns *TenantNamespace) Create(ctx context.Context, name string, plan *string) (*CreateTenantResponse, error) {
+	body := map[string]string{"name": name}
 	if plan != nil {
 		body["plan"] = *plan
 	}

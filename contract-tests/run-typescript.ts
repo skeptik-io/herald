@@ -13,16 +13,19 @@ import {
   type TestCase,
 } from "./validate.js";
 
-const url = process.env.HERALD_URL || "http://127.0.0.1:16301";
-const apiToken = process.env.HERALD_API_TOKEN || "contract-api-token-1234";
-const adminToken = process.env.HERALD_ADMIN_TOKEN || "contract-admin-token";
-
-const client = new HeraldAdmin({ url, token: apiToken, tenantId: "default" });
-const admin = new HeraldAdmin({ url, token: adminToken, tenantId: "default" });
-
+let client: HeraldAdmin;
 let passed = 0;
 let failed = 0;
 const saved: Record<string, unknown> = {};
+
+function initClient(): void {
+  const url = process.env.HERALD_URL || "http://127.0.0.1:16300";
+  const apiToken = process.env.HERALD_API_TOKEN;
+  if (!apiToken) {
+    throw new Error("HERALD_API_TOKEN is required — run via run-all.ts or set it manually");
+  }
+  client = new HeraldAdmin({ url, token: apiToken, tenantId: "default" });
+}
 
 async function executeOperation(op: string, input: Record<string, unknown>): Promise<unknown> {
   switch (op) {
@@ -167,6 +170,7 @@ async function runCase(tc: TestCase): Promise<void> {
 }
 
 export async function run(): Promise<{ passed: number; failed: number }> {
+  initClient();
   const spec = await loadSpec();
   console.log(`\n  TypeScript Admin SDK Contract Tests (${spec.groups.reduce((n, g) => n + g.cases.length, 0)} cases)`);
   console.log("  " + "─".repeat(50));

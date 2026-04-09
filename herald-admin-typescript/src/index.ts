@@ -5,7 +5,7 @@ export { StreamNamespace } from "./namespaces/rooms.js";
 export { MemberNamespace } from "./namespaces/members.js";
 export { EventNamespace } from "./namespaces/messages.js";
 export { PresenceNamespace } from "./namespaces/presence.js";
-export { TenantNamespace, type Tenant, type CreateTenantOptions, type ApiToken } from "./namespaces/tenants.js";
+export { TenantNamespace, type Tenant, type TenantWithSecret, type CreateTenantOptions, type ApiToken } from "./namespaces/tenants.js";
 export { BlockNamespace } from "./namespaces/blocks.js";
 export type {
   Stream,

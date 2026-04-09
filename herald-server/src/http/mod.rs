@@ -6,12 +6,14 @@ pub mod health;
 pub mod members;
 #[cfg(not(feature = "chat"))]
 pub mod presence;
+pub mod self_service;
 pub mod streams;
 pub mod validation;
 
 use std::sync::Arc;
 
 use crate::state::{AppState, RateLimitEntry};
+use base64::Engine;
 use subtle::ConstantTimeEq;
 
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -151,6 +153,21 @@ pub fn router(state: Arc<AppState>) -> Router {
             admin_auth_middleware,
         ));
 
+    let self_api = Router::new()
+        .route("/self/connections", get(self_service::list_connections))
+        .route("/self/events", get(self_service::list_events))
+        .route("/self/events/stream", get(self_service::events_stream))
+        .route("/self/errors", get(self_service::list_errors))
+        .route("/self/secret/rotate", post(self_service::rotate_secret))
+        .route("/self/tokens", post(self_service::create_token))
+        .route("/self/tokens", get(self_service::list_tokens))
+        .route("/self/tokens/{token}", delete(self_service::delete_token))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            tenant_auth_middleware,
+        ));
+
     let cors = if let Some(ref cors_config) = state.config.cors {
         if cors_config.allowed_origins.iter().any(|o| o == "*") {
             CorsLayer::permissive()
@@ -173,6 +190,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(tenant_api)
         .merge(admin_api)
+        .merge(self_api)
         .route("/health", get(health::health))
         .route("/health/live", get(health::liveness))
         .route("/health/ready", get(health::readiness))
@@ -234,7 +252,7 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     response
 }
 
-/// Tenant API auth: validates bearer token against api_tokens table, extracts tenant_id.
+/// Tenant API auth: accepts Basic (key:secret) or Bearer (API token).
 async fn tenant_auth_middleware(
     State(state): State<Arc<AppState>>,
     mut req: Request,
@@ -245,28 +263,83 @@ async fn tenant_auth_middleware(
         .get("authorization")
         .and_then(|v| v.to_str().ok());
 
-    let token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => &h[7..],
-        _ => {
+    let auth_header = match auth_header {
+        Some(h) => h,
+        None => {
             return (StatusCode::UNAUTHORIZED, "missing authorization header").into_response();
         }
     };
 
-    // Look up token in DB to find tenant
-    let (tenant_id, scope) = match crate::store::tenants::validate_token(&*state.db, token).await {
-        Ok(Some(api_token)) => (api_token.tenant_id, api_token.scope),
-        Ok(None) => {
-            return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-        }
-        Err(e) => {
-            tracing::error!("token validation error: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
-        }
-    };
+    // Try Basic auth (key:secret)
+    if let Some(encoded) = auth_header.strip_prefix("Basic ") {
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
+            Ok(d) => d,
+            Err(_) => {
+                return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+            }
+        };
+        let decoded_str = match String::from_utf8(decoded) {
+            Ok(s) => s,
+            Err(_) => {
+                return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+            }
+        };
+        let (key, provided_secret) = match decoded_str.split_once(':') {
+            Some((k, s)) => (k.to_string(), s.to_string()),
+            None => {
+                return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+            }
+        };
 
-    req.extensions_mut().insert(TenantId(tenant_id));
-    req.extensions_mut().insert(TokenScope(scope));
-    next.run(req).await
+        // Look up key → tenant_id
+        let tenant_id = match state.key_cache.get(&key) {
+            Some(tid) => tid.clone(),
+            None => {
+                return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+            }
+        };
+
+        // Verify secret (constant-time)
+        let expected_secret = match state.tenant_cache.get(&tenant_id) {
+            Some(tc) => tc.secret.clone(),
+            None => {
+                return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+            }
+        };
+        if provided_secret
+            .as_bytes()
+            .ct_eq(expected_secret.as_bytes())
+            .unwrap_u8()
+            != 1
+        {
+            return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+        }
+
+        req.extensions_mut().insert(TenantId(tenant_id));
+        req.extensions_mut().insert(TokenScope(None));
+        return next.run(req).await;
+    }
+
+    // Try Bearer auth (API token)
+    if let Some(token) = auth_header.strip_prefix("Bearer ") {
+        let (tenant_id, scope) =
+            match crate::store::tenants::validate_token(&*state.db, token).await {
+                Ok(Some(api_token)) => (api_token.tenant_id, api_token.scope),
+                Ok(None) => {
+                    return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+                }
+                Err(e) => {
+                    tracing::error!("token validation error: {e}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+                }
+            };
+
+        req.extensions_mut().insert(TenantId(tenant_id));
+        req.extensions_mut().insert(TokenScope(scope));
+        return next.run(req).await;
+    }
+
+    (StatusCode::UNAUTHORIZED, "invalid authorization header").into_response()
 }
 
 /// Per-tenant HTTP API rate limiter (fixed-window, 60s).
@@ -345,7 +418,7 @@ async fn scope_check_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Admin API auth: validates against super_admin_token in config.
+/// Admin API auth: validates against server password in config.
 async fn admin_auth_middleware(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -363,9 +436,9 @@ async fn admin_auth_middleware(
         }
     };
 
-    let super_token = state.config.auth.super_admin_token.as_deref().unwrap_or("");
-    if super_token.is_empty() || token.as_bytes().ct_eq(super_token.as_bytes()).unwrap_u8() != 1 {
-        return (StatusCode::UNAUTHORIZED, "invalid admin token").into_response();
+    let password = state.config.auth.password.as_deref().unwrap_or("");
+    if password.is_empty() || token.as_bytes().ct_eq(password.as_bytes()).unwrap_u8() != 1 {
+        return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
     }
 
     next.run(req).await

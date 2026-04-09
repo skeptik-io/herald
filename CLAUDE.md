@@ -24,10 +24,10 @@ All must pass before any push. Also run `cargo build --no-default-features` and 
 
 - **Herald is not a ShroudB engine.** Standalone project. Uses ShroudB crates (storage, store, engine crates) as dependencies.
 - **No external database.** Storage is ShroudB WAL (`shroudb-storage`). Encrypted at rest. Master key from `SHROUDB_MASTER_KEY` env var.
-- **Multi-tenant by default.** Every store key is `{tenant_id}/...`. Every registry uses `(tenant_id, stream_id)` composite keys. JWT must include `tenant` claim.
+- **Multi-tenant by default.** Every store key is `{tenant_id}/...`. Every registry uses `(tenant_id, stream_id)` composite keys. A default tenant is auto-created on first start.
 - **Event body is opaque.** Herald stores and delivers event bodies as-is. No server-side encryption, decryption, indexing, or search. Consumers handle their own encryption and search.
 - **Sentry for authorization.** Embedded (in-process) or Remote (TCP with circuit breaker). Fail-open when circuit trips.
-- **Single-tenant DX.** `--single-tenant` (default) auto-creates a `default` tenant from config-level `jwt_secret` and `api.tokens`. No admin API needed.
+- **HMAC-SHA256 token auth.** No JWT. Tenants use a key+secret model. WebSocket auth via query params (`/ws?key=...&token=...&user_id=...&streams=...`). Admin API uses `auth.password` as bearer token.
 - **No unwrap on fallible ops in production.** Use `?`, `if let`, or `match`. Mocks in `integrations/mod.rs` may use `lock().unwrap()`.
 - **Circuit breakers on all remote calls.** 5 failures → open, 30s cooldown. Sentry fail-open (permit when circuit trips).
 - **Latency instrumented.** Event pipeline stages (store, fanout) have Prometheus histograms. Check `/metrics`.
@@ -50,5 +50,5 @@ Tests use `EphemeralKey` (random master key per test) and `tempfile` directories
 ## Ecosystem
 
 - **ShroudB Sentry** — ABAC authorization (embedded or remote)
-- **ShroudB Sigil** — standalone tenant user auth service (signup, login, JWT sessions). Not embedded in Herald — runs separately.
+- **ShroudB Sigil** — standalone tenant user auth service (signup, login, sessions). Not embedded in Herald — runs separately.
 - **Meterd** (`/Users/nlucas/dev/skeptik/meterd/`) — MAU tracking, quota enforcement, Stripe billing. Runs at the proxy layer via Envoy ExtProc, not embedded in Herald.

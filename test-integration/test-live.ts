@@ -8,7 +8,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, createHmac } from "node:crypto";
-import jwt from "jsonwebtoken";
 
 import { HeraldClient } from "herald-sdk";
 import { HeraldChatClient } from "herald-chat-sdk";
@@ -35,15 +34,55 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 // ── Server lifecycle ───────────────────────────────────────────────
 
-const WS_PORT = 16200;
-const HTTP_PORT = 16201;
+const PORT = 16200;
 const MASTER_KEY = randomBytes(32).toString("hex");
-const JWT_SECRET = "integration-test-secret";
-const ADMIN_TOKEN = "super-admin-test-token";
-const API_TOKEN = "api-test-token-12345678";
+const ADMIN_PASSWORD = "integration-test-admin-password";
 
 let serverProcess: ChildProcess | null = null;
 let dataDir: string;
+
+// Tenant key+secret — populated after server starts via admin API
+let tenantKey = "";
+let tenantSecret = "";
+
+/**
+ * Compute HMAC-SHA256 token for WebSocket auth.
+ * Signature covers "user_id:sorted_streams:sorted_watchlist" using the tenant secret.
+ */
+function mintSignedToken(
+  secret: string,
+  userId: string,
+  streams: string[],
+  watchlist: string[] = [],
+): string {
+  const sortedStreams = [...streams].sort().join(",");
+  const sortedWatchlist = [...watchlist].sort().join(",");
+  const message = `${userId}:${sortedStreams}:${sortedWatchlist}`;
+  return createHmac("sha256", secret).update(message).digest("hex");
+}
+
+/**
+ * Build a connected HeraldClient for the given user + streams.
+ */
+function makeClient(
+  userId: string,
+  streams: string[],
+  opts?: { ackMode?: boolean; watchlist?: string[]; secret?: string },
+): HeraldClient {
+  const secret = opts?.secret ?? tenantSecret;
+  const watchlist = opts?.watchlist ?? [];
+  const token = mintSignedToken(secret, userId, streams, watchlist);
+  return new HeraldClient({
+    url: `ws://127.0.0.1:${PORT}/ws`,
+    key: tenantKey,
+    token,
+    userId,
+    streams,
+    watchlist: watchlist.length > 0 ? watchlist : undefined,
+    reconnect: { enabled: false },
+    ackMode: opts?.ackMode,
+  });
+}
 
 async function startServer(): Promise<void> {
   dataDir = await mkdtemp(join(tmpdir(), "herald-test-"));
@@ -51,8 +90,7 @@ async function startServer(): Promise<void> {
   const configPath = join(dataDir, "herald.toml");
   const config = `
 [server]
-ws_bind = "127.0.0.1:${WS_PORT}"
-http_bind = "127.0.0.1:${HTTP_PORT}"
+bind = "127.0.0.1:${PORT}"
 log_level = "error"
 shutdown_timeout_secs = 1
 api_rate_limit = 10000
@@ -63,11 +101,7 @@ ws_max_message_size = 65536
 path = "${join(dataDir, "data")}"
 
 [auth]
-jwt_secret = "${JWT_SECRET}"
-super_admin_token = "${ADMIN_TOKEN}"
-
-[auth.api]
-tokens = ["${API_TOKEN}"]
+password = "${ADMIN_PASSWORD}"
 
 [presence]
 linger_secs = 0
@@ -78,7 +112,7 @@ manual_override_ttl_secs = 14400
   const binaryPath = join(process.cwd(), "..", "target", "release", "herald");
 
   return new Promise((resolve, reject) => {
-    serverProcess = spawn(binaryPath, ["--single-tenant", configPath], {
+    serverProcess = spawn(binaryPath, [configPath], {
       env: { ...process.env, SHROUDB_MASTER_KEY: MASTER_KEY },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -98,7 +132,7 @@ manual_override_ttl_secs = 14400
     const check = setInterval(async () => {
       attempts++;
       try {
-        const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/health`);
+        const resp = await fetch(`http://127.0.0.1:${PORT}/health`);
         if (resp.ok) {
           clearInterval(check);
           resolve();
@@ -125,14 +159,6 @@ async function stopServer(): Promise<void> {
   try { await rm(dataDir, { recursive: true, force: true }); } catch {}
 }
 
-function mintJwt(userId: string, streams: string[]): string {
-  return jwt.sign(
-    { sub: userId, tenant: "default", streams, iss: "test" },
-    JWT_SECRET,
-    { expiresIn: "1h" },
-  );
-}
-
 function waitForEvent<T>(client: HeraldClient, event: string, timeoutMs = 5000): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`timeout waiting for ${event}`)), timeoutMs);
@@ -151,24 +177,39 @@ async function run(): Promise<void> {
   console.log("Server started.\n");
 
   try {
-    // ── Setup: create stream and add member via admin HTTP API ────
+    // ── Setup: create a test tenant via admin API to get key+secret ──
 
     const admin = new HeraldAdmin({
-      url: `http://127.0.0.1:${HTTP_PORT}`,
-      token: API_TOKEN,
+      url: `http://127.0.0.1:${PORT}`,
+      token: ADMIN_PASSWORD,
+    });
+
+    // Create a test tenant — returns key+secret
+    const testTenant = await admin.tenants.create({
+      id: "test",
+      name: "Integration Test Tenant",
+    });
+    tenantKey = testTenant.key;
+    tenantSecret = testTenant.secret;
+
+    // Create an API token for the test tenant so we can use tenant-scoped admin endpoints
+    const apiTokenResult = await admin.tenants.createToken("test");
+    const tenantAdmin = new HeraldAdmin({
+      url: `http://127.0.0.1:${PORT}`,
+      token: apiTokenResult.token,
     });
 
     await test("admin: create stream", async () => {
-      await admin.streams.create("general", "General");
-      const stream = await admin.streams.get("general");
+      await tenantAdmin.streams.create("general", "General");
+      const stream = await tenantAdmin.streams.get("general");
       assert(stream.id === "general", `stream id: ${stream.id}`);
       assert(stream.name === "General", `stream name: ${stream.name}`);
     });
 
     await test("admin: add members", async () => {
-      await admin.members.add("general", "alice");
-      await admin.members.add("general", "bob");
-      const members = await admin.members.list("general");
+      await tenantAdmin.members.add("general", "alice");
+      await tenantAdmin.members.add("general", "bob");
+      const members = await tenantAdmin.members.list("general");
       assert(members.length === 2, `expected 2 members, got ${members.length}`);
       const userIds = members.map((m: any) => m.user_id).sort();
       assert(userIds.includes("alice"), "alice is a member");
@@ -178,12 +219,7 @@ async function run(): Promise<void> {
     // ── Core SDK: connect, subscribe, publish, receive ───────────
 
     await test("core: connect and subscribe", async () => {
-      const token = mintJwt("alice", ["general"]);
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-      });
+      const client = makeClient("alice", ["general"]);
       await client.connect();
       assert(client.connected === true, "connected");
 
@@ -196,19 +232,8 @@ async function run(): Promise<void> {
     });
 
     await test("core: publish and receive event", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -236,12 +261,7 @@ async function run(): Promise<void> {
     });
 
     await test("core: fetch events history", async () => {
-      const token = mintJwt("alice", ["general"]);
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-      });
+      const client = makeClient("alice", ["general"]);
       await client.connect();
       await client.subscribe(["general"]);
 
@@ -256,19 +276,8 @@ async function run(): Promise<void> {
     });
 
     await test("core: ephemeral trigger", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -288,20 +297,9 @@ async function run(): Promise<void> {
     // ── Chat SDK: edit, delete, reactions, cursors, presence, typing ──
 
     await test("chat: edit event", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       const aliceChat = new HeraldChatClient(alice);
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -322,20 +320,9 @@ async function run(): Promise<void> {
     });
 
     await test("chat: delete event", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       const aliceChat = new HeraldChatClient(alice);
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -353,20 +340,9 @@ async function run(): Promise<void> {
     });
 
     await test("chat: reactions round-trip", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       const aliceChat = new HeraldChatClient(alice);
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -375,10 +351,10 @@ async function run(): Promise<void> {
 
       const ack = await alice.publish("general", "react to this");
       const reactionPromise = waitForEvent<any>(bob, "reaction.changed");
-      aliceChat.addReaction("general", ack.id, "🔥");
+      aliceChat.addReaction("general", ack.id, "\u{1F525}");
       const reaction = await reactionPromise;
       assert(reaction.event_id === ack.id, `event_id: ${reaction.event_id}`);
-      assert(reaction.emoji === "🔥", `emoji: ${reaction.emoji}`);
+      assert(reaction.emoji === "\u{1F525}", `emoji: ${reaction.emoji}`);
       assert(reaction.user_id === "alice", `user_id: ${reaction.user_id}`);
       assert(reaction.action === "add", `action: ${reaction.action}`);
 
@@ -387,20 +363,9 @@ async function run(): Promise<void> {
     });
 
     await test("chat: typing indicators round-trip", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       const aliceChat = new HeraldChatClient(alice);
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -424,20 +389,9 @@ async function run(): Promise<void> {
     });
 
     await test("chat: cursor update round-trip", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       const aliceChat = new HeraldChatClient(alice);
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -456,20 +410,9 @@ async function run(): Promise<void> {
     });
 
     await test("chat: presence round-trip", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       const aliceChat = new HeraldChatClient(alice);
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -489,7 +432,7 @@ async function run(): Promise<void> {
     // ── Admin SDK: HTTP API round-trip ────────────────────────────
 
     await test("admin: list streams", async () => {
-      const streams = await admin.streams.list();
+      const streams = await tenantAdmin.streams.list();
       assert(Array.isArray(streams), "is array");
       assert(streams.length >= 1, `expected >=1, got ${streams.length}`);
       const general = streams.find((s: any) => s.id === "general");
@@ -498,18 +441,18 @@ async function run(): Promise<void> {
     });
 
     await test("admin: publish event via HTTP", async () => {
-      const result = await admin.events.publish("general", "server-bot", "Hello from admin");
+      const result = await tenantAdmin.events.publish("general", "server-bot", "Hello from admin");
       assert(typeof result.id === "string", "has id");
       assert(result.seq > 0, "has seq");
 
-      const events = await admin.events.list("general");
+      const events = await tenantAdmin.events.list("general");
       const published = events.events.find((e: any) => e.body === "Hello from admin");
       assert(published !== undefined, "published event found in list");
       assert(published!.sender === "server-bot", `sender: ${published!.sender}`);
     });
 
     await test("admin: list events", async () => {
-      const events = await admin.events.list("general");
+      const events = await tenantAdmin.events.list("general");
       assert(events.events.length >= 1, `expected >=1, got ${events.events.length}`);
       const first = events.events[0];
       assert(!!first.body, "first event has body");
@@ -522,16 +465,11 @@ async function run(): Promise<void> {
 
     await test("admin: presence query", async () => {
       // Connect a user so they show up in presence
-      const token = mintJwt("alice", ["general"]);
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-      });
+      const client = makeClient("alice", ["general"]);
       await client.connect();
       await client.subscribe(["general"]);
 
-      const members = await admin.chat.presence.getStream("general");
+      const members = await tenantAdmin.chat.presence.getStream("general");
       assert(Array.isArray(members), "is array");
       const alice = members.find((m: any) => m.user_id === "alice");
       assert(alice !== undefined, "alice found");
@@ -541,31 +479,20 @@ async function run(): Promise<void> {
     });
 
     await test("admin: block/unblock user", async () => {
-      await admin.chat.blocks.block("alice", "bob");
-      const blocked = await admin.chat.blocks.list("alice");
+      await tenantAdmin.chat.blocks.block("alice", "bob");
+      const blocked = await tenantAdmin.chat.blocks.list("alice");
       assert(blocked.includes("bob"), "bob is blocked");
 
-      await admin.chat.blocks.unblock("alice", "bob");
-      const after = await admin.chat.blocks.list("alice");
+      await tenantAdmin.chat.blocks.unblock("alice", "bob");
+      const after = await tenantAdmin.chat.blocks.list("alice");
       assert(!after.includes("bob"), "bob unblocked");
     });
 
     await test("chat: blocked user does not receive events", async () => {
       // Block semantics: block(blocker, blocked) means the blocker won't see
       // the blocked user's messages. So bob blocks alice => bob won't see alice's events.
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -573,7 +500,7 @@ async function run(): Promise<void> {
       await bob.subscribe(["general"]);
 
       // Bob blocks alice — bob should not receive alice's events
-      await admin.chat.blocks.block("bob", "alice");
+      await tenantAdmin.chat.blocks.block("bob", "alice");
 
       // Alice publishes — bob should NOT receive it
       await alice.publish("general", "bob should not see this");
@@ -590,7 +517,7 @@ async function run(): Promise<void> {
       assert(!bobReceivedBlocked, "bob should NOT receive event while blocked");
 
       // Unblock alice
-      await admin.chat.blocks.unblock("bob", "alice");
+      await tenantAdmin.chat.blocks.unblock("bob", "alice");
 
       // Alice publishes again — bob SHOULD receive it
       const unblockEventPromise = waitForEvent<any>(bob, "event");
@@ -606,23 +533,18 @@ async function run(): Promise<void> {
 
     await test("core: paginated fetch retrieves all events beyond catchup limit", async () => {
       // Create a dedicated stream for this test to avoid interference
-      await admin.streams.create("catchup-test", "Catchup Test");
-      await admin.members.add("catchup-test", "alice");
+      await tenantAdmin.streams.create("catchup-test", "Catchup Test");
+      await tenantAdmin.members.add("catchup-test", "alice");
 
       // Publish 250 events (exceeds the 200-event catchup limit)
       const publishedIds: string[] = [];
       for (let i = 1; i <= 250; i++) {
-        const r = await admin.events.publish("catchup-test", "bot", `event-${i}`);
+        const r = await tenantAdmin.events.publish("catchup-test", "bot", `event-${i}`);
         publishedIds.push(r.id);
       }
 
       // Connect alice and use paginated fetch with `after` to retrieve ALL events
-      const aliceToken = mintJwt("alice", ["catchup-test"]);
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["catchup-test"]);
       await alice.connect();
       await alice.subscribe(["catchup-test"]);
 
@@ -663,12 +585,7 @@ async function run(): Promise<void> {
     await test("core: paginated catchup preserves event ordering", async () => {
       // Use the events from the previous test. Connect and fetch all events
       // via the `after` parameter manually to verify ordering.
-      const aliceToken = mintJwt("alice", ["catchup-test"]);
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["catchup-test"]);
       await alice.connect();
       await alice.subscribe(["catchup-test"]);
 
@@ -707,7 +624,7 @@ async function run(): Promise<void> {
     // ── Trace propagation ─────────────────────────────────────────
 
     await test("core: HTTP response includes traceparent header", async () => {
-      const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/health`);
+      const resp = await fetch(`http://127.0.0.1:${PORT}/health`);
       const traceparent = resp.headers.get("traceparent");
       assert(traceparent !== null, "response should include traceparent header");
       // W3C format: version-trace_id-span_id-flags (e.g. 00-abc123...-def456...-01)
@@ -718,7 +635,7 @@ async function run(): Promise<void> {
 
     await test("core: traceparent is propagated from request", async () => {
       const incomingTp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-      const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/health`, {
+      const resp = await fetch(`http://127.0.0.1:${PORT}/health`, {
         headers: { traceparent: incomingTp },
       });
       const returnedTp = resp.headers.get("traceparent");
@@ -728,12 +645,7 @@ async function run(): Promise<void> {
     // ── WS message size limit ─────────────────────────────────────
 
     await test("core: WS rejects oversized message", async () => {
-      const token = mintJwt("alice", ["general"]);
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-      });
+      const client = makeClient("alice", ["general"]);
       await client.connect();
       await client.subscribe(["general"]);
 
@@ -754,12 +666,7 @@ async function run(): Promise<void> {
     });
 
     await test("core: WS accepts message at body limit", async () => {
-      const token = mintJwt("alice", ["general"]);
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-      });
+      const client = makeClient("alice", ["general"]);
       await client.connect();
       await client.subscribe(["general"]);
 
@@ -774,17 +681,12 @@ async function run(): Promise<void> {
     // ── Error cases ──────────────────────────────────────────────
 
     await test("core: subscribe to unauthorized stream errors", async () => {
-      const token = mintJwt("alice", ["general"]);
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-      });
+      const client = makeClient("alice", ["general"]);
       await client.connect();
 
       let errorReceived = false;
       client.on("error", () => { errorReceived = true; });
-      // "secret" stream is not in the JWT claims
+      // "secret" stream is not in the signed token claims
       try {
         await client.subscribe(["secret"]);
       } catch {
@@ -801,17 +703,12 @@ async function run(): Promise<void> {
 
     await test("core: reconnect catchup receives missed events", async () => {
       // 1) Connect alice, subscribe, receive one event so lastSeenAt is set
-      const aliceToken = mintJwt("alice", ["general"]);
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       await alice.connect();
       await alice.subscribe(["general"]);
 
       // Publish one event so alice has a baseline lastSeenAt
-      const baseline = await admin.events.publish("general", "server-bot", "baseline event");
+      const baseline = await tenantAdmin.events.publish("general", "server-bot", "baseline event");
       assert(baseline.seq > 0, "baseline published");
 
       // Give alice time to receive it
@@ -823,16 +720,12 @@ async function run(): Promise<void> {
       // 3) Publish 3 events while alice is offline
       const ids: string[] = [];
       for (let i = 1; i <= 3; i++) {
-        const r = await admin.events.publish("general", "server-bot", `offline-event-${i}`);
+        const r = await tenantAdmin.events.publish("general", "server-bot", `offline-event-${i}`);
         ids.push(r.id);
       }
 
       // 4) Reconnect alice and fetch events — should include the 3 missed ones
-      const alice2 = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice2 = makeClient("alice", ["general"]);
       await alice2.connect();
       await alice2.subscribe(["general"]);
 
@@ -846,17 +739,16 @@ async function run(): Promise<void> {
       alice2.disconnect();
     });
 
-    // ── JWT auth failure ────────────────────────────────────────
+    // ── Auth failure ────────────────────────────────────────────
 
-    await test("auth: invalid JWT (wrong secret) is rejected", async () => {
-      const badToken = jwt.sign(
-        { sub: "mallory", tenant: "default", streams: ["general"], iss: "test" },
-        "wrong-secret-key",
-        { expiresIn: "1h" },
-      );
+    await test("auth: invalid token (wrong secret) is rejected", async () => {
+      const badToken = mintSignedToken("wrong-secret-key", "mallory", ["general"]);
       const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        url: `ws://127.0.0.1:${PORT}/ws`,
+        key: tenantKey,
         token: badToken,
+        userId: "mallory",
+        streams: ["general"],
         reconnect: { enabled: false },
       });
 
@@ -866,20 +758,19 @@ async function run(): Promise<void> {
       } catch (e: any) {
         authFailed = true;
       }
-      assert(authFailed, "connection with bad JWT should fail");
+      assert(authFailed, "connection with bad token should fail");
       client.disconnect();
     });
 
-    await test("auth: expired JWT is rejected", async () => {
-      // Manually set exp to 1 hour in the past to be well outside any leeway
-      const now = Math.floor(Date.now() / 1000);
-      const expiredToken = jwt.sign(
-        { sub: "mallory", tenant: "default", streams: ["general"], iss: "test", iat: now - 7200, exp: now - 3600 },
-        JWT_SECRET,
-      );
+    await test("auth: invalid key is rejected", async () => {
+      const badKey = "nonexistent-key-12345";
+      const token = mintSignedToken(tenantSecret, "mallory", ["general"]);
       const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: expiredToken,
+        url: `ws://127.0.0.1:${PORT}/ws`,
+        key: badKey,
+        token,
+        userId: "mallory",
+        streams: ["general"],
         reconnect: { enabled: false },
       });
 
@@ -889,21 +780,19 @@ async function run(): Promise<void> {
       } catch (e: any) {
         authFailed = true;
       }
-      assert(authFailed, "connection with expired JWT should fail");
+      assert(authFailed, "connection with bad key should fail");
       client.disconnect();
     });
 
-    // ── Multi-tenant isolation (single-tenant mode) ─────────────
-
-    await test("auth: non-default tenant is rejected in single-tenant mode", async () => {
-      const wrongTenantToken = jwt.sign(
-        { sub: "mallory", tenant: "other-corp", streams: ["general"], iss: "test" },
-        JWT_SECRET,
-        { expiresIn: "1h" },
-      );
+    await test("auth: tampered streams in token is rejected", async () => {
+      // Sign token for ["general"] but connect claiming ["general", "secret"]
+      const token = mintSignedToken(tenantSecret, "mallory", ["general"]);
       const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: wrongTenantToken,
+        url: `ws://127.0.0.1:${PORT}/ws`,
+        key: tenantKey,
+        token,
+        userId: "mallory",
+        streams: ["general", "secret"],
         reconnect: { enabled: false },
       });
 
@@ -913,20 +802,20 @@ async function run(): Promise<void> {
       } catch (e: any) {
         authFailed = true;
       }
-      assert(authFailed, "non-default tenant should be rejected in single-tenant mode");
+      assert(authFailed, "connection with tampered streams should fail");
       client.disconnect();
     });
 
     // ── Rate limiting ───────────────────────────────────────────
 
     await test("admin: rapid HTTP requests (rate limiting check)", async () => {
-      // Default api_rate_limit is 100 per 60s. /health is outside the rate-limited
+      // Default api_rate_limit is 10000. /health is outside the rate-limited
       // router, so we hit /streams (tenant API) which goes through rate limiting.
-      // Send 120 requests to exceed the limit of 100.
-      const headers = { Authorization: `Bearer ${API_TOKEN}` };
+      // Send 120 requests to check behavior.
+      const headers = { Authorization: `Bearer ${apiTokenResult.token}` };
       const results = await Promise.allSettled(
         Array.from({ length: 120 }, () =>
-          fetch(`http://127.0.0.1:${HTTP_PORT}/streams`, { headers })
+          fetch(`http://127.0.0.1:${PORT}/streams`, { headers })
         ),
       );
 
@@ -949,7 +838,7 @@ async function run(): Promise<void> {
         // so we document rather than hard-fail.
         assert(count200 === 120, `all 120 requests succeeded (window timing — rate limiting not triggered)`);
         // NOTE: This does not mean rate limiting is broken. The fixed-window
-        // counter may have reset mid-burst. The limit (100/60s) is confirmed
+        // counter may have reset mid-burst. The limit is confirmed
         // by reading server config defaults.
       }
     });
@@ -957,20 +846,9 @@ async function run(): Promise<void> {
     // ── Reaction remove ─────────────────────────────────────────
 
     await test("chat: reaction remove round-trip", async () => {
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
       const aliceChat = new HeraldChatClient(alice);
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
       await bob.connect();
@@ -980,17 +858,17 @@ async function run(): Promise<void> {
       // Publish event and add a reaction
       const ack = await alice.publish("general", "react then unreact");
       const addPromise = waitForEvent<any>(bob, "reaction.changed");
-      aliceChat.addReaction("general", ack.id, "👍");
+      aliceChat.addReaction("general", ack.id, "\u{1F44D}");
       const added = await addPromise;
       assert(added.action === "add", `add action: ${added.action}`);
-      assert(added.emoji === "👍", `add emoji: ${added.emoji}`);
+      assert(added.emoji === "\u{1F44D}", `add emoji: ${added.emoji}`);
 
       // Now remove the reaction
       const removePromise = waitForEvent<any>(bob, "reaction.changed");
-      aliceChat.removeReaction("general", ack.id, "👍");
+      aliceChat.removeReaction("general", ack.id, "\u{1F44D}");
       const removed = await removePromise;
       assert(removed.event_id === ack.id, `remove event_id: ${removed.event_id}`);
-      assert(removed.emoji === "👍", `remove emoji: ${removed.emoji}`);
+      assert(removed.emoji === "\u{1F44D}", `remove emoji: ${removed.emoji}`);
       assert(removed.user_id === "alice", `remove user_id: ${removed.user_id}`);
       assert(removed.action === "remove", `remove action: ${removed.action}`);
 
@@ -998,27 +876,13 @@ async function run(): Promise<void> {
       bob.disconnect();
     });
 
-    // ── Webhook delivery ────────────────────────────────────────
-    // Tested below in multi-tenant section.
-
     // ── Error cases ──────────────────────────────────────────────
 
     await test("chat: edit someone else's event succeeds without Sentry (fail-open)", async () => {
       // Without Sentry configured, authorize() returns Ok (fail-open).
       // Bob CAN edit Alice's message. This test documents that behavior.
-      const aliceToken = mintJwt("alice", ["general"]);
-      const bobToken = mintJwt("bob", ["general"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
-      const bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["general"]);
+      const bob = makeClient("bob", ["general"]);
       const bobChat = new HeraldChatClient(bob);
 
       await alice.connect();
@@ -1043,19 +907,13 @@ async function run(): Promise<void> {
     // ── At-least-once delivery ──────────────────────────────────────
 
     await test("admin: create ack-test stream", async () => {
-      await admin.streams.create("ack-test", "Ack Test Stream");
-      await admin.members.add("ack-test", "alice");
-      await admin.members.add("ack-test", "bob");
+      await tenantAdmin.streams.create("ack-test", "Ack Test Stream");
+      await tenantAdmin.members.add("ack-test", "alice");
+      await tenantAdmin.members.add("ack-test", "bob");
     });
 
     await test("ack-mode: basic connect and subscribe", async () => {
-      const token = mintJwt("alice", ["ack-test"]);
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-        ackMode: true,
-      });
+      const client = makeClient("alice", ["ack-test"], { ackMode: true });
       await client.connect();
       assert(client.connected, "ack-mode client connected");
       const payloads = await client.subscribe(["ack-test"]);
@@ -1073,23 +931,11 @@ async function run(): Promise<void> {
     });
 
     await test("ack-mode: redelivery on reconnect after partial ack", async () => {
-      const aliceToken = mintJwt("alice", ["ack-test"]);
-      const bobToken = mintJwt("bob", ["ack-test"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["ack-test"]);
       await alice.connect();
       await alice.subscribe(["ack-test"]);
 
-      let bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-        ackMode: true,
-      });
+      let bob = makeClient("bob", ["ack-test"], { ackMode: true });
       await bob.connect();
       await bob.subscribe(["ack-test"]);
 
@@ -1124,12 +970,7 @@ async function run(): Promise<void> {
       }
 
       // Bob reconnects with ack_mode.
-      bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-        ackMode: true,
-      });
+      bob = makeClient("bob", ["ack-test"], { ackMode: true });
 
       const reconnectEvents: any[] = [];
       bob.on("event", (evt: any) => {
@@ -1163,27 +1004,15 @@ async function run(): Promise<void> {
 
     await test("ack-mode: no duplicate delivery when all events acked", async () => {
       // Use a dedicated stream to avoid interference from previous test
-      await admin.streams.create("ack-nodup", "Ack No-Dup Test");
-      await admin.members.add("ack-nodup", "alice");
-      await admin.members.add("ack-nodup", "bob");
+      await tenantAdmin.streams.create("ack-nodup", "Ack No-Dup Test");
+      await tenantAdmin.members.add("ack-nodup", "alice");
+      await tenantAdmin.members.add("ack-nodup", "bob");
 
-      const aliceToken = mintJwt("alice", ["ack-nodup"]);
-      const bobToken = mintJwt("bob", ["ack-nodup"]);
-
-      const alice = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: aliceToken,
-        reconnect: { enabled: false },
-      });
+      const alice = makeClient("alice", ["ack-nodup"]);
       await alice.connect();
       await alice.subscribe(["ack-nodup"]);
 
-      let bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-        ackMode: true,
-      });
+      let bob = makeClient("bob", ["ack-nodup"], { ackMode: true });
       await bob.connect();
       await bob.subscribe(["ack-nodup"]);
 
@@ -1212,12 +1041,7 @@ async function run(): Promise<void> {
       bob.disconnect();
       await new Promise((r) => setTimeout(r, 1000));
 
-      bob = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token: bobToken,
-        reconnect: { enabled: false },
-        ackMode: true,
-      });
+      bob = makeClient("bob", ["ack-nodup"], { ackMode: true });
 
       const reconnectEvents: any[] = [];
       bob.on("event", (evt: any) => {
@@ -1239,14 +1063,8 @@ async function run(): Promise<void> {
     });
 
     await test("ack-mode: backwards compatible — non-ack client still works", async () => {
-      const token = mintJwt("alice", ["ack-test"]);
-
       // Connect WITHOUT ack_mode (legacy timestamp-based catchup)
-      const client = new HeraldClient({
-        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
-        token,
-        reconnect: { enabled: false },
-      });
+      const client = makeClient("alice", ["ack-test"]);
       await client.connect();
       await client.subscribe(["ack-test"]);
 
@@ -1258,7 +1076,7 @@ async function run(): Promise<void> {
     });
 
   } finally {
-    console.log("\nStopping single-tenant server...");
+    console.log("\nStopping server...");
     await stopServer();
   }
 
@@ -1266,10 +1084,9 @@ async function run(): Promise<void> {
   // Multi-tenant tests: tenant CRUD + webhook delivery
   // ══════════════════════════════════════════════════════════════
 
-  const WS_PORT2 = 16210;
-  const HTTP_PORT2 = 16211;
+  const PORT2 = 16210;
   const WEBHOOK_SECRET = "test-webhook-secret";
-  const SUPER_ADMIN_TOKEN = "test-super-admin-token";
+  const ADMIN_PASSWORD2 = "test-mt-admin-password";
 
   // Webhook listener — collects received payloads
   const webhookPayloads: Array<{ body: string; headers: Record<string, string> }> = [];
@@ -1310,8 +1127,7 @@ async function run(): Promise<void> {
     const configPath = join(mtDataDir, "herald.toml");
     const config = `
 [server]
-ws_bind = "127.0.0.1:${WS_PORT2}"
-http_bind = "127.0.0.1:${HTTP_PORT2}"
+bind = "127.0.0.1:${PORT2}"
 log_level = "error"
 shutdown_timeout_secs = 1
 
@@ -1319,7 +1135,7 @@ shutdown_timeout_secs = 1
 path = "${join(mtDataDir, "data")}"
 
 [auth]
-super_admin_token = "${SUPER_ADMIN_TOKEN}"
+password = "${ADMIN_PASSWORD2}"
 
 [presence]
 linger_secs = 0
@@ -1335,7 +1151,7 @@ retries = 1
     const binaryPath = join(process.cwd(), "..", "target", "release", "herald");
 
     return new Promise((resolve, reject) => {
-      mtProcess = spawn(binaryPath, ["--multi-tenant", configPath], {
+      mtProcess = spawn(binaryPath, [configPath], {
         env: { ...process.env, SHROUDB_MASTER_KEY: MASTER_KEY },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1354,7 +1170,7 @@ retries = 1
       const check = setInterval(async () => {
         attempts++;
         try {
-          const resp = await fetch(`http://127.0.0.1:${HTTP_PORT2}/health`);
+          const resp = await fetch(`http://127.0.0.1:${PORT2}/health`);
           if (resp.ok) {
             clearInterval(check);
             resolve();
@@ -1387,8 +1203,8 @@ retries = 1
 
   try {
     const mtAdmin = new HeraldAdmin({
-      url: `http://127.0.0.1:${HTTP_PORT2}`,
-      token: SUPER_ADMIN_TOKEN,
+      url: `http://127.0.0.1:${PORT2}`,
+      token: ADMIN_PASSWORD2,
     });
 
     // ── Tenant CRUD ─────────────────────────────────────────────
@@ -1399,11 +1215,12 @@ retries = 1
       createdTenant = await mtAdmin.tenants.create({
         id: "acme",
         name: "Acme Corp",
-        jwt_secret: "acme-jwt-secret-for-testing-1234",
       });
       assert(createdTenant.id === "acme", `tenant id: ${createdTenant.id}`);
       assert(createdTenant.name === "Acme Corp", `tenant name: ${createdTenant.name}`);
       assert(createdTenant.plan === "free", `tenant plan: ${createdTenant.plan}`);
+      assert(typeof createdTenant.key === "string" && createdTenant.key.length > 0, "tenant has key");
+      assert(typeof createdTenant.secret === "string" && createdTenant.secret.length > 0, "tenant has secret");
     });
 
     await test("mt: get tenant", async () => {
@@ -1411,8 +1228,7 @@ retries = 1
       assert(tenant.id === "acme", `id: ${tenant.id}`);
       assert(tenant.name === "Acme Corp", `name: ${tenant.name}`);
       assert(tenant.plan === "free", `plan: ${tenant.plan}`);
-      // jwt_issuer is present in the response (null when not set)
-      assert("jwt_issuer" in (tenant as any), "jwt_issuer field exists");
+      assert(typeof tenant.key === "string", "tenant has key field");
     });
 
     await test("mt: list tenants", async () => {
@@ -1434,7 +1250,6 @@ retries = 1
       await mtAdmin.tenants.create({
         id: "deleteme",
         name: "Delete Me",
-        jwt_secret: "deleteme-secret-for-testing-1234",
       });
       await mtAdmin.tenants.delete("deleteme");
 
@@ -1455,7 +1270,7 @@ retries = 1
       const acmeToken = tokenResult.token;
 
       const acmeAdmin = new HeraldAdmin({
-        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        url: `http://127.0.0.1:${PORT2}`,
         token: acmeToken,
       });
 
@@ -1504,14 +1319,13 @@ retries = 1
 
     await test("mt: purge tenant data removes all keys", async () => {
       // Create a tenant with streams, events, and members
-      await mtAdmin.tenants.create({
+      const purgeTenant = await mtAdmin.tenants.create({
         id: "purge-corp",
         name: "Purge Corp",
-        jwt_secret: "purge-secret-1234",
       });
       const tokenResult = await mtAdmin.tenants.createToken("purge-corp");
       const purgeAdmin = new HeraldAdmin({
-        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        url: `http://127.0.0.1:${PORT2}`,
         token: tokenResult.token,
       });
       await purgeAdmin.streams.create("purge-stream", "Purge Stream");
@@ -1520,9 +1334,9 @@ retries = 1
       await purgeAdmin.events.publish("purge-stream", "alice", "test event 2");
 
       // Purge tenant data
-      const resp = await fetch(`http://127.0.0.1:${HTTP_PORT2}/admin/tenants/purge-corp/data`, {
+      const resp = await fetch(`http://127.0.0.1:${PORT2}/admin/tenants/purge-corp/data`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` },
+        headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` },
       });
       assert(resp.ok, `purge should succeed, got ${resp.status}`);
       const body = await resp.json() as any;
@@ -1540,14 +1354,13 @@ retries = 1
 
     await test("mt: purge user events removes only that user's data", async () => {
       // Create a fresh tenant for this test
-      await mtAdmin.tenants.create({
+      const upTenant = await mtAdmin.tenants.create({
         id: "user-purge-corp",
         name: "User Purge Corp",
-        jwt_secret: "up-secret-1234",
       });
       const tokenResult = await mtAdmin.tenants.createToken("user-purge-corp");
       const upAdmin = new HeraldAdmin({
-        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        url: `http://127.0.0.1:${PORT2}`,
         token: tokenResult.token,
       });
       await upAdmin.streams.create("chat-room", "Chat Room");
@@ -1561,7 +1374,7 @@ retries = 1
 
       // Purge alice's data from this stream
       const resp = await fetch(
-        `http://127.0.0.1:${HTTP_PORT2}/streams/chat-room/events?user_id=alice`,
+        `http://127.0.0.1:${PORT2}/streams/chat-room/events?user_id=alice`,
         {
           method: "DELETE",
           headers: { Authorization: `Bearer ${tokenResult.token}` },
@@ -1583,16 +1396,15 @@ retries = 1
 
     await test("mt: audit query returns events for tenant operations", async () => {
       // Create a tenant that will generate audit events
-      await mtAdmin.tenants.create({
+      const auditTenant = await mtAdmin.tenants.create({
         id: "audit-corp",
         name: "Audit Corp",
-        jwt_secret: "audit-secret-1234",
       });
       const tokenResult = await mtAdmin.tenants.createToken("audit-corp");
 
       // Perform some operations to generate audit events
       const auditAdmin = new HeraldAdmin({
-        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        url: `http://127.0.0.1:${PORT2}`,
         token: tokenResult.token,
       });
       await auditAdmin.streams.create("audit-stream", "Audit Stream");
@@ -1603,8 +1415,8 @@ retries = 1
 
       // Query audit log for this tenant
       const resp = await fetch(
-        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit`,
-        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit`,
+        { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `audit query should succeed, got ${resp.status}`);
       const body = (await resp.json()) as any;
@@ -1621,8 +1433,8 @@ retries = 1
 
     await test("mt: audit count returns count for tenant", async () => {
       const resp = await fetch(
-        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit/count`,
-        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit/count`,
+        { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `audit count should succeed, got ${resp.status}`);
       const body = (await resp.json()) as any;
@@ -1632,8 +1444,8 @@ retries = 1
 
     await test("mt: audit query with operation filter", async () => {
       const resp = await fetch(
-        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit?operation=stream.create`,
-        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit?operation=stream.create`,
+        { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `filtered audit query should succeed, got ${resp.status}`);
       const body = (await resp.json()) as any;
@@ -1649,8 +1461,8 @@ retries = 1
     await test("mt: audit query tenant isolation", async () => {
       // Query audit for a different tenant — should return no audit-corp events
       const resp = await fetch(
-        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/test-corp/audit`,
-        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+        `http://127.0.0.1:${PORT2}/admin/tenants/test-corp/audit`,
+        { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `cross-tenant audit query should succeed, got ${resp.status}`);
       const body = (await resp.json()) as any;
@@ -1663,8 +1475,8 @@ retries = 1
 
     await test("mt: audit captures all admin operations", async () => {
       const resp = await fetch(
-        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit?limit=100`,
-        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+        `http://127.0.0.1:${PORT2}/admin/tenants/audit-corp/audit?limit=100`,
+        { headers: { Authorization: `Bearer ${ADMIN_PASSWORD2}` } },
       );
       assert(resp.ok, `audit query should succeed`);
       const body = (await resp.json()) as any;

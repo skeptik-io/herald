@@ -231,8 +231,12 @@ end
 
 def main
   spec = load_spec
-  url = ENV["HERALD_URL"] || "http://127.0.0.1:16301"
-  api_token = ENV["HERALD_API_TOKEN"] || "contract-api-token-1234"
+  url = ENV["HERALD_URL"] || "http://127.0.0.1:16300"
+  api_token = ENV["HERALD_API_TOKEN"]
+  unless api_token
+    warn "HERALD_API_TOKEN is required — run via run-all.ts or set it manually"
+    exit 1
+  end
 
   client = HeraldAdmin::Client.new(url: url, token: api_token, tenant_id: "default")
   saved = {}

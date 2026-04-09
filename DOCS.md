@@ -5,14 +5,14 @@
 ### Binary
 
 ```
-herald [--single-tenant|--multi-tenant] [config-path]
+herald [config-path]
 ```
 
-| Flag | Default | Description |
+| Argument | Default | Description |
 |---|---|---|
-| `--single-tenant` | yes | Auto-creates a `default` tenant from config |
-| `--multi-tenant` | no | Tenants managed via admin API. Requires `auth.super_admin_token`. |
 | `config-path` | `herald.toml` | Path to TOML configuration file |
+
+A default tenant is auto-created on first start.
 
 **Environment variables:**
 - `SHROUDB_MASTER_KEY` — 64-character hex string (32 bytes). Required for WAL storage.
@@ -23,8 +23,7 @@ herald [--single-tenant|--multi-tenant] [config-path]
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `ws_bind` | string | `0.0.0.0:6200` | WebSocket listen address |
-| `http_bind` | string | `0.0.0.0:6201` | HTTP API listen address |
+| `bind` | string | `0.0.0.0:6200` | Listen address (single port for HTTP + WebSocket) |
 | `log_level` | string | `info` | `trace`, `debug`, `info`, `warn`, `error` |
 | `max_events_per_sec` | u32 | `10` | Per-connection WS event rate limit |
 | `api_rate_limit` | u32 | `100` | HTTP API requests per minute |
@@ -41,15 +40,8 @@ herald [--single-tenant|--multi-tenant] [config-path]
 
 | Key | Type | Required | Description |
 |---|---|---|---|
-| `jwt_secret` | string | single-tenant | HMAC-SHA256 secret for default tenant JWT validation |
-| `jwt_issuer` | string | no | Required JWT `iss` claim for default tenant |
-| `super_admin_token` | string | multi-tenant | Bearer token for `/admin/*` endpoints |
-
-#### `[auth.api]`
-
-| Key | Type | Description |
-|---|---|---|
-| `tokens` | string[] | Bearer tokens for default tenant (single-tenant mode) |
+| `password` | string | yes | Server admin password — used as bearer token for `/admin/*` endpoints |
+| `token_window_secs` | u64 | no | HMAC token validity window in seconds |
 
 #### `[presence]`
 
@@ -89,26 +81,32 @@ When `[shroudb]` is absent, engines run embedded (in-process) using the same sto
 
 ---
 
-## JWT Claims
+## WebSocket Auth
 
-| Claim | Type | Required | Description |
-|---|---|---|---|
-| `sub` | string | yes | User ID |
-| `tenant` | string | yes | Tenant ID |
-| `streams` | string[] | yes | Stream IDs the user may subscribe to |
-| `exp` | number | yes | Expiration (Unix seconds) |
-| `iat` | number | yes | Issued-at |
-| `iss` | string | no | Issuer (validated against tenant config) |
-| `watchlist` | string[] | no | User IDs to track online/offline status |
+WebSocket auth uses HMAC-SHA256 signed tokens (key+secret model). No JWT.
+
+### Connection
+
+Connect via query params:
+
+```
+wss://herald.example.com/ws?key=<tenant_key>&token=<hmac_token>&user_id=<user>&streams=stream1,stream2
+```
+
+| Param | Description |
+|---|---|
+| `key` | Tenant key (auto-generated on tenant creation) |
+| `token` | HMAC-SHA256 signed token (generated client-side using tenant secret) |
+| `user_id` | User identifier |
+| `streams` | Comma-separated stream IDs to authorize |
+
+The token is validated on WebSocket upgrade. No in-frame `auth` event is needed.
 
 ---
 
 ## WebSocket Protocol
 
-WebSocket is available at two endpoints:
-
-- **`/ws` on the HTTP port** (primary) — use this behind reverse proxies and in Docker. Browsers connect to `wss://your-domain/ws`. TLS is terminated by the proxy.
-- **Standalone WS port** (advanced) — direct TCP connections. Configure with `ws_bind`. Use when Herald terminates TLS itself via `[tls]` config, or on private networks.
+Single port (default `:6200`). WebSocket upgrade at `/ws`. JSON text frames only.
 
 JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 
@@ -116,8 +114,6 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 
 | Type | Payload | Description |
 |---|---|---|
-| `auth` | `{token, last_seen_at?}` | Authenticate (required within 5s) |
-| `auth.refresh` | `{token}` | Refresh JWT without reconnecting |
 | `subscribe` | `{streams: []}` | Subscribe to streams |
 | `unsubscribe` | `{streams: []}` | Unsubscribe |
 | `event.publish` | `{stream, body, meta?, parent_id?}` | Send a event |
@@ -134,7 +130,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 
 | Type | Payload | Description |
 |---|---|---|
-| `auth_ok` | `{user_id, connection_id, server_time, heartbeat_interval}` | Auth success |
+| `auth_ok` | `{user_id, connection_id, server_time, heartbeat_interval}` | Auth success (sent after upgrade) |
 | `auth_error` | `{code, event}` | Auth failure |
 | `subscribed` | `{stream, members, cursor, latest_seq}` | Stream joined |
 | `event.new` | `{stream, id, seq, sender, body, meta?, sent_at}` | New event |
@@ -149,7 +145,7 @@ JSON text frames. Envelope: `{"type": "...", "ref": "...", "payload": {...}}`
 | `watchlist.offline` | `{user_ids: []}` | Watched users went offline |
 | `reaction.changed` | `{stream, event_id, emoji, user_id, action}` | Reaction added/removed (`action`: `"add"` or `"remove"`) |
 | `stream.subscriber_count` | `{stream, count}` | Stream subscriber count changed |
-| `system.token_expiring` | `{expires_at}` | JWT expiring in 60s |
+| `system.token_expiring` | `{expires_at}` | Token expiring in 60s |
 | `error` | `{code, event}` | Error |
 
 ### Ephemeral Events
@@ -167,13 +163,15 @@ Ephemeral events do not trigger webhooks and do not affect event history or sequ
 
 ### Error Codes
 
-`TOKEN_EXPIRED`, `TOKEN_INVALID`, `UNAUTHORIZED`, `NOT_SUBSCRIBED`, `ROOM_NOT_FOUND`, `RATE_LIMITED`, `BAD_REQUEST`, `INTERNAL`
+`TOKEN_EXPIRED`, `TOKEN_INVALID`, `UNAUTHORIZED`, `NOT_SUBSCRIBED`, `STREAM_NOT_FOUND`, `RATE_LIMITED`, `BAD_REQUEST`, `INTERNAL`
 
 ---
 
-## HTTP API (Port 6201)
+## HTTP API
 
-### Tenant API (Bearer token from `api_tokens` table)
+All endpoints share the single port (default `:6200`).
+
+### Tenant API (Bearer token from tenant's key+secret)
 
 | Method | Path | Description |
 |---|---|---|
@@ -200,18 +198,15 @@ Ephemeral events do not trigger webhooks and do not affect event history or sequ
 | `GET /presence/:uid` | User presence | |
 | `GET /stats` | Tenant-scoped stats | Connection count, stream count, event rate for this tenant |
 
-### Admin API (Bearer token from `auth.super_admin_token`)
+### Admin API (Bearer token from `auth.password`)
 
 | Method | Path | Description |
 |---|---|---|
-| `POST /admin/tenants` | Create tenant | `{id, name, jwt_secret}` |
+| `POST /admin/tenants` | Create tenant | `{id, name}` — auto-generates `key` and `secret` |
 | `GET /admin/tenants` | List tenants | |
 | `GET /admin/tenants/:id` | Get tenant | |
 | `PATCH /admin/tenants/:id` | Update tenant | `{name?, plan?, config?}` |
 | `DELETE /admin/tenants/:id` | Delete tenant | |
-| `POST /admin/tenants/:id/tokens` | Create API token | `{scope?}` — optional scope restriction |
-| `GET /admin/tenants/:id/tokens` | List API tokens | |
-| `DELETE /admin/tenants/:id/tokens/:token` | Delete API token | Verifies token belongs to tenant |
 | `GET /admin/tenants/:id/streams` | List tenant streams | Admin view of streams for a tenant |
 | `GET /admin/tenants/:id/audit` | Query audit log | `?operation=&resource_type=&resource_id=&actor=&result=&since=&until=&limit=` |
 | `GET /admin/tenants/:id/audit/count` | Count audit entries | Same filters as query (excluding `limit`) |
@@ -220,6 +215,18 @@ Ephemeral events do not trigger webhooks and do not affect event history or sequ
 | `GET /admin/events/stream` | SSE admin event stream | Server-Sent Events stream |
 | `GET /admin/errors` | List recent errors | Error log |
 | `GET /admin/stats` | Platform stats | Aggregate stats across all tenants |
+
+### Tenant Self-Service API (`/self/*`)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET /self/connections` | List tenant connections | Active WebSocket connections for this tenant |
+| `GET /self/events` | List tenant events | Recent events for this tenant |
+| `GET /self/errors` | List tenant errors | Recent errors for this tenant |
+| `POST /self/secret/rotate` | Rotate tenant secret | Generates a new secret, invalidates the old one |
+| `POST /self/tokens` | Create API token | `{scope?}` — optional scope restriction |
+| `GET /self/tokens` | List API tokens | |
+| `DELETE /self/tokens/:token` | Delete API token | |
 
 ### Operational (No auth required)
 
@@ -252,7 +259,7 @@ Ephemeral events do not trigger webhooks and do not affect event history or sequ
 
 Streams can be created with `"public": true` to allow any authenticated user to subscribe without being pre-added as a member. When a user subscribes to a public stream, they are automatically added as a member with `Member` role.
 
-Public streams still require the stream ID to be present in the JWT `streams` claim -- authorization is enforced, but membership is not required upfront.
+Public streams still require the stream ID to be present in the connection's `streams` param -- authorization is enforced, but membership is not required upfront.
 
 Private streams (default, `public: false`) continue to require membership before subscribing.
 
@@ -278,7 +285,7 @@ When `events` is omitted, all events are sent. Supported event types match serve
 API tokens can be created with a `scope` to restrict access:
 
 ```
-POST /admin/tenants/:id/tokens
+POST /self/tokens
 {"scope": "read-only"}
 ```
 
@@ -293,7 +300,7 @@ List endpoints support `limit` and `offset` query parameters:
 | `limit` | u32 | 50 | Maximum items to return |
 | `offset` | u32 | 0 | Number of items to skip |
 
-Applies to: `GET /streams`, `GET /streams/:id/members`, `GET /streams/:id/events` (also supports `before`/`after` sequence-based cursors), `GET /admin/tenants`, `GET /admin/tenants/:id/tokens`.
+Applies to: `GET /streams`, `GET /streams/:id/members`, `GET /streams/:id/events` (also supports `before`/`after` sequence-based cursors), `GET /admin/tenants`, `GET /self/tokens`.
 
 ---
 
@@ -327,23 +334,15 @@ Remote wrappers add circuit breaker (5 failures → open, 30s cooldown) + 10s re
 
 ## Watchlist (Friend Online/Offline Tracking)
 
-Track online/offline status of specific users across the entire tenant, regardless of shared streams. Add a `watchlist` array to the JWT claims containing user IDs to watch.
+Track online/offline status of specific users across the entire tenant, regardless of shared streams. Include a `watchlist` query param in the WebSocket connection URL.
 
 On connect, the server sends `watchlist.online` with any watched users who are already online. When a watched user connects (first connection) or disconnects (last connection, after linger), the server sends `watchlist.online` or `watchlist.offline` to all watchers.
 
 Watchlist tracking is per-tenant and respects the presence linger period -- quick reconnects do not produce spurious offline events.
 
-Example JWT claims:
-```json
-{
-  "sub": "alice",
-  "tenant": "acme",
-  "streams": ["chat"],
-  "watchlist": ["bob", "charlie"],
-  "exp": 1700000000,
-  "iat": 1699996400,
-  "iss": "myapp"
-}
+Example connection:
+```
+/ws?key=...&token=...&user_id=alice&streams=chat&watchlist=bob,charlie
 ```
 
 Example server events:
@@ -394,12 +393,7 @@ The connection ID is available in the `auth_ok` response or can be tracked by th
 
 ## Authorized Connections
 
-WebSocket connections must authenticate within 5 seconds or they are disconnected. Unauthenticated connections do not count toward the per-tenant connection limit. The connection limit is enforced only after successful JWT validation.
-
-This means:
-- Unauthenticated connections cannot exhaust tenant quota
-- The 5-second auth timeout prevents resource exhaustion from idle connections
-- Auth failures are tracked via the `herald_ws_auth_failures_total` Prometheus metric
+WebSocket connections are authenticated on upgrade via query params. Invalid tokens are rejected before the WebSocket handshake completes. Auth failures are tracked via the `herald_ws_auth_failures_total` Prometheus metric.
 
 ---
 

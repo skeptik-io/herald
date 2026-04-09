@@ -115,6 +115,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`sdk-hardening`~~ | ~~N-4~~ | ~~Error handling, incomplete features, missing tests across TS chat/admin packages~~ | **done** |
 | ~~`chat-extensions`~~ | ~~N-5~~ | ~~Ephemeral events, per-message delivery status, event middleware~~ | **done** |
 | ~~`sdk-packaging`~~ | ~~N-6~~ | ~~READMEs for chat SDKs, publish chat packages in release pipeline~~ | **done** |
+| ~~`tenant-auth`~~ | ~~T-1, T-2~~ | ~~Auth redesign: key+secret, auth-on-upgrade, self-service, single port~~ | **done** |
 | `openapi` | S-1 | `utoipa` annotations → `openapi.yaml` from Rust handlers | |
 | `admin-codegen` | S-2 | Replace hand-rolled admin SDKs with generated + add PHP, C# | |
 | `mobile-sdks` | S-3 | Swift, Kotlin, Dart WS client SDKs (hand-rolled, WS not HTTP) | |
@@ -334,6 +335,35 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Reject oversized frames with error code
   - [x] Integration test: send frame exceeding limit, verify rejection
   - [x] Integration test: send frame at limit, verify acceptance
+
+---
+
+## COMPLETED — Tenant system auth redesign
+
+Full auth system redesign. See `AUTH.md` for the audit and design rationale.
+
+- [x] **T-1: Replace JWT with key+secret signed tokens**
+  - [x] Removed JWT entirely (no legacy fallback). Dropped `jsonwebtoken` crate.
+  - [x] Auto-generate `key` (public) and `secret` (HMAC signing key) on tenant creation
+  - [x] WS auth on upgrade: `/ws?key=...&token=HMAC(secret, user_id:streams:watchlist)&user_id=...&streams=...` — no resources allocated before auth
+  - [x] Validate by looking up key → tenant+secret, then verifying HMAC-SHA256 signature
+  - [x] Enforce tenant cache TTL (check `cached_at`, refresh from DB when stale)
+  - [x] Single server port (merged WS + HTTP onto one listener)
+  - [x] Config simplified: `auth.password` replaces `super_admin_token`/`jwt_secret`/`jwt_issuer`/`api.tokens`. No `--single-tenant`/`--multi-tenant` flags.
+  - [x] Default tenant auto-created on first startup with generated credentials
+  - [x] Generic auth error messages (no tenant name / validation detail leakage)
+  - [x] Integration tests: signed token auth, bad secret rejected, cache TTL enforcement, secret rotation
+
+- [x] **T-2: Tenant self-service API**
+  - [x] Tenant auth middleware: accepts `Basic base64(key:secret)` or `Bearer <api_token>`
+  - [x] Self-service endpoints: `GET /self/connections`, `GET /self/events`, `GET /self/events/stream` (SSE), `GET /self/errors`
+  - [x] `POST /self/secret/rotate` — rotate own secret, return new credentials
+  - [x] `POST /self/tokens`, `GET /self/tokens`, `DELETE /self/tokens/{token}` — manage own API tokens
+  - [x] `tenant_id` added to `ErrorEntry`, `push_error()` callers updated
+  - [x] Admin endpoints remain as-is (unfiltered, cross-tenant)
+
+- [ ] **T-3: Admin UI tenant experience** (in `herald-admin-ui` repo)
+  - [ ] Update UI for new auth (key+secret, self-service endpoints, single port)
 
 ---
 

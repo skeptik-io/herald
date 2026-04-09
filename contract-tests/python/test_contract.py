@@ -233,12 +233,13 @@ def execute_operation(client, op, inp):
 
 def main():
     spec = load_spec()
-    url = os.environ.get("HERALD_URL", "http://127.0.0.1:16301")
-    api_token = os.environ.get("HERALD_API_TOKEN", "contract-api-token-1234")
-    admin_token = os.environ.get("HERALD_ADMIN_TOKEN", "contract-admin-token")
+    url = os.environ.get("HERALD_URL", "http://127.0.0.1:16300")
+    api_token = os.environ.get("HERALD_API_TOKEN")
+    if not api_token:
+        print("HERALD_API_TOKEN is required — run via run-all.ts or set it manually", file=sys.stderr)
+        sys.exit(1)
 
     client = HeraldAdmin(url, api_token)
-    _ = HeraldAdmin(url, admin_token)  # admin client for future admin-scoped tests
 
     saved = {}
     passed = 0

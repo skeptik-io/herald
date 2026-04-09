@@ -1,16 +1,32 @@
 use shroudb_store::Store;
 
-use super::{NS_API_TOKENS, NS_TENANTS};
+use super::{NS_API_TOKENS, NS_TENANTS, NS_TENANT_KEYS};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Tenant {
     pub id: String,
     pub name: String,
-    pub jwt_secret: String,
-    pub jwt_issuer: Option<String>,
+    pub key: String,
+    pub secret: String,
     pub plan: String,
     pub config: serde_json::Value,
     pub created_at: i64,
+}
+
+/// Generate a (key, secret) credential pair for a new tenant.
+///
+/// Key: 24-char hex (12 bytes of randomness) — public identifier.
+/// Secret: 64-char hex (32 bytes of randomness) — HMAC signing key.
+pub fn generate_tenant_credentials() -> (String, String) {
+    let u1 = uuid::Uuid::new_v4();
+    let u2 = uuid::Uuid::new_v4();
+    let key = hex::encode(u1.as_bytes())[..24].to_string();
+    let secret = format!(
+        "{}{}",
+        hex::encode(u1.as_bytes()),
+        hex::encode(u2.as_bytes())
+    );
+    (key, secret)
 }
 
 pub async fn insert<S: Store>(store: &S, tenant: &Tenant) -> Result<(), anyhow::Error> {
@@ -18,6 +34,7 @@ pub async fn insert<S: Store>(store: &S, tenant: &Tenant) -> Result<(), anyhow::
     store
         .put(NS_TENANTS, tenant.id.as_bytes(), &value, None)
         .await?;
+    insert_key_mapping(store, &tenant.key, &tenant.id).await?;
     Ok(())
 }
 
@@ -76,8 +93,69 @@ pub async fn update<S: Store>(
     Ok(true)
 }
 
-pub async fn delete<S: Store>(store: &S, id: &str) -> Result<bool, anyhow::Error> {
+/// Rotate a tenant's secret. Returns the new (key, secret) on success.
+pub async fn rotate_secret<S: Store>(
+    store: &S,
+    id: &str,
+) -> Result<Option<(String, String)>, anyhow::Error> {
+    let entry = match store.get(NS_TENANTS, id.as_bytes(), None).await {
+        Ok(e) => e,
+        Err(shroudb_store::StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut tenant: Tenant = serde_json::from_slice(&entry.value)?;
+    let u1 = uuid::Uuid::new_v4();
+    let u2 = uuid::Uuid::new_v4();
+    tenant.secret = format!(
+        "{}{}",
+        hex::encode(u1.as_bytes()),
+        hex::encode(u2.as_bytes())
+    );
+    let value = serde_json::to_vec(&tenant)?;
+    store.put(NS_TENANTS, id.as_bytes(), &value, None).await?;
+    Ok(Some((tenant.key.clone(), tenant.secret)))
+}
+
+pub async fn delete<S: Store>(
+    store: &S,
+    id: &str,
+    key: Option<&str>,
+) -> Result<bool, anyhow::Error> {
     match store.delete(NS_TENANTS, id.as_bytes()).await {
+        Ok(_) => {
+            if let Some(k) = key {
+                let _ = delete_key_mapping(store, k).await;
+            }
+            Ok(true)
+        }
+        Err(shroudb_store::StoreError::NotFound) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// --- Key mappings (NS_TENANT_KEYS: key → tenant_id) ---
+
+pub async fn insert_key_mapping<S: Store>(
+    store: &S,
+    key: &str,
+    tenant_id: &str,
+) -> Result<(), anyhow::Error> {
+    store
+        .put(NS_TENANT_KEYS, key.as_bytes(), tenant_id.as_bytes(), None)
+        .await?;
+    Ok(())
+}
+
+pub async fn lookup_key<S: Store>(store: &S, key: &str) -> Result<Option<String>, anyhow::Error> {
+    match store.get(NS_TENANT_KEYS, key.as_bytes(), None).await {
+        Ok(entry) => Ok(Some(String::from_utf8(entry.value)?)),
+        Err(shroudb_store::StoreError::NotFound) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn delete_key_mapping<S: Store>(store: &S, key: &str) -> Result<bool, anyhow::Error> {
+    match store.delete(NS_TENANT_KEYS, key.as_bytes()).await {
         Ok(_) => Ok(true),
         Err(shroudb_store::StoreError::NotFound) => Ok(false),
         Err(e) => Err(e.into()),
@@ -91,7 +169,7 @@ pub async fn delete<S: Store>(store: &S, id: &str) -> Result<bool, anyhow::Error
 pub struct ApiToken {
     pub tenant_id: String,
     #[serde(default)]
-    pub scope: Option<String>, // "read-only", "stream:chat", etc. None = full access
+    pub scope: Option<String>,
 }
 
 pub async fn create_token<S: Store>(
@@ -117,7 +195,6 @@ pub async fn validate_token<S: Store>(
 ) -> Result<Option<ApiToken>, anyhow::Error> {
     match store.get(NS_API_TOKENS, token.as_bytes(), None).await {
         Ok(entry) => {
-            // Try JSON format first (new), fall back to plain tenant_id (legacy)
             if let Ok(api_token) = serde_json::from_slice::<ApiToken>(&entry.value) {
                 Ok(Some(api_token))
             } else {
@@ -138,10 +215,8 @@ pub async fn delete_token<S: Store>(
     token: &str,
     tenant_id: &str,
 ) -> Result<bool, anyhow::Error> {
-    // Verify token belongs to this tenant
     match store.get(NS_API_TOKENS, token.as_bytes(), None).await {
         Ok(entry) => {
-            // Check tenant ownership — handle both JSON and legacy formats
             let owner = if let Ok(api_token) = serde_json::from_slice::<ApiToken>(&entry.value) {
                 api_token.tenant_id
             } else {
@@ -162,7 +237,6 @@ pub async fn list_tokens<S: Store>(
     store: &S,
     tenant_id: &str,
 ) -> Result<Vec<serde_json::Value>, anyhow::Error> {
-    // Scan all tokens and filter by tenant_id
     let mut tokens = Vec::new();
     let mut cursor = None;
     loop {
@@ -197,23 +271,32 @@ pub async fn list_tokens<S: Store>(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_tenant_crud() {
-        let store = crate::store::test_store().await;
-        let tenant = Tenant {
-            id: "t1".to_string(),
-            name: "Test".to_string(),
-            jwt_secret: "secret".to_string(),
-            jwt_issuer: None,
+    fn make_tenant(id: &str, name: &str) -> Tenant {
+        let (key, secret) = generate_tenant_credentials();
+        Tenant {
+            id: id.to_string(),
+            name: name.to_string(),
+            key,
+            secret,
             plan: "free".to_string(),
             config: serde_json::json!({}),
             created_at: 1000,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tenant_crud() {
+        let store = crate::store::test_store().await;
+        let tenant = make_tenant("t1", "Test");
         insert(&*store, &tenant).await.unwrap();
 
         let got = get(&*store, "t1").await.unwrap().unwrap();
         assert_eq!(got.id, "t1");
         assert_eq!(got.name, "Test");
+        assert_eq!(got.key, tenant.key);
+
+        let mapped = lookup_key(&*store, &tenant.key).await.unwrap().unwrap();
+        assert_eq!(mapped, "t1");
 
         assert!(get(&*store, "nope").await.unwrap().is_none());
     }
@@ -222,15 +305,7 @@ mod tests {
     async fn test_tenant_list() {
         let store = crate::store::test_store().await;
         for i in 0..3 {
-            let t = Tenant {
-                id: format!("t{i}"),
-                name: format!("T{i}"),
-                jwt_secret: "s".into(),
-                jwt_issuer: None,
-                plan: "free".into(),
-                config: serde_json::json!({}),
-                created_at: 1000,
-            };
+            let t = make_tenant(&format!("t{i}"), &format!("T{i}"));
             insert(&*store, &t).await.unwrap();
         }
         let all = list(&*store).await.unwrap();
@@ -240,15 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_tenant_update() {
         let store = crate::store::test_store().await;
-        let t = Tenant {
-            id: "t1".into(),
-            name: "Old".into(),
-            jwt_secret: "s".into(),
-            jwt_issuer: None,
-            plan: "free".into(),
-            config: serde_json::json!({}),
-            created_at: 1000,
-        };
+        let t = make_tenant("t1", "Old");
         insert(&*store, &t).await.unwrap();
 
         assert!(update(&*store, "t1", Some("New"), None, None)
@@ -265,20 +332,44 @@ mod tests {
     #[tokio::test]
     async fn test_tenant_delete() {
         let store = crate::store::test_store().await;
-        let t = Tenant {
-            id: "t1".into(),
-            name: "T".into(),
-            jwt_secret: "s".into(),
-            jwt_issuer: None,
-            plan: "free".into(),
-            config: serde_json::json!({}),
-            created_at: 1000,
-        };
+        let t = make_tenant("t1", "T");
+        let key = t.key.clone();
         insert(&*store, &t).await.unwrap();
 
-        assert!(delete(&*store, "t1").await.unwrap());
+        assert!(delete(&*store, "t1", Some(&key)).await.unwrap());
         assert!(get(&*store, "t1").await.unwrap().is_none());
-        assert!(!delete(&*store, "t1").await.unwrap());
+        assert!(lookup_key(&*store, &key).await.unwrap().is_none());
+        assert!(!delete(&*store, "t1", None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_rotate_secret() {
+        let store = crate::store::test_store().await;
+        let t = make_tenant("t1", "T");
+        let old_secret = t.secret.clone();
+        insert(&*store, &t).await.unwrap();
+
+        let (key, new_secret) = rotate_secret(&*store, "t1").await.unwrap().unwrap();
+        assert_eq!(key, t.key);
+        assert_ne!(new_secret, old_secret);
+        assert_eq!(new_secret.len(), 64);
+
+        let got = get(&*store, "t1").await.unwrap().unwrap();
+        assert_eq!(got.secret, new_secret);
+
+        assert!(rotate_secret(&*store, "nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_generate_credentials() {
+        let (key, secret) = generate_tenant_credentials();
+        assert_eq!(key.len(), 24);
+        assert_eq!(secret.len(), 64);
+        hex::decode(&key).unwrap();
+        hex::decode(&secret).unwrap();
+        let (key2, secret2) = generate_tenant_credentials();
+        assert_ne!(key, key2);
+        assert_ne!(secret, secret2);
     }
 
     #[tokio::test]

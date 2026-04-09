@@ -8,7 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { startServer, stopServer, serverUrl, API_TOKEN, ADMIN_TOKEN } from "./harness.js";
+import { startServer, stopServer, serverUrl, ADMIN_PASSWORD } from "./harness.js";
 import { run as runTypeScript } from "./run-typescript.js";
 
 const specPath = join(import.meta.dirname, "spec", "spec.json");
@@ -19,13 +19,13 @@ interface SuiteResult {
   failed: number;
 }
 
-function runSubprocess(name: string, cmd: string, args: string[], cwd: string): Promise<SuiteResult> {
+function runSubprocess(name: string, cmd: string, args: string[], cwd: string, apiToken: string): Promise<SuiteResult> {
   return new Promise((resolve) => {
     const env = {
       ...process.env,
       HERALD_URL: serverUrl(),
-      HERALD_API_TOKEN: API_TOKEN,
-      HERALD_ADMIN_TOKEN: ADMIN_TOKEN,
+      HERALD_API_TOKEN: apiToken,
+      HERALD_ADMIN_PASSWORD: ADMIN_PASSWORD,
       HERALD_SPEC_PATH: specPath,
     };
 
@@ -55,10 +55,47 @@ function runSubprocess(name: string, cmd: string, args: string[], cwd: string): 
   });
 }
 
+async function createTenantAndToken(): Promise<string> {
+  const base = serverUrl();
+  const headers = {
+    "Content-Type": "application/json",
+    "Authorization": `Basic ${Buffer.from(`admin:${ADMIN_PASSWORD}`).toString("base64")}`,
+  };
+
+  // Create a tenant
+  const createRes = await fetch(`${base}/admin/tenants`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ id: "default", name: "Contract Test Tenant" }),
+  });
+  if (!createRes.ok) {
+    throw new Error(`Failed to create tenant: ${createRes.status} ${await createRes.text()}`);
+  }
+
+  // Create an API token for the tenant
+  const tokenRes = await fetch(`${base}/admin/tenants/default/tokens`, {
+    method: "POST",
+    headers,
+  });
+  if (!tokenRes.ok) {
+    throw new Error(`Failed to create API token: ${tokenRes.status} ${await tokenRes.text()}`);
+  }
+  const { token } = await tokenRes.json() as { token: string };
+  return token;
+}
+
 async function main(): Promise<void> {
   console.log("Contract Tests — Starting Herald server...");
   await startServer();
-  console.log("Server ready.\n");
+  console.log("Server ready.");
+
+  console.log("Creating tenant and API token...");
+  const apiToken = await createTenantAndToken();
+  // Export for in-process TypeScript runner
+  process.env.HERALD_URL = serverUrl();
+  process.env.HERALD_API_TOKEN = apiToken;
+  process.env.HERALD_ADMIN_PASSWORD = ADMIN_PASSWORD;
+  console.log("Tenant ready.\n");
 
   const results: SuiteResult[] = [];
 
@@ -74,6 +111,7 @@ async function main(): Promise<void> {
       "go",
       ["test", "-v", "-count=1", "-timeout=60s", "./..."],
       goDir,
+      apiToken,
     );
     results.push(goResult);
 
@@ -84,6 +122,7 @@ async function main(): Promise<void> {
       "python3",
       ["test_contract.py"],
       pyDir,
+      apiToken,
     );
     results.push(pyResult);
 
@@ -94,6 +133,7 @@ async function main(): Promise<void> {
       "ruby",
       ["test_contract.rb"],
       rbDir,
+      apiToken,
     );
     results.push(rbResult);
   } finally {

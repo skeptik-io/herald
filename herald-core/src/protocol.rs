@@ -28,13 +28,14 @@ pub struct RawFrame {
 pub enum ClientMessage {
     Auth {
         ref_: Option<String>,
+        key: String,
         token: String,
+        user_id: String,
+        streams: Vec<String>,
+        #[allow(dead_code)]
+        watchlist: Vec<String>,
         last_seen_at: Option<i64>,
         ack_mode: bool,
-    },
-    AuthRefresh {
-        ref_: Option<String>,
-        token: String,
     },
     Subscribe {
         ref_: Option<String>,
@@ -118,7 +119,6 @@ impl ClientMessage {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Auth { .. } => "auth",
-            Self::AuthRefresh { .. } => "auth.refresh",
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
             Self::EventPublish { .. } => "event.publish",
@@ -142,13 +142,21 @@ impl ClientMessage {
         match raw.type_.as_str() {
             "auth" => Ok(Self::Auth {
                 ref_: raw.ref_,
+                key: str_field(p, "key")?,
                 token: str_field(p, "token")?,
+                user_id: str_field(p, "user_id")?,
+                streams: str_array_field(p, "streams")?,
+                watchlist: p
+                    .get("watchlist")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 last_seen_at: p.get("last_seen_at").and_then(|v| v.as_i64()),
                 ack_mode: p.get("ack_mode").and_then(|v| v.as_bool()).unwrap_or(false),
-            }),
-            "auth.refresh" => Ok(Self::AuthRefresh {
-                ref_: raw.ref_,
-                token: str_field(p, "token")?,
             }),
             "subscribe" => Ok(Self::Subscribe {
                 ref_: raw.ref_,

@@ -5,14 +5,17 @@ export interface Tenant {
   id: string;
   name: string;
   plan: string;
+  key: string;
   created_at: number;
+}
+
+export interface TenantWithSecret extends Tenant {
+  secret: string;
 }
 
 export interface CreateTenantOptions {
   id: string;
   name: string;
-  jwt_secret: string;
-  jwt_issuer?: string;
   plan?: string;
 }
 
@@ -24,8 +27,8 @@ export interface ApiToken {
 export class TenantNamespace {
   constructor(private transport: HttpTransport) {}
 
-  async create(opts: CreateTenantOptions): Promise<Tenant> {
-    return this.transport.request<Tenant>("POST", "/admin/tenants", opts);
+  async create(opts: CreateTenantOptions): Promise<TenantWithSecret> {
+    return this.transport.request<TenantWithSecret>("POST", "/admin/tenants", opts);
   }
 
   async list(): Promise<Tenant[]> {

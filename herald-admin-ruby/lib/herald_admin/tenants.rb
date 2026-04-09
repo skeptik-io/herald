@@ -6,9 +6,8 @@ module HeraldAdmin
       @t = transport
     end
 
-    def create(id, name, jwt_secret, jwt_issuer: nil, plan: nil)
-      body = { id: id, name: name, jwt_secret: jwt_secret }
-      body[:jwt_issuer] = jwt_issuer if jwt_issuer
+    def create(id, name, plan: nil)
+      body = { id: id, name: name }
       body[:plan] = plan if plan
       @t.request("POST", "/admin/tenants", body)
     end

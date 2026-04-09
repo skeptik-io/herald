@@ -1,22 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::routing::get;
-use axum::Router;
 use tracing::{error, info, warn};
 
 use herald_server::config::HeraldConfig;
 use herald_server::integrations;
 use herald_server::state::{AppState, AppStateBuilder};
 use herald_server::store;
-use herald_server::ws;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-
-    let multi_tenant = args.contains(&"--multi-tenant".to_string());
-    let single_tenant = args.contains(&"--single-tenant".to_string()) || !multi_tenant;
 
     let config_path = args
         .iter()
@@ -86,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     config.load_secrets_from_keep().await?;
 
     // Validate configuration before proceeding
-    config.validate(!single_tenant)?;
+    config.validate()?;
 
     // Open ShroudB storage — embedded (local WAL) or remote (shared server)
     let db: Arc<herald_server::store_backend::StoreBackend> = match config.store.mode.as_str() {
@@ -129,8 +123,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("namespace init: {e}"))?;
 
-    let ws_bind = config.server.ws_bind.clone();
-    let http_bind = config.server.http_bind.clone();
+    let bind = config.server.bind.clone();
     let shutdown_timeout = config.server.shutdown_timeout_secs;
     let tls_config = config.tls.clone();
 
@@ -337,20 +330,9 @@ async fn main() -> anyhow::Result<()> {
     // Always hydrate all tenants from Store
     state.hydrate_tenant_cache().await?;
 
-    // In single-tenant mode, ensure a default tenant exists
-    if single_tenant {
-        let tid = state.bootstrap_single_tenant().await?;
-        info!(
-            tenant = %tid,
-            tenants = state.tenant_cache.len(),
-            "single-tenant mode — default tenant bootstrapped"
-        );
-    } else {
-        if state.config.auth.super_admin_token.is_none() {
-            anyhow::bail!("auth.super_admin_token is required in multi-tenant mode");
-        }
-        info!(tenants = state.tenant_cache.len(), "multi-tenant mode");
-    }
+    // Ensure a default tenant exists (auto-creates on first startup)
+    state.bootstrap_default_tenant().await?;
+    info!(tenants = state.tenant_cache.len(), "tenants loaded");
 
     // Hydrate streams + members into memory
     let all_streams = store::streams::list_all(&*state.db).await?;
@@ -487,18 +469,9 @@ async fn main() -> anyhow::Result<()> {
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let ws_state = state.clone();
-    let ws_app = Router::new()
-        .route("/", get(ws::upgrade::ws_handler))
-        .with_state(ws_state);
-    let http_app = herald_server::http::router(state.clone());
+    let app = herald_server::http::router(state.clone());
 
-    let use_tls = tls_config.is_some();
-    if use_tls {
-        info!(ws = %ws_bind, http = %http_bind, "starting Herald (TLS, multi-tenant)");
-    } else {
-        info!(ws = %ws_bind, http = %http_bind, "starting Herald (multi-tenant)");
-    }
+    info!(bind = %bind, "starting Herald");
 
     let make_shutdown = |rx: tokio::sync::watch::Receiver<bool>| async move {
         let mut rx = rx;
@@ -514,25 +487,13 @@ async fn main() -> anyhow::Result<()> {
             axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
                 .await?;
 
-        let ws_tls = rustls_config.clone();
-        let ws_addr: std::net::SocketAddr = ws_bind.parse()?;
-        let ws_handle = tokio::spawn(async move {
-            if let Err(e) = axum_server::bind_rustls(ws_addr, ws_tls)
-                .serve(ws_app.into_make_service())
+        let addr: std::net::SocketAddr = bind.parse()?;
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = axum_server::bind_rustls(addr, rustls_config)
+                .serve(app.into_make_service())
                 .await
             {
-                error!("WS server error: {e}");
-            }
-        });
-
-        let http_tls = rustls_config;
-        let http_addr: std::net::SocketAddr = http_bind.parse()?;
-        let http_handle = tokio::spawn(async move {
-            if let Err(e) = axum_server::bind_rustls(http_addr, http_tls)
-                .serve(http_app.into_make_service())
-                .await
-            {
-                error!("HTTP server error: {e}");
+                error!("server error: {e}");
             }
         });
 
@@ -540,7 +501,6 @@ async fn main() -> anyhow::Result<()> {
         info!("shutdown signal received, draining...");
         let _ = shutdown_tx.send(true);
 
-        // Notify all WebSocket clients of impending shutdown
         state
             .connections
             .broadcast_all(&herald_core::protocol::ServerMessage::error(
@@ -549,7 +509,6 @@ async fn main() -> anyhow::Result<()> {
                 "server shutting down",
             ));
 
-        // Grace period for background tasks to finish their current iteration
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
@@ -560,31 +519,19 @@ async fn main() -> anyhow::Result<()> {
         typing_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
-            let _ = ws_handle.await;
-            let _ = http_handle.await;
+            let _ = server_handle.await;
         })
         .await;
     } else {
-        let ws_listener = tokio::net::TcpListener::bind(&ws_bind).await?;
-        let http_listener = tokio::net::TcpListener::bind(&http_bind).await?;
+        let listener = tokio::net::TcpListener::bind(&bind).await?;
 
-        let ws_shutdown = shutdown_rx.clone();
-        let ws_handle = tokio::spawn(async move {
-            if let Err(e) = axum::serve(ws_listener, ws_app)
-                .with_graceful_shutdown(make_shutdown(ws_shutdown))
+        let shutdown = shutdown_rx.clone();
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(make_shutdown(shutdown))
                 .await
             {
-                error!("WS server error: {e}");
-            }
-        });
-
-        let http_shutdown = shutdown_rx.clone();
-        let http_handle = tokio::spawn(async move {
-            if let Err(e) = axum::serve(http_listener, http_app)
-                .with_graceful_shutdown(make_shutdown(http_shutdown))
-                .await
-            {
-                error!("HTTP server error: {e}");
+                error!("server error: {e}");
             }
         });
 
@@ -592,7 +539,6 @@ async fn main() -> anyhow::Result<()> {
         info!("shutdown signal received, draining...");
         let _ = shutdown_tx.send(true);
 
-        // Notify all WebSocket clients of impending shutdown
         state
             .connections
             .broadcast_all(&herald_core::protocol::ServerMessage::error(
@@ -601,7 +547,6 @@ async fn main() -> anyhow::Result<()> {
                 "server shutting down",
             ));
 
-        // Grace period for background tasks to finish their current iteration
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
@@ -612,8 +557,7 @@ async fn main() -> anyhow::Result<()> {
         typing_handle.abort();
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
-            let _ = ws_handle.await;
-            let _ = http_handle.await;
+            let _ = server_handle.await;
         })
         .await;
     }

@@ -4,10 +4,10 @@
 
 ## Quick Context
 
-- **Role**: Real-time event delivery. Browsers via WebSocket (:6200), backends via HTTP (:6201).
+- **Role**: Real-time event delivery. Browsers via WebSocket (`/ws`), backends via HTTP API. Single port (default `:6200`).
 - **Not a ShroudB engine**: Standalone Rust project. Uses ShroudB crates for storage.
 - **Storage**: ShroudB WAL engine (`shroudb-storage`). ~80µs writes. No Postgres.
-- **Multi-tenant**: `tenant` JWT claim. Per-tenant streams, members, JWT secrets. Admin API for tenant CRUD.
+- **Multi-tenant**: Per-tenant key+secret (HMAC-SHA256). Admin API for tenant CRUD. Default tenant auto-created on first start.
 - **Opaque event body**: Herald stores and delivers event bodies as-is. Consumers handle their own encryption and search.
 - **ShroudB Sentry**: ABAC authorization available as embedded (in-process) or remote (TCP with circuit breakers).
 
@@ -16,16 +16,16 @@
 ```
 herald/                              7,441 lines Rust
 ├── herald-core/                     9 files — domain types (no I/O)
-│   ├── auth.rs                      JwtClaims (with tenant claim)
+│   ├── auth.rs                      TokenClaims (HMAC-SHA256 key+secret)
 │   ├── cursor.rs, member.rs         Cursor, Member, Role
 │   ├── event.rs, stream.rs          Event, Stream
 │   ├── presence.rs, error.rs        PresenceStatus, HeraldError, ErrorCode
 │   └── protocol.rs                  ClientEvent, ServerEvent, all payloads
 │
 ├── herald-server/                   39 files — the binary
-│   ├── main.rs                      Startup, --single/multi-tenant, WAL init, TLS, shutdown
+│   ├── main.rs                      Startup, WAL init, TLS, shutdown
 │   ├── config.rs                    HeraldConfig (TOML)
-│   ├── state.rs                     AppState, Metrics (histograms), tenant cache, JWT validation
+│   ├── state.rs                     AppState, Metrics (histograms), tenant cache, HMAC token validation
 │   ├── latency.rs                   Prometheus histogram (atomic buckets, no external crate)
 │   ├── webhook.rs                   Signed delivery with retries
 │   │
@@ -41,15 +41,15 @@ herald/                              7,441 lines Rust
 │   │   ├── stream.rs                StreamRegistry — composite (tenant, stream) keys
 │   │   └── presence.rs              PresenceTracker — connection-derived + manual override
 │   │
-│   ├── ws/                          WebSocket server (:6200)
-│   │   ├── connection.rs            Auth, rate limit, reconnect catch-up, presence linger
+│   ├── ws/                          WebSocket server (/ws on :6200)
+│   │   ├── connection.rs            Rate limit, reconnect catch-up, presence linger
 │   │   ├── handler.rs               Frame dispatch with per-stage latency instrumentation
 │   │   ├── fanout.rs                Stream fan-out
 │   │   └── upgrade.rs               HTTP → WS upgrade
 │   │
-│   ├── http/                        HTTP API (:6201)
+│   ├── http/                        HTTP API (same port :6200)
 │   │   ├── mod.rs                   Router + tenant/admin auth middleware
-│   │   ├── admin.rs                 Tenant CRUD + API token management
+│   │   ├── admin.rs                 Tenant CRUD (key+secret auto-generated)
 │   │   ├── streams.rs, members.rs   Stream/member CRUD
 │   │   ├── events.rs                Inject, list
 │   │   ├── presence.rs              Presence queries
@@ -95,7 +95,7 @@ cargo fmt --all -- --check
 ```
 Client sends event.publish
   → Rate limit check (per-connection sliding window)
-  → JWT tenant + streams claim check
+  → Tenant + streams authorization check
   → Optional Sentry EVALUATE (embedded or remote)
   ─── Latency instrumented from here ───
   → WAL store (dual key: seq + ID index)                  [event_store histogram]
@@ -129,4 +129,4 @@ Config chooses mode: `[shroudb]` section → remote. No section → embedded or 
 - **Multi-tenant via composite keys** — `{tenant_id}/{stream_id}` in every namespace.
 - **Circuit breakers on all remote calls** — 5 failures → open, 30s cooldown. Sentry fail-open.
 - **Latency histograms per pipeline stage** — Prometheus-compatible, atomic buckets, no external crate.
-- **Single-tenant mode** — `--single-tenant` bootstraps a `default` tenant from config. Zero admin overhead.
+- **Default tenant** — auto-created on first start. Zero admin overhead for single-tenant deployments.

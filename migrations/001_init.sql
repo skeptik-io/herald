@@ -3,8 +3,8 @@
 CREATE TABLE tenants (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
-    jwt_secret  TEXT NOT NULL,
-    jwt_issuer  TEXT,
+    key         TEXT NOT NULL UNIQUE,
+    secret      TEXT NOT NULL,
     plan        TEXT NOT NULL DEFAULT 'free',
     config      JSONB DEFAULT '{}',
     created_at  BIGINT NOT NULL

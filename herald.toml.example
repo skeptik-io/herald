@@ -7,8 +7,7 @@
 # ----------------------------------------------------------------------
 
 [server]
-ws_bind = "0.0.0.0:6200"       # WebSocket — browsers connect here
-http_bind = "0.0.0.0:6201"     # HTTP API — backends + admin
+bind = "0.0.0.0:6200"          # Single port for HTTP API + WebSocket (/ws)
 log_level = "info"              # trace | debug | info | warn | error
 max_messages_per_sec = 10       # Per-connection WS rate limit
 api_rate_limit = 100            # HTTP API requests per minute
@@ -27,17 +26,8 @@ message_ttl_days = 7            # Messages older than this are pruned hourly
 # ----------------------------------------------------------------------
 
 [auth]
-# Single-tenant mode: set jwt_secret here.
-# Multi-tenant mode: each tenant has its own jwt_secret in the DB.
-jwt_secret = "your-hmac-secret"
-jwt_issuer = "app-backend"
-
-# Super admin token for /admin/* endpoints (multi-tenant mode)
-super_admin_token = "your-super-admin-token"
-
-# API tokens for the default tenant (single-tenant mode)
-[auth.api]
-tokens = ["your-api-token"]
+password = "your-admin-password"    # Bearer token for /admin/* endpoints
+token_window_secs = 300             # HMAC token validity window
 
 # ----------------------------------------------------------------------
 # Presence

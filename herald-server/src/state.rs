@@ -2,7 +2,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use jsonwebtoken::{DecodingKey, Validation};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 use crate::admin_events::EventBus;
 use crate::config::{HeraldConfig, WebhookConfig};
@@ -117,12 +118,14 @@ pub struct RateLimitEntry {
 /// How long a cached tenant config entry is considered fresh (5 minutes).
 pub const TENANT_CACHE_TTL_SECS: u64 = 300;
 
-/// Cached tenant config for JWT validation.
+type HmacSha256 = Hmac<Sha256>;
+
+/// Cached tenant config for signed token validation.
 #[derive(Clone)]
 pub struct TenantConfig {
     pub id: String,
-    pub jwt_secret: String,
-    pub jwt_issuer: Option<String>,
+    pub key: String,
+    pub secret: String,
     pub plan: String,
     pub event_ttl_days: Option<u32>,
     pub cached_at: std::time::Instant,
@@ -152,6 +155,7 @@ pub struct AppState {
     pub presence: PresenceTracker,
     pub typing: TypingTracker,
     pub tenant_cache: DashMap<String, TenantConfig>,
+    pub key_cache: DashMap<String, String>,
     pub tenant_metrics: DashMap<String, TenantMetrics>,
     pub api_rate_limits: DashMap<String, Arc<RateLimitEntry>>,
     pub start_time: std::time::Instant,
@@ -197,6 +201,7 @@ impl AppState {
             presence: PresenceTracker::new(),
             typing: TypingTracker::new(),
             tenant_cache: DashMap::new(),
+            key_cache: DashMap::new(),
             tenant_metrics: DashMap::new(),
             api_rate_limits: DashMap::new(),
             start_time: std::time::Instant::now(),
@@ -216,12 +221,13 @@ impl AppState {
     pub async fn hydrate_tenant_cache(&self) -> Result<(), anyhow::Error> {
         let tenants = store::tenants::list(&*self.db).await?;
         for t in tenants {
+            self.key_cache.insert(t.key.clone(), t.id.clone());
             self.tenant_cache.insert(
                 t.id.clone(),
                 TenantConfig {
                     id: t.id,
-                    jwt_secret: t.jwt_secret,
-                    jwt_issuer: t.jwt_issuer,
+                    key: t.key,
+                    secret: t.secret,
                     plan: t.plan,
                     event_ttl_days: t
                         .config
@@ -235,97 +241,145 @@ impl AppState {
         Ok(())
     }
 
-    /// Bootstrap a single-tenant setup: create a "default" tenant from config-level auth settings.
-    /// In single-tenant mode, all JWTs use the config jwt_secret and the tenant claim is "default".
-    pub async fn bootstrap_single_tenant(&self) -> Result<String, anyhow::Error> {
-        let tenant_id = "default".to_string();
-        let jwt_secret =
-            self.config.auth.jwt_secret.clone().ok_or_else(|| {
-                anyhow::anyhow!("auth.jwt_secret required for single-tenant mode")
-            })?;
-        let jwt_issuer = self.config.auth.jwt_issuer.clone();
+    /// Ensure a "default" tenant exists. On first startup, generates credentials
+    /// and logs them. On subsequent startups, loads from DB (credentials already
+    /// populated by hydrate_tenant_cache).
+    pub async fn bootstrap_default_tenant(&self) -> Result<(), anyhow::Error> {
+        let tenant_id = "default";
 
-        // Create tenant if it doesn't exist
-        let existing = store::tenants::get(&*self.db, &tenant_id).await?;
-        if existing.is_none() {
-            let tenant = store::tenants::Tenant {
-                id: tenant_id.clone(),
-                name: "Default Tenant".to_string(),
-                jwt_secret: jwt_secret.clone(),
-                jwt_issuer: jwt_issuer.clone(),
-                plan: "self-hosted".to_string(),
-                config: serde_json::json!({}),
-                created_at: crate::ws::connection::now_millis(),
-            };
-            store::tenants::insert(&*self.db, &tenant).await?;
+        if store::tenants::get(&*self.db, tenant_id).await?.is_some() {
+            // Already exists (hydrated from cache)
+            return Ok(());
         }
 
-        // Create API token from config if any
-        for token in &self.config.auth.api.tokens {
-            let existing = store::tenants::validate_token(&*self.db, token).await?;
-            if existing.is_none() {
-                store::tenants::create_token(&*self.db, token, &tenant_id, None).await?;
-            }
-        }
+        // First startup — generate credentials
+        let (key, secret) = store::tenants::generate_tenant_credentials();
+        let tenant = store::tenants::Tenant {
+            id: tenant_id.to_string(),
+            name: "Default Tenant".to_string(),
+            key: key.clone(),
+            secret: secret.clone(),
+            plan: "default".to_string(),
+            config: serde_json::json!({}),
+            created_at: crate::ws::connection::now_millis(),
+        };
+        store::tenants::insert(&*self.db, &tenant).await?;
 
-        // Add to cache
+        // Populate caches
+        self.key_cache.insert(key.clone(), tenant_id.to_string());
         self.tenant_cache.insert(
-            tenant_id.clone(),
+            tenant_id.to_string(),
             TenantConfig {
-                id: tenant_id.clone(),
-                jwt_secret,
-                jwt_issuer,
-                plan: "self-hosted".to_string(),
+                id: tenant_id.to_string(),
+                key: key.clone(),
+                secret: secret.clone(),
+                plan: "default".to_string(),
                 event_ttl_days: None,
                 cached_at: std::time::Instant::now(),
             },
         );
 
-        Ok(tenant_id)
+        tracing::info!(
+            tenant = %tenant_id,
+            key = %key,
+            secret = %secret,
+            "default tenant created — save these credentials"
+        );
+
+        Ok(())
     }
 
-    /// Validate a JWT against the tenant's secret.
-    /// Returns (tenant_id, claims) on success.
-    pub fn validate_jwt(
+    /// Validate a signed connection token.
+    ///
+    /// The token is an HMAC-SHA256 signature over the canonical payload:
+    ///   "{user_id}:{sorted_streams}:{sorted_watchlist}"
+    ///
+    /// Returns (tenant_id, validated streams, validated watchlist) on success.
+    pub async fn validate_signed_token(
         &self,
-        token: &str,
-    ) -> Result<(String, herald_core::auth::JwtClaims), String> {
-        // First, decode without verification to extract the tenant claim
-        let mut insecure = Validation::default();
-        insecure.insecure_disable_signature_validation();
-        insecure.set_required_spec_claims::<&str>(&[]);
-        insecure.validate_exp = false;
+        key: &str,
+        signature: &str,
+        user_id: &str,
+        streams: &[String],
+        watchlist: &[String],
+    ) -> Result<String, String> {
+        // Look up key → tenant_id
+        let tenant_id = self
+            .key_cache
+            .get(key)
+            .map(|v| v.clone())
+            .ok_or_else(|| "unknown key".to_string())?;
 
-        let peek = jsonwebtoken::decode::<herald_core::auth::JwtClaims>(
-            token,
-            &DecodingKey::from_secret(b"unused"),
-            &insecure,
-        )
-        .map_err(|e| format!("invalid JWT structure: {e}"))?;
+        // Look up tenant config (with TTL enforcement)
+        let secret = {
+            let tenant = self
+                .tenant_cache
+                .get(&tenant_id)
+                .ok_or_else(|| "unknown tenant".to_string())?;
 
-        let tenant_id = &peek.claims.tenant;
-        if tenant_id.is_empty() {
-            return Err("missing tenant claim in JWT".to_string());
-        }
+            // Enforce cache TTL — if stale, the caller should refresh
+            if tenant.cached_at.elapsed().as_secs() > TENANT_CACHE_TTL_SECS {
+                drop(tenant);
+                // Refresh from DB
+                match store::tenants::get(&*self.db, &tenant_id).await {
+                    Ok(Some(t)) => {
+                        self.key_cache.insert(t.key.clone(), t.id.clone());
+                        let secret = t.secret.clone();
+                        self.tenant_cache.insert(
+                            t.id.clone(),
+                            TenantConfig {
+                                id: t.id,
+                                key: t.key,
+                                secret: secret.clone(),
+                                plan: t.plan,
+                                event_ttl_days: t
+                                    .config
+                                    .get("event_ttl_days")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|v| v as u32),
+                                cached_at: std::time::Instant::now(),
+                            },
+                        );
+                        secret
+                    }
+                    Ok(None) => {
+                        self.tenant_cache.remove(&tenant_id);
+                        self.key_cache.remove(key);
+                        return Err("unknown tenant".to_string());
+                    }
+                    Err(e) => {
+                        tracing::warn!("cache refresh failed for tenant {tenant_id}: {e}");
+                        return Err("internal error".to_string());
+                    }
+                }
+            } else {
+                tenant.secret.clone()
+            }
+        };
 
-        // Look up tenant
-        let tenant = self
-            .tenant_cache
-            .get(tenant_id)
-            .ok_or_else(|| format!("unknown tenant: {tenant_id}"))?;
+        // Build canonical payload
+        let mut sorted_streams: Vec<&str> = streams.iter().map(|s| s.as_str()).collect();
+        sorted_streams.sort();
+        let mut sorted_watchlist: Vec<&str> = watchlist.iter().map(|s| s.as_str()).collect();
+        sorted_watchlist.sort();
+        let payload = format!(
+            "{}:{}:{}",
+            user_id,
+            sorted_streams.join(","),
+            sorted_watchlist.join(","),
+        );
 
-        // Validate with tenant's secret
-        let key = DecodingKey::from_secret(tenant.jwt_secret.as_bytes());
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        if let Some(ref issuer) = tenant.jwt_issuer {
-            validation.set_issuer(&[issuer]);
-        }
-        validation.set_required_spec_claims(&["sub", "exp", "iat"]);
+        // Verify HMAC-SHA256
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|_| "internal error".to_string())?;
+        mac.update(payload.as_bytes());
 
-        let data = jsonwebtoken::decode::<herald_core::auth::JwtClaims>(token, &key, &validation)
-            .map_err(|e| format!("JWT validation failed: {e}"))?;
+        let expected_sig =
+            hex::decode(signature).map_err(|_| "invalid token format".to_string())?;
+        mac.verify_slice(&expected_sig)
+            .map_err(|_| "invalid token".to_string())?;
 
-        Ok((tenant_id.clone(), data.claims))
+        Ok(tenant_id)
     }
 
     /// Returns the event TTL in milliseconds for a tenant.

@@ -107,6 +107,7 @@ pub fn deliver(
 
         event_bus.push_error(
             crate::admin_events::ErrorCategory::Webhook,
+            None,
             format!(
                 "Webhook delivery failed after {} retries: {}",
                 config.retries, event.event

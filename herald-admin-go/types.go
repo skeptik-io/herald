@@ -86,6 +86,16 @@ type Tenant struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
+// CreateTenantResponse is returned from tenant creation, including the auto-generated credentials.
+type CreateTenantResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Plan      string `json:"plan"`
+	Key       string `json:"key"`
+	Secret    string `json:"secret"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 // AuditEvent represents a single audit log entry.
 type AuditEvent struct {
 	ID           string `json:"id"`

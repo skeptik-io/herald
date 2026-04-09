@@ -30,7 +30,7 @@ export class Connection {
   private onStateChange: OnStateCallback;
 
   constructor(
-    private url: string,
+    private urlOrBuilder: string | (() => string),
     private reconnectEnabled: boolean,
     private maxDelay: number,
     onFrame: OnFrameCallback,
@@ -41,12 +41,18 @@ export class Connection {
     this.maxDelay = maxDelay || MAX_RECONNECT_DELAY;
   }
 
+  private resolveUrl(): string {
+    return typeof this.urlOrBuilder === "function"
+      ? this.urlOrBuilder()
+      : this.urlOrBuilder;
+  }
+
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.intentionalClose = false;
       this.setState("connecting");
 
-      const ws = new WebSocket(this.url);
+      const ws = new WebSocket(this.resolveUrl());
 
       ws.onopen = () => {
         this.ws = ws;

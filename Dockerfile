@@ -26,8 +26,8 @@ RUN chmod +x /docker-entrypoint.sh
 VOLUME /data
 WORKDIR /data
 
-# HTTP API + WebSocket (/ws) on same port. Standalone WS on next port.
-EXPOSE 6201
+# Single port: HTTP API + WebSocket (/ws)
+EXPOSE 6200
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["herald"]

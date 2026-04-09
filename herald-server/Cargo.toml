@@ -23,7 +23,6 @@ shroudb-storage = { version = "0.2", registry = "shroudb" }
 shroudb-client = { version = "1", registry = "shroudb" }
 dashmap = "6"
 parking_lot = "0.12"
-jsonwebtoken = "9"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }

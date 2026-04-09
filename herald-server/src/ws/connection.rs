@@ -18,8 +18,17 @@ use crate::store;
 use crate::ws::handler::handle_message;
 
 const CHANNEL_CAPACITY: usize = 256;
-const AUTH_TIMEOUT_SECS: u64 = 5;
 const CATCHUP_LIMIT: u32 = 200;
+
+/// Pre-validated auth data passed from the upgrade handler.
+pub struct AuthenticatedConn {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub streams: Vec<String>,
+    pub watchlist: Vec<String>,
+    pub last_seen_at: Option<i64>,
+    pub ack_mode: bool,
+}
 
 pub struct ConnContext {
     pub conn_id: ConnId,
@@ -30,7 +39,7 @@ pub struct ConnContext {
     pub ack_mode: bool,
 }
 
-pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
+pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: AuthenticatedConn) {
     let conn_id = ConnId::next();
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (msg_tx, mut msg_rx) = mpsc::channel::<ServerMessage>(CHANNEL_CAPACITY);
@@ -44,94 +53,11 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    let auth_data = tokio::time::timeout(
-        std::time::Duration::from_secs(AUTH_TIMEOUT_SECS),
-        wait_for_auth(&mut ws_rx),
-    )
-    .await;
-
-    let AuthData {
-        token,
-        ref_: auth_ref,
-        last_seen_at,
-        ack_mode,
-    } = match auth_data {
-        Ok(Some(data)) => data,
-        Ok(None) => {
-            debug!(conn = %conn_id, "closed before auth");
-            writer.abort();
-            return;
-        }
-        Err(_) => {
-            let _ = msg_tx
-                .send(ServerMessage::AuthError {
-                    ref_: None,
-                    payload: herald_core::protocol::ErrorPayload {
-                        code: ErrorCode::TokenExpired,
-                        message: "auth timeout".to_string(),
-                    },
-                })
-                .await;
-            drop(msg_tx);
-            let _ = writer.await;
-            return;
-        }
-    };
-
-    let (tenant_id, claims) = match state.validate_jwt(&token) {
-        Ok(v) => v,
-        Err(e) => {
-            state
-                .metrics
-                .ws_auth_failures
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            state.event_bus.push_event(
-                crate::admin_events::EventKind::AuthFailure,
-                None,
-                serde_json::json!({
-                    "conn_id": conn_id.to_string(),
-                    "error": &e,
-                }),
-            );
-            state.event_bus.push_error(
-                crate::admin_events::ErrorCategory::Client,
-                format!("Auth failure: {e}"),
-                serde_json::json!({"conn_id": conn_id.to_string()}),
-            );
-            let _ = msg_tx
-                .send(ServerMessage::AuthError {
-                    ref_: auth_ref.clone(),
-                    payload: herald_core::protocol::ErrorPayload {
-                        code: ErrorCode::TokenInvalid,
-                        message: e,
-                    },
-                })
-                .await;
-            tokio::task::yield_now().await;
-            drop(msg_tx);
-            let _ = writer.await;
-            return;
-        }
-    };
-
-    let user_id = claims.sub.clone();
-    let streams_claim = claims.streams.clone();
-
-    // Enforce per-tenant connection limit
-    let tenant_conns = state.connections.tenant_connection_count(&tenant_id);
-    let max_conns = state.config.tenant_limits.max_connections_per_tenant as usize;
-    if tenant_conns >= max_conns {
-        let _ = msg_tx
-            .send(ServerMessage::error(
-                auth_ref,
-                ErrorCode::RateLimited,
-                format!("tenant connection limit reached ({max_conns})"),
-            ))
-            .await;
-        drop(msg_tx);
-        let _ = writer.await;
-        return;
-    }
+    let tenant_id = auth.tenant_id;
+    let user_id = auth.user_id;
+    let streams_claim = auth.streams;
+    let ack_mode = auth.ack_mode;
+    let last_seen_at = auth.last_seen_at;
 
     state.connections.register(
         conn_id,
@@ -144,7 +70,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     let _ = msg_tx
         .send(ServerMessage::AuthOk {
-            ref_: auth_ref,
+            ref_: None,
             payload: AuthOkPayload {
                 user_id: user_id.clone(),
                 connection_id: conn_id.0,
@@ -165,14 +91,14 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     broadcast_presence_change(&state, &tenant_id, &user_id).await;
 
-    // Set up watchlist from JWT claims and send initial online status
-    if !claims.watchlist.is_empty() {
+    // Set up watchlist and send initial online status
+    if !auth.watchlist.is_empty() {
         state
             .connections
-            .set_watchlist(&tenant_id, &user_id, claims.watchlist.clone());
+            .set_watchlist(&tenant_id, &user_id, auth.watchlist.clone());
 
         // Send initial online status for watched users who are already connected
-        let online_ids: Vec<String> = claims
+        let online_ids: Vec<String> = auth
             .watchlist
             .iter()
             .filter(|uid| state.connections.is_user_online(&tenant_id, uid))
@@ -245,7 +171,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
         streams_claim,
-        watchlist: claims.watchlist.clone(),
+        watchlist: auth.watchlist,
         ack_mode,
     };
 
@@ -281,6 +207,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                         Err(e) => {
                             state.event_bus.push_error(
                                 crate::admin_events::ErrorCategory::Client,
+                                Some(ctx.tenant_id.clone()),
                                 format!("Bad request: {e}"),
                                 serde_json::json!({"conn_id": conn_id.to_string(), "user_id": &ctx.user_id}),
                             );
@@ -292,6 +219,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     Err(e) => {
                         state.event_bus.push_error(
                             crate::admin_events::ErrorCategory::Client,
+                            Some(ctx.tenant_id.clone()),
                             format!("Invalid JSON: {e}"),
                             serde_json::json!({"conn_id": conn_id.to_string(), "user_id": &ctx.user_id}),
                         );
@@ -574,42 +502,6 @@ async fn reconnect_catchup(
                 .await;
         }
     }
-}
-
-/// Auth data extracted from the initial auth frame.
-struct AuthData {
-    token: String,
-    ref_: Option<String>,
-    last_seen_at: Option<i64>,
-    ack_mode: bool,
-}
-
-async fn wait_for_auth(
-    ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
-) -> Option<AuthData> {
-    while let Some(Ok(frame)) = ws_rx.next().await {
-        if let Message::Text(text) = frame {
-            if let Ok(raw) = serde_json::from_str::<RawFrame>(&text) {
-                if raw.type_ == "auth" {
-                    if let Ok(ClientMessage::Auth {
-                        ref_,
-                        token,
-                        last_seen_at,
-                        ack_mode,
-                    }) = ClientMessage::from_raw(raw)
-                    {
-                        return Some(AuthData {
-                            token,
-                            ref_,
-                            last_seen_at,
-                            ack_mode,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Seq-based reconnect catchup for ack-mode connections.

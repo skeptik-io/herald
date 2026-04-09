@@ -21,9 +21,6 @@ use crate::ws::connection::now_millis;
 pub struct CreateTenantRequest {
     pub id: String,
     pub name: String,
-    pub jwt_secret: String,
-    #[serde(default)]
-    pub jwt_issuer: Option<String>,
     #[serde(default)]
     pub plan: Option<String>,
 }
@@ -56,11 +53,12 @@ pub async fn create_tenant(
             .into_response();
     }
 
+    let (key, secret) = store::tenants::generate_tenant_credentials();
     let tenant = Tenant {
         id: req.id,
         name: req.name,
-        jwt_secret: req.jwt_secret,
-        jwt_issuer: req.jwt_issuer,
+        key: key.clone(),
+        secret: secret.clone(),
         plan: req.plan.unwrap_or_else(|| "free".to_string()),
         config: serde_json::json!({}),
         created_at: now_millis(),
@@ -75,13 +73,16 @@ pub async fn create_tenant(
             .into_response();
     }
 
-    // Add to cache
+    // Add to caches
+    state
+        .key_cache
+        .insert(tenant.key.clone(), tenant.id.clone());
     state.tenant_cache.insert(
         tenant.id.clone(),
         TenantConfig {
             id: tenant.id.clone(),
-            jwt_secret: tenant.jwt_secret.clone(),
-            jwt_issuer: tenant.jwt_issuer.clone(),
+            key: tenant.key.clone(),
+            secret: tenant.secret.clone(),
             plan: tenant.plan.clone(),
             event_ttl_days: None,
             cached_at: std::time::Instant::now(),
@@ -103,6 +104,8 @@ pub async fn create_tenant(
             "id": tenant.id,
             "name": tenant.name,
             "plan": tenant.plan,
+            "key": key,
+            "secret": secret,
             "created_at": tenant.created_at,
         })),
     )
@@ -118,7 +121,7 @@ pub async fn get_tenant(
             "id": t.id,
             "name": t.name,
             "plan": t.plan,
-            "jwt_issuer": t.jwt_issuer,
+            "key": t.key,
             "config": t.config,
             "event_ttl_days": t.config.get("event_ttl_days").and_then(|v| v.as_u64()),
             "created_at": t.created_at,
@@ -222,8 +225,8 @@ pub async fn update_tenant(
                     id.clone(),
                     TenantConfig {
                         id: t.id,
-                        jwt_secret: t.jwt_secret,
-                        jwt_issuer: t.jwt_issuer,
+                        key: t.key,
+                        secret: t.secret,
                         plan: t.plan,
                         event_ttl_days: t
                             .config
@@ -257,8 +260,13 @@ pub async fn delete_tenant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match store::tenants::delete(&*state.db, &id).await {
+    // Get tenant key before deleting so we can clean up caches
+    let tenant_key = state.tenant_cache.get(&id).map(|tc| tc.key.clone());
+    match store::tenants::delete(&*state.db, &id, tenant_key.as_deref()).await {
         Ok(true) => {
+            if let Some(ref key) = tenant_key {
+                state.key_cache.remove(key);
+            }
             state.tenant_cache.remove(&id);
             state.audit(&id, "tenant.delete", "tenant", &id, "admin", "success");
             StatusCode::NO_CONTENT.into_response()
@@ -555,7 +563,9 @@ pub async fn purge_tenant_data(
     }
 
     // Remove from in-memory caches
-    state.tenant_cache.remove(&id);
+    if let Some((_, tc)) = state.tenant_cache.remove(&id) {
+        state.key_cache.remove(&tc.key);
+    }
     state.tenant_metrics.remove(&id);
 
     match store::purge::purge_tenant(&*state.db, &id).await {

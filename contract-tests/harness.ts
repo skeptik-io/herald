@@ -9,12 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
-export const WS_PORT = 16300;
-export const HTTP_PORT = 16301;
+export const PORT = 16300;
 export const MASTER_KEY = randomBytes(32).toString("hex");
-export const JWT_SECRET = "contract-test-secret";
-export const ADMIN_TOKEN = "contract-admin-token";
-export const API_TOKEN = "contract-api-token-1234";
+export const ADMIN_PASSWORD = "contract-admin-password-long";
 
 let serverProcess: ChildProcess | null = null;
 let dataDir: string;
@@ -25,8 +22,7 @@ export async function startServer(): Promise<void> {
   const configPath = join(dataDir, "herald.toml");
   const config = `
 [server]
-ws_bind = "127.0.0.1:${WS_PORT}"
-http_bind = "127.0.0.1:${HTTP_PORT}"
+bind = "127.0.0.1:${PORT}"
 log_level = "error"
 shutdown_timeout_secs = 1
 api_rate_limit = 10000
@@ -37,11 +33,7 @@ ws_max_message_size = 65536
 path = "${join(dataDir, "data")}"
 
 [auth]
-jwt_secret = "${JWT_SECRET}"
-super_admin_token = "${ADMIN_TOKEN}"
-
-[auth.api]
-tokens = ["${API_TOKEN}"]
+password = "${ADMIN_PASSWORD}"
 
 [presence]
 linger_secs = 0
@@ -52,7 +44,7 @@ manual_override_ttl_secs = 14400
   const binaryPath = join(process.cwd(), "..", "target", "release", "herald");
 
   return new Promise((resolve, reject) => {
-    serverProcess = spawn(binaryPath, ["--single-tenant", configPath], {
+    serverProcess = spawn(binaryPath, [configPath], {
       env: { ...process.env, SHROUDB_MASTER_KEY: MASTER_KEY },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -71,7 +63,7 @@ manual_override_ttl_secs = 14400
     const check = setInterval(async () => {
       attempts++;
       try {
-        const resp = await fetch(`http://127.0.0.1:${HTTP_PORT}/health`);
+        const resp = await fetch(`http://127.0.0.1:${PORT}/health`);
         if (resp.ok) {
           clearInterval(check);
           resolve();
@@ -101,5 +93,5 @@ export async function stopServer(): Promise<void> {
 }
 
 export function serverUrl(): string {
-  return `http://127.0.0.1:${HTTP_PORT}`;
+  return `http://127.0.0.1:${PORT}`;
 }

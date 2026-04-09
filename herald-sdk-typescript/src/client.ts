@@ -35,14 +35,13 @@ export function nextRef(): string {
 /**
  * Herald WebSocket client for browsers.
  *
- * Connects to a Herald server, authenticates with a JWT, and provides
+ * Connects to a Herald server via authenticated WebSocket upgrade and provides
  * methods for subscribing to streams, publishing events, and receiving
  * real-time events.
  */
 export class HeraldClient {
-  private connection: Connection;
+  private connection!: Connection;
   private options: HeraldClientOptions;
-  private token: string;
   private lastSeenAt: number | null = null;
   private seenMessageIds = new Set<string>();
   private _connectionId: number | null = null;
@@ -81,17 +80,40 @@ export class HeraldClient {
 
   constructor(options: HeraldClientOptions) {
     this.options = options;
-    this.token = options.token;
     if (options.e2ee) {
       this.e2ee = new E2EEManager();
     }
+    this.initConnection();
+  }
+
+  private initConnection(): void {
     this.connection = new Connection(
-      options.url,
-      options.reconnect?.enabled ?? true,
-      options.reconnect?.maxDelay ?? 30_000,
+      () => this.buildAuthUrl(),
+      this.options.reconnect?.enabled ?? true,
+      this.options.reconnect?.maxDelay ?? 30_000,
       (frame) => this.handleFrame(frame),
       (state, previous) => this.handleStateChange(state, previous),
     );
+  }
+
+  private buildAuthUrl(): string {
+    const base = this.options.url;
+    const params = new URLSearchParams();
+    params.set("key", this.options.key);
+    params.set("token", this.options.token);
+    params.set("user_id", this.options.userId);
+    params.set("streams", this.options.streams.join(","));
+    if (this.options.watchlist?.length) {
+      params.set("watchlist", this.options.watchlist.join(","));
+    }
+    if (this.lastSeenAt !== null && !this.options.ackMode) {
+      params.set("last_seen_at", this.lastSeenAt.toString());
+    }
+    if (this.options.ackMode) {
+      params.set("ack_mode", "true");
+    }
+    const separator = base.includes("?") ? "&" : "?";
+    return `${base}${separator}${params.toString()}`;
   }
 
   get connected(): boolean {
@@ -108,7 +130,19 @@ export class HeraldClient {
       await initE2EE();
     }
     await this.connection.connect();
-    await this.authenticate();
+    // Auth happens on upgrade — wait for auth_ok from server
+    await new Promise<void>((resolve, reject) => {
+      this.pending.set("__auth__", {
+        resolve: () => resolve(),
+        reject: (e) => reject(e),
+      });
+      setTimeout(() => {
+        if (this.pending.has("__auth__")) {
+          this.pending.delete("__auth__");
+          reject(new HeraldError("TIMEOUT", "auth timeout"));
+        }
+      }, 10_000);
+    });
     this._initialConnectDone = true;
   }
 
@@ -286,26 +320,6 @@ export class HeraldClient {
     });
   }
 
-  private async authenticate(): Promise<void> {
-    const ref = nextRef();
-    const payload: Record<string, unknown> = { token: this.token };
-    if (this.options.ackMode) {
-      payload.ack_mode = true;
-      // In ack mode, do NOT send last_seen_at — the server uses cursor-based
-      // catchup from the last acked sequence instead.
-    } else if (this.lastSeenAt !== null) {
-      payload.last_seen_at = this.lastSeenAt;
-    }
-
-    return new Promise((resolve, reject) => {
-      this.pending.set(ref, {
-        resolve: () => resolve(),
-        reject: (e) => reject(e),
-      });
-      this.connection.send({ type: "auth", ref, payload });
-    });
-  }
-
   private handleFrame(frame: ServerFrame): void {
     const p = frame.payload as Record<string, unknown> | undefined;
     const ref = frame.ref;
@@ -313,20 +327,28 @@ export class HeraldClient {
     switch (frame.type) {
       case "auth_ok":
         this._connectionId = (p as any)?.connection_id ?? null;
-        if (ref && this.pending.has(ref)) {
+        // Resolve the connect() promise — auth happened on upgrade, no ref
+        if (this.pending.has("__auth__")) {
+          this.pending.get("__auth__")!.resolve(p);
+          this.pending.delete("__auth__");
+        } else if (ref && this.pending.has(ref)) {
           this.pending.get(ref)!.resolve(p);
           this.pending.delete(ref);
         }
         break;
 
-      case "auth_error":
-        if (ref && this.pending.has(ref)) {
-          const code = (p?.code as string) ?? "AUTH_ERROR";
-          const msg = (p?.message as string) ?? "authentication failed";
+      case "auth_error": {
+        const code = (p?.code as string) ?? "AUTH_ERROR";
+        const msg = (p?.message as string) ?? "authentication failed";
+        if (this.pending.has("__auth__")) {
+          this.pending.get("__auth__")!.reject(new HeraldError(code, msg));
+          this.pending.delete("__auth__");
+        } else if (ref && this.pending.has(ref)) {
           this.pending.get(ref)!.reject(new HeraldError(code, msg));
           this.pending.delete(ref);
         }
         break;
+      }
 
       case "subscribed": {
         const payload = p as unknown as SubscribedPayload;
@@ -490,10 +512,6 @@ export class HeraldClient {
         this.emit("watchlist.offline", p as unknown as WatchlistEvent);
         break;
 
-      case "system.token_expiring":
-        this.handleTokenExpiring();
-        break;
-
       case "error":
         if (ref && this.pending.has(ref)) {
           const code = (p?.code as string) ?? "INTERNAL";
@@ -543,25 +561,14 @@ export class HeraldClient {
     }
   }
 
-  private async handleReconnect(): Promise<void> {
-    try {
-      // Re-authenticate with the current token
-      await this.authenticate();
-
-      // Re-subscribe to all previously subscribed streams
-      if (this.subscribedStreams.size > 0) {
-        const streams = Array.from(this.subscribedStreams);
-        // Fire-and-forget subscribe — don't block on it, just send the frame.
-        // The subscribed responses will come through handleFrame normally.
-        this.connection.send({
-          type: "subscribe",
-          payload: { streams },
-        });
-      }
-    } catch {
-      // Auth failed on reconnect — the server will close the connection,
-      // triggering another reconnect attempt. Don't emit error here to
-      // avoid confusing the consumer; the connection state machine handles it.
+  private handleReconnect(): void {
+    // Auth happens on upgrade — just re-subscribe to previously subscribed streams
+    if (this.subscribedStreams.size > 0) {
+      const streams = Array.from(this.subscribedStreams);
+      this.connection.send({
+        type: "subscribe",
+        payload: { streams },
+      });
     }
   }
 
@@ -594,18 +601,4 @@ export class HeraldClient {
     this.pendingAcks.clear();
   }
 
-  private async handleTokenExpiring(): Promise<void> {
-    if (this.options.onTokenExpiring) {
-      try {
-        const newToken = await this.options.onTokenExpiring();
-        this.token = newToken;
-        this.connection.send({
-          type: "auth.refresh",
-          payload: { token: newToken },
-        });
-      } catch {
-        // Token refresh failed — connection will be closed by server
-      }
-    }
-  }
 }

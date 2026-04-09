@@ -3,12 +3,18 @@
 // ---------------------------------------------------------------------------
 
 export interface HeraldClientOptions {
-  /** WebSocket URL, e.g. wss://herald.example.com/ws or ws://localhost:6201/ws */
+  /** WebSocket URL, e.g. wss://herald.example.com/ws or ws://localhost:6200/ws */
   url: string;
-  /** JWT token minted by the app backend */
+  /** Tenant public key (from tenant creation) */
+  key: string;
+  /** HMAC-SHA256 signature over "user_id:sorted_streams:sorted_watchlist" */
   token: string;
-  /** Called when the server sends system.token_expiring. Return a fresh JWT. */
-  onTokenExpiring?: () => Promise<string>;
+  /** User ID for this connection */
+  userId: string;
+  /** Stream IDs the user is authorized to access */
+  streams: string[];
+  /** User IDs to watch for presence changes (optional) */
+  watchlist?: string[];
   /** Reconnect backoff config */
   reconnect?: {
     enabled?: boolean;

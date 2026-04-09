@@ -56,6 +56,7 @@ impl std::fmt::Display for EventKind {
 pub struct ErrorEntry {
     pub timestamp: i64,
     pub category: ErrorCategory,
+    pub tenant_id: Option<String>,
     pub message: String,
     pub details: serde_json::Value,
 }
@@ -164,10 +165,17 @@ impl EventBus {
         let _ = self.broadcast_tx.send(event);
     }
 
-    pub fn push_error(&self, category: ErrorCategory, message: String, details: serde_json::Value) {
+    pub fn push_error(
+        &self,
+        category: ErrorCategory,
+        tenant_id: Option<String>,
+        message: String,
+        details: serde_json::Value,
+    ) {
         let entry = ErrorEntry {
             timestamp: now_millis(),
             category,
+            tenant_id,
             message,
             details,
         };
@@ -188,6 +196,21 @@ impl EventBus {
         filtered.into_iter().rev().take(limit).cloned().collect()
     }
 
+    pub fn recent_events_for_tenant(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+        after_id: Option<u64>,
+    ) -> Vec<AdminEvent> {
+        let events = self.events.read();
+        let filtered: Vec<&AdminEvent> = events
+            .iter()
+            .filter(|e| e.tenant_id.as_deref() == Some(tenant_id))
+            .filter(|e| after_id.is_none_or(|after| e.id > after))
+            .collect();
+        filtered.into_iter().rev().take(limit).cloned().collect()
+    }
+
     pub fn recent_errors(&self, category: Option<ErrorCategory>, limit: usize) -> Vec<ErrorEntry> {
         let errors = self.errors.read();
         let iter = errors.iter();
@@ -196,6 +219,21 @@ impl EventBus {
         } else {
             iter.collect()
         };
+        filtered.into_iter().rev().take(limit).cloned().collect()
+    }
+
+    pub fn recent_errors_for_tenant(
+        &self,
+        tenant_id: &str,
+        category: Option<ErrorCategory>,
+        limit: usize,
+    ) -> Vec<ErrorEntry> {
+        let errors = self.errors.read();
+        let filtered: Vec<&ErrorEntry> = errors
+            .iter()
+            .filter(|e| e.tenant_id.as_deref() == Some(tenant_id))
+            .filter(|e| category.is_none_or(|cat| e.category == cat))
+            .collect();
         filtered.into_iter().rev().take(limit).cloned().collect()
     }
 

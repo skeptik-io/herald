@@ -30,8 +30,8 @@ Herald is a standalone Rust project. It optionally integrates with [ShroudB](htt
 ```
   Browser tabs (N)              App Backend
        │                            │
-       │ WebSocket :6200            │ HTTP :6201
-       ▼                            ▼
+       │ WebSocket /ws              │ HTTP API
+       ▼          :6200             ▼
   ┌──────────────────────────────────────┐
   │               HERALD                  │
   │                                       │
@@ -53,7 +53,7 @@ Herald is a standalone Rust project. It optionally integrates with [ShroudB](htt
   └─────────────────────┘
 ```
 
-Herald runs ShroudB engines (Sentry, Courier, Chronicle) **in-process** using published Rust engine crates. Each engine is generic over `S: Store` and works with both `EmbeddedStore` (local WAL) and `RemoteStore` (shared ShroudB server). Remote TCP overrides are available via `[shroudb]` config for deployments that prefer external engine processes. When no `[shroudb]` config is present and no engines are configured, Herald relies on JWT `streams` claim for authorization only.
+Herald runs ShroudB engines (Sentry, Courier, Chronicle) **in-process** using published Rust engine crates. Each engine is generic over `S: Store` and works with both `EmbeddedStore` (local WAL) and `RemoteStore` (shared ShroudB server). Remote TCP overrides are available via `[shroudb]` config for deployments that prefer external engine processes. When no `[shroudb]` config is present and no engines are configured, Herald relies on the connection's `streams` param for authorization only.
 
 ### What Herald Is
 
@@ -100,7 +100,7 @@ Both streams and events carry an opaque `meta: JsonValue` field. Herald stores i
 
 ## 3. WebSocket Protocol
 
-Port `6200`. JSON text frames only — binary frames are rejected and the connection is closed.
+Single port (default `:6200`), WebSocket upgrade at `/ws`. Auth happens on upgrade via query params. JSON text frames only — binary frames are rejected and the connection is closed.
 
 ### Frame Envelope
 
@@ -120,23 +120,19 @@ Every event follows this structure:
 
 ### Client → Server Events
 
-#### `auth`
+#### Connection Auth
 
-Must be the first event after connection. Connection is closed if not received within 5 seconds.
+Auth happens on WebSocket upgrade via query params — no in-frame auth event needed:
 
-```json
-{
-  "type": "auth",
-  "ref": "abc123",
-  "payload": {
-    "token": "eyJhbGciOi...",
-    "last_seen_at": 1712000000000
-  }
-}
+```
+/ws?key=<tenant_key>&token=<hmac_token>&user_id=<user>&streams=stream1,stream2
 ```
 
-- `token` — JWT minted by the app backend (see [JWT Claims](#jwt-claims))
-- `last_seen_at` — Optional. Millisecond timestamp of last received event. If provided, Herald replays missed events for all streams in the JWT `streams` claim. Ignored when `ack_mode` is true.
+- `key` — Tenant key (auto-generated on tenant creation)
+- `token` — HMAC-SHA256 signed token (generated client-side using tenant secret)
+- `user_id` — User identifier
+- `streams` — Comma-separated stream IDs to authorize
+- `last_seen_at` — Optional. Millisecond timestamp of last received event. If provided, Herald replays missed events for all authorized streams. Ignored when `ack_mode` is true.
 - `ack_mode` — Optional boolean. When true, enables at-least-once delivery. Server uses cursor-based catchup instead of timestamp-based. See [At-Least-Once Delivery](#at-least-once-delivery-ack-mode).
 
 #### `event.ack`
@@ -156,23 +152,9 @@ Acknowledge processing of events up to a sequence number. Fire-and-forget (no se
 - `stream` — Stream ID
 - `seq` — Highest processed sequence number (high-water-mark)
 
-#### `auth.refresh`
-
-Extend the session without reconnecting. Sent in response to `system.token_expiring`.
-
-```json
-{
-  "type": "auth.refresh",
-  "ref": "bcd890",
-  "payload": {
-    "token": "eyJhbGciOi..."
-  }
-}
-```
-
 #### `subscribe`
 
-Subscribe to streams. Only streams listed in the JWT `streams` claim are permitted.
+Subscribe to streams. Only streams listed in the connection's `streams` param are permitted.
 
 ```json
 {
@@ -306,8 +288,8 @@ Connection is closed after sending.
   "type": "auth_error",
   "ref": "abc123",
   "payload": {
-    "code": "TOKEN_EXPIRED",
-    "event": "JWT has expired"
+    "code": "TOKEN_INVALID",
+    "event": "Token validation failed"
   }
 }
 ```
@@ -441,7 +423,7 @@ Broadcast to all streams the affected user belongs to.
 
 #### `system.token_expiring`
 
-Sent 60 seconds before the JWT expires.
+Sent 60 seconds before the token expires.
 
 ```json
 {
@@ -488,44 +470,37 @@ Broadcast to stream subscribers. Ephemeral.
 
 | Code | Meaning |
 |------|---------|
-| `TOKEN_EXPIRED` | JWT `exp` has passed |
-| `TOKEN_INVALID` | JWT signature verification failed |
-| `UNAUTHORIZED` | Stream not in JWT `streams` claim, or Sentry denied |
+| `TOKEN_EXPIRED` | Token has expired |
+| `TOKEN_INVALID` | HMAC token signature verification failed |
+| `UNAUTHORIZED` | Stream not in connection's authorized streams, or Sentry denied |
 | `NOT_SUBSCRIBED` | Action requires subscription to the stream |
 | `ROOM_NOT_FOUND` | Stream does not exist |
 | `RATE_LIMITED` | Too many requests |
 | `BAD_REQUEST` | Malformed frame or invalid payload |
 | `INTERNAL` | Server error |
 
-### JWT Claims
+### WebSocket Auth
 
-Minted by the app backend. Validated by Herald.
+Connections use HMAC-SHA256 signed tokens (key+secret model). Auth happens on WebSocket upgrade via query params:
 
-```json
-{
-  "sub": "user_id",
-  "streams": ["stream_a", "stream_b"],
-  "exp": 1712003600,
-  "iat": 1712000000,
-  "iss": "app-backend"
-}
+```
+/ws?key=<tenant_key>&token=<hmac_token>&user_id=<user>&streams=stream1,stream2
 ```
 
-| Claim | Type | Required | Description |
+| Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sub` | string | yes | User ID |
-| `streams` | string[] | yes | Streams the user may subscribe to |
-| `exp` | number | yes | Expiration timestamp (Unix seconds) |
-| `iat` | number | yes | Issued-at timestamp |
-| `iss` | string | yes | Issuer (must match `auth.jwt_issuer` in config) |
+| `key` | string | yes | Tenant key (auto-generated on tenant creation) |
+| `token` | string | yes | HMAC-SHA256 signed token (generated using tenant secret) |
+| `user_id` | string | yes | User identifier |
+| `streams` | string | yes | Comma-separated stream IDs to authorize |
 
-Herald validates the signature using the configured HMAC secret or RSA/EC public key. The `streams` claim is the authorization boundary — `subscribe` requests for unlisted streams are rejected with `UNAUTHORIZED`.
+Herald validates the HMAC signature using the tenant's secret. The `streams` param is the authorization boundary — `subscribe` requests for unlisted streams are rejected with `UNAUTHORIZED`.
 
 ---
 
 ## 4. HTTP API
 
-Port `6201`. Backend-to-Herald communication. Authenticated via `Authorization: Bearer <token>` where `<token>` is one of the values in `auth.api.tokens` in Herald's config.
+Same port as WebSocket (default `:6200`). Backend-to-Herald communication. Tenant API authenticated via HMAC token. Admin API authenticated via `Authorization: Bearer <password>` where `<password>` is `auth.password` from config.
 
 All request and response bodies are JSON. All timestamps are Unix milliseconds.
 
@@ -709,18 +684,17 @@ All connections for the same user receive all events for their subscribed stream
 ### Connection State Machine
 
 ```
-CONNECTING → AUTHENTICATING → ACTIVE → CLOSING → CLOSED
-                  │                │
-                  ▼                ▼
-             AUTH_FAILED       EXPIRED
+CONNECTING → ACTIVE → CLOSING → CLOSED
+                │
+                ▼
+             EXPIRED
 ```
 
 | State | Description |
 |-------|-------------|
-| `CONNECTING` | WebSocket handshake in progress |
-| `AUTHENTICATING` | Connected, waiting for `auth` event (5s timeout) |
+| `CONNECTING` | WebSocket handshake in progress (auth validated on upgrade) |
 | `ACTIVE` | Authenticated, can subscribe/send/receive |
-| `EXPIRED` | JWT expired, waiting for `auth.refresh` (10s grace) |
+| `EXPIRED` | Token expired |
 | `CLOSING` | Graceful shutdown, close frame sent |
 | `CLOSED` | Connection terminated |
 
@@ -728,7 +702,7 @@ CONNECTING → AUTHENTICATING → ACTIVE → CLOSING → CLOSED
 
 1. Client detects disconnection (WebSocket `onclose` / `onerror`)
 2. Client reconnects with exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s (with random jitter)
-3. Client sends `auth` with `last_seen_at` set to the `sent_at` timestamp of the last received `event.new`
+3. Client reconnects with `last_seen_at` query param set to the `sent_at` timestamp of the last received `event.new`
 4. Herald responds with:
    - `auth_ok`
    - One `subscribed` per previously subscribed stream (with current member state)
@@ -743,8 +717,8 @@ Opt-in ack mode upgrades delivery from at-most-once to at-least-once. When a cli
 
 **Protocol:**
 
-1. Client sends `auth` with `ack_mode: true` (no `last_seen_at`)
-2. Server subscribes client to all JWT streams, reads cursor (last acked seq) from store
+1. Client connects with `ack_mode=true` query param (no `last_seen_at`)
+2. Server subscribes client to all authorized streams, reads cursor (last acked seq) from store
 3. Server replays events with `seq > cursor` as `events.batch`
 4. Client sends `event.ack` frames with per-stream seq high-water-marks:
    ```json
@@ -765,18 +739,16 @@ Opt-in ack mode upgrades delivery from at-most-once to at-least-once. When a cli
 **SDK usage:**
 
 ```typescript
-const client = new HeraldClient({ url, token, ackMode: true });
+const client = new HeraldClient({ url, key, token, userId, streams, ackMode: true });
 ```
 
 The SDK handles ack sending transparently with 100ms debounce.
 
-### Token Refresh
+### Token Expiry
 
-1. Herald sends `system.token_expiring` 60 seconds before JWT `exp`
-2. Client calls its app backend to mint a new JWT
-3. Client sends `auth.refresh` with the new token
-4. Herald validates, updates auth context, responds with `auth_ok`
-5. If no refresh arrives: connection enters `EXPIRED` state for 10 seconds, then closes
+1. Herald sends `system.token_expiring` 60 seconds before the token expires
+2. Client must reconnect with a fresh token before expiry
+3. If the token expires, the connection enters `EXPIRED` state and is closed
 
 ### Heartbeat
 
@@ -998,7 +970,7 @@ The webhook delivers event bodies as-is (opaque). The app persists events in its
 2. Herald inserts member record
 3. Herald adds user to in-memory `StreamState.members`
 4. Herald broadcasts `member.joined` to stream subscribers
-5. If the user has active WebSocket connections, they can now `subscribe` to this stream (requires a JWT with the stream in the `streams` claim)
+5. If the user has active WebSocket connections, they can now `subscribe` to this stream (requires the stream in the connection's authorized `streams`)
 
 ### Deletion
 
@@ -1031,7 +1003,7 @@ herald/
 │       ├── cursor.rs               # Cursor, CursorUpdate
 │       ├── protocol.rs             # ClientFrame, ServerFrame, FrameType enums
 │       ├── error.rs                # HeraldError
-│       └── auth.rs                 # JwtClaims
+│       └── auth.rs                 # TokenClaims (HMAC-SHA256)
 │
 ├── herald-server/                  # The binary
 │   └── src/
@@ -1039,14 +1011,14 @@ herald/
 │       ├── config.rs               # HeraldConfig (herald.toml)
 │       ├── state.rs                # AppState (shared across handlers)
 │       │
-│       ├── ws/                     # WebSocket server (:6200)
+│       ├── ws/                     # WebSocket server (/ws on :6200)
 │       │   ├── mod.rs
 │       │   ├── upgrade.rs          # HTTP → WebSocket upgrade handler
 │       │   ├── connection.rs       # Per-connection state machine
 │       │   ├── handler.rs          # Frame dispatch (auth, subscribe, send, etc.)
 │       │   └── fanout.rs           # Stream-level event fan-out
 │       │
-│       ├── http/                   # HTTP API (:6201)
+│       ├── http/                   # HTTP API (same port :6200)
 │       │   ├── mod.rs              # Axum router
 │       │   ├── streams.rs            # CRUD
 │       │   ├── members.rs          # Member management
@@ -1104,7 +1076,7 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 dashmap = "6"
-jsonwebtoken = "9"
+hmac = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = "1"
@@ -1145,8 +1117,7 @@ See `herald.toml.example` for a complete annotated example.
 
 ```toml
 [server]
-ws_bind = "0.0.0.0:6200"
-http_bind = "0.0.0.0:6201"
+bind = "0.0.0.0:6200"
 log_level = "info"
 
 [store]
@@ -1154,11 +1125,8 @@ path = "./herald-data/herald.db"
 event_ttl_days = 7
 
 [auth]
-jwt_secret = "your-hmac-secret"
-jwt_issuer = "app-backend"
-
-[auth.api]
-tokens = ["herald-api-token-1"]
+password = "your-admin-password"
+token_window_secs = 300
 
 [presence]
 linger_secs = 10

@@ -8,18 +8,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{EncodingKey, Header};
+use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-use herald_core::auth::JwtClaims;
 use herald_server::config::*;
 use herald_server::state::{AppState, AppStateBuilder};
 use herald_server::store;
 
-const JWT_SECRET: &str = "bench-secret";
-const SUPER_TOKEN: &str = "bench-super";
+const ADMIN_PASSWORD: &str = "bench-admin-password-long-enough";
 
 async fn create_test_store() -> Arc<herald_server::store_backend::StoreBackend> {
     let dir = tempfile::tempdir().unwrap();
@@ -43,11 +42,11 @@ async fn create_test_store() -> Arc<herald_server::store_backend::StoreBackend> 
 
 struct BenchServer {
     state: Arc<AppState>,
-    ws_port: u16,
-    http_port: u16,
+    port: u16,
+    key: String,
+    secret: String,
     api_token: String,
-    _ws_handle: tokio::task::JoinHandle<()>,
-    _http_handle: tokio::task::JoinHandle<()>,
+    _handle: tokio::task::JoinHandle<()>,
 }
 
 impl BenchServer {
@@ -56,8 +55,7 @@ impl BenchServer {
 
         let config = HeraldConfig {
             server: ServerConfig {
-                ws_bind: "127.0.0.1:0".to_string(),
-                http_bind: "127.0.0.1:0".to_string(),
+                bind: "127.0.0.1:0".to_string(),
                 log_level: "warn".to_string(),
                 max_messages_per_sec: 100000,
                 ..Default::default()
@@ -69,10 +67,8 @@ impl BenchServer {
                 event_ttl_days: 7,
             },
             auth: AuthConfig {
-                jwt_secret: Some(JWT_SECRET.to_string()),
-                jwt_issuer: None,
-                super_admin_token: Some(SUPER_TOKEN.to_string()),
-                api: ApiAuthConfig { tokens: vec![] },
+                password: Some(ADMIN_PASSWORD.to_string()),
+                token_window_secs: 300,
             },
             presence: PresenceConfig {
                 linger_secs: 0,
@@ -95,49 +91,57 @@ impl BenchServer {
             instance_id: uuid::Uuid::new_v4().to_string(),
         });
 
-        state.bootstrap_single_tenant().await.unwrap();
+        state.hydrate_tenant_cache().await.unwrap();
+        state.bootstrap_default_tenant().await.unwrap();
 
-        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ws_port = ws_listener.local_addr().unwrap().port();
-        let http_port = http_listener.local_addr().unwrap().port();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        let ws_state = state.clone();
-        let ws_app = axum::Router::new()
-            .route(
-                "/",
-                axum::routing::get(herald_server::ws::upgrade::ws_handler),
-            )
-            .with_state(ws_state);
-        let http_app = herald_server::http::router(state.clone());
+        let app = herald_server::http::router(state.clone());
 
-        let ws_handle = tokio::spawn(async move {
-            axum::serve(ws_listener, ws_app).await.unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
         });
-        let http_handle = tokio::spawn(async move {
-            axum::serve(http_listener, http_app).await.unwrap();
-        });
-
-        let api_token = uuid::Uuid::new_v4().to_string();
-        store::tenants::create_token(&*state.db, &api_token, "default", None)
-            .await
-            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        // Create a tenant for the bench tests
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/admin/tenants"))
+            .bearer_auth(ADMIN_PASSWORD)
+            .json(&json!({"id": "bench", "name": "bench", "plan": "pro"}))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let key = body["key"].as_str().unwrap().to_string();
+        let secret = body["secret"].as_str().unwrap().to_string();
+
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{port}/admin/tenants/bench/tokens"
+            ))
+            .bearer_auth(ADMIN_PASSWORD)
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let api_token = body["token"].as_str().unwrap().to_string();
+
         BenchServer {
             state,
-            ws_port,
-            http_port,
+            port,
+            key,
+            secret,
             api_token,
-            _ws_handle: ws_handle,
-            _http_handle: http_handle,
+            _handle: handle,
         }
     }
 
     async fn setup_stream(&self, stream_id: &str, members: &[&str]) {
         let client = reqwest::Client::new();
-        let base = format!("http://127.0.0.1:{}", self.http_port);
+        let base = format!("http://127.0.0.1:{}", self.port);
 
         client
             .post(format!("{base}/streams"))
@@ -159,53 +163,52 @@ impl BenchServer {
     }
 }
 
-fn mint_jwt(user_id: &str, streams: &[&str]) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    jsonwebtoken::encode(
-        &Header::default(),
-        &JwtClaims {
-            sub: user_id.to_string(),
-            tenant: "default".to_string(),
-            streams: streams.iter().map(|s| s.to_string()).collect(),
-            exp: now + 3600,
-            iat: now,
-            iss: "test".to_string(),
-            watchlist: vec![],
-        },
-        &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
-    )
-    .unwrap()
+fn mint_signed_token(secret: &str, user_id: &str, streams: &[&str]) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    let mut sorted_streams: Vec<&str> = streams.to_vec();
+    sorted_streams.sort();
+    let payload = format!("{}:{}:", user_id, sorted_streams.join(","));
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(payload.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn ws_connect(port: u16) -> WsStream {
-    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/"))
-        .await
-        .unwrap();
+async fn ws_connect_auth(
+    port: u16,
+    key: &str,
+    secret: &str,
+    user_id: &str,
+    streams: &[&str],
+) -> WsStream {
+    let token = mint_signed_token(secret, user_id, streams);
+    let streams_str = streams.join(",");
+    let url = format!(
+        "ws://127.0.0.1:{port}/ws?key={key}&token={token}&user_id={user_id}&streams={streams_str}"
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     ws
 }
 
-async fn ws_auth_subscribe(ws: &mut WsStream, token: &str, streams: &[&str]) {
-    ws.send(Message::Text(
-        json!({"type": "auth", "payload": {"token": token}})
-            .to_string()
-            .into(),
-    ))
-    .await
-    .unwrap();
-    loop {
-        if let Some(Ok(Message::Text(text))) = ws.next().await {
-            let msg: Value = serde_json::from_str(&text).unwrap();
-            if msg["type"] == "auth_ok" {
-                break;
+async fn ws_wait_auth_ok(ws: &mut WsStream) {
+    for _ in 0..20 {
+        let timeout = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                if msg["type"] == "auth_ok" {
+                    return;
+                }
             }
+            other => panic!("expected text frame, got: {other:?}"),
         }
     }
+    panic!("did not receive 'auth_ok' within 20 frames");
+}
+
+async fn ws_subscribe(ws: &mut WsStream, streams: &[&str]) {
     ws.send(Message::Text(
         json!({"type": "subscribe", "payload": {"streams": streams}})
             .to_string()
@@ -301,8 +304,16 @@ async fn bench_wal_latency() {
     let server = BenchServer::start().await;
     server.setup_stream("bench", &["sender"]).await;
 
-    let mut ws = ws_connect(server.ws_port).await;
-    ws_auth_subscribe(&mut ws, &mint_jwt("sender", &["bench"]), &["bench"]).await;
+    let mut ws = ws_connect_auth(
+        server.port,
+        &server.key,
+        &server.secret,
+        "sender",
+        &["bench"],
+    )
+    .await;
+    ws_wait_auth_ok(&mut ws).await;
+    ws_subscribe(&mut ws, &["bench"]).await;
 
     let elapsed = bench_send(&mut ws, "bench", count).await;
     print_results("WAL STORAGE (ShroudB)", count, elapsed, &server.state);

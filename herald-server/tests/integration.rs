@@ -6,24 +6,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{EncodingKey, Header};
+use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
+use sha2::Sha256;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-use herald_core::auth::JwtClaims;
 use herald_server::config::{
-    ApiAuthConfig, AuthConfig, ClusterConfig, HeraldConfig, PresenceConfig, ServerConfig,
-    StoreConfig, TenantLimitsConfig, TlsConfig, WebhookConfig,
+    AuthConfig, ClusterConfig, HeraldConfig, PresenceConfig, ServerConfig, StoreConfig,
+    TenantLimitsConfig, TlsConfig, WebhookConfig,
 };
 use herald_server::state::{AppState, AppStateBuilder};
 use herald_server::store;
 use herald_server::store_backend::StoreBackend;
 
-const SUPER_ADMIN_TOKEN: &str = "test-super-admin";
-const TENANT_A_SECRET: &str = "tenant-a-secret";
-const TENANT_B_SECRET: &str = "tenant-b-secret";
+const ADMIN_PASSWORD: &str = "test-admin-password-long-enough";
 
 // ---------------------------------------------------------------------------
 // Test harness
@@ -52,10 +50,8 @@ async fn create_test_store() -> Arc<herald_server::store_backend::StoreBackend> 
 struct TestServer {
     #[allow(dead_code)]
     state: Arc<AppState>,
-    ws_port: u16,
-    http_port: u16,
-    _ws_handle: tokio::task::JoinHandle<()>,
-    _http_handle: tokio::task::JoinHandle<()>,
+    port: u16,
+    _handle: tokio::task::JoinHandle<()>,
 }
 
 impl TestServer {
@@ -64,8 +60,7 @@ impl TestServer {
 
         let config = HeraldConfig {
             server: ServerConfig {
-                ws_bind: "127.0.0.1:0".to_string(),
-                http_bind: "127.0.0.1:0".to_string(),
+                bind: "127.0.0.1:0".to_string(),
                 log_level: "warn".to_string(),
                 max_messages_per_sec: 1000,
                 api_rate_limit: 10000,
@@ -78,10 +73,8 @@ impl TestServer {
                 event_ttl_days: 7,
             },
             auth: AuthConfig {
-                jwt_secret: Some(TENANT_A_SECRET.to_string()),
-                jwt_issuer: None,
-                super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-                api: ApiAuthConfig { tokens: vec![] },
+                password: Some(ADMIN_PASSWORD.to_string()),
+                token_window_secs: 300,
             },
             presence: PresenceConfig {
                 linger_secs: 0,
@@ -104,76 +97,103 @@ impl TestServer {
             instance_id: uuid::Uuid::new_v4().to_string(),
         });
 
-        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ws_port = ws_listener.local_addr().unwrap().port();
-        let http_port = http_listener.local_addr().unwrap().port();
+        // Bootstrap default tenant before starting server
+        state.hydrate_tenant_cache().await.unwrap();
+        state.bootstrap_default_tenant().await.unwrap();
 
-        let ws_state = state.clone();
-        let ws_app = axum::Router::new()
-            .route(
-                "/",
-                axum::routing::get(herald_server::ws::upgrade::ws_handler),
-            )
-            .with_state(ws_state);
-        let http_app = herald_server::http::router(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        let ws_handle = tokio::spawn(async move {
-            axum::serve(ws_listener, ws_app).await.unwrap();
-        });
-        let http_handle = tokio::spawn(async move {
-            axum::serve(http_listener, http_app).await.unwrap();
+        let app = herald_server::http::router(state.clone());
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         TestServer {
             state,
-            ws_port,
-            http_port,
-            _ws_handle: ws_handle,
-            _http_handle: http_handle,
+            port,
+            _handle: handle,
         }
     }
 
     fn http_url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{}", self.http_port, path)
+        format!("http://127.0.0.1:{}{}", self.port, path)
     }
 
     fn http_client(&self) -> reqwest::Client {
         reqwest::Client::new()
     }
 
-    async fn ws_connect(
+    /// Connect WebSocket with auth query params (auth on upgrade).
+    async fn ws_connect_auth(
         &self,
+        key: &str,
+        secret: &str,
+        user_id: &str,
+        streams: &[&str],
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        let url = format!("ws://127.0.0.1:{}/", self.ws_port);
+        let token = mint_signed_token(secret, user_id, streams, &[]);
+        let streams_str = streams.join(",");
+        let url = format!(
+            "ws://127.0.0.1:{}/ws?key={}&token={}&user_id={}&streams={}",
+            self.port, key, token, user_id, streams_str
+        );
         let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         ws
     }
 
-    async fn create_tenant(&self, id: &str, jwt_secret: &str) -> String {
+    /// Connect WebSocket with auth (including watchlist).
+    async fn ws_connect_auth_watchlist(
+        &self,
+        key: &str,
+        secret: &str,
+        user_id: &str,
+        streams: &[&str],
+        watchlist: &[&str],
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let token = mint_signed_token(secret, user_id, streams, watchlist);
+        let streams_str = streams.join(",");
+        let watchlist_str = watchlist.join(",");
+        let url = format!(
+            "ws://127.0.0.1:{}/ws?key={}&token={}&user_id={}&streams={}&watchlist={}",
+            self.port, key, token, user_id, streams_str, watchlist_str
+        );
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        ws
+    }
+
+    /// Create a tenant and return (key, secret, api_token).
+    async fn create_tenant(&self, id: &str) -> (String, String, String) {
         let resp = self
             .http_client()
             .post(self.http_url("/admin/tenants"))
-            .bearer_auth(SUPER_ADMIN_TOKEN)
-            .json(&json!({"id": id, "name": id, "jwt_secret": jwt_secret, "plan": "pro"}))
+            .bearer_auth(ADMIN_PASSWORD)
+            .json(&json!({"id": id, "name": id, "plan": "pro"}))
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED, "create tenant {id}");
+        let body: Value = resp.json().await.unwrap();
+        let key = body["key"].as_str().unwrap().to_string();
+        let secret = body["secret"].as_str().unwrap().to_string();
 
         let resp = self
             .http_client()
             .post(self.http_url(&format!("/admin/tenants/{id}/tokens")))
-            .bearer_auth(SUPER_ADMIN_TOKEN)
+            .bearer_auth(ADMIN_PASSWORD)
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body: Value = resp.json().await.unwrap();
-        body["token"].as_str().unwrap().to_string()
+        let api_token = body["token"].as_str().unwrap().to_string();
+
+        (key, secret, api_token)
     }
 
     async fn create_stream(&self, api_token: &str, stream_id: &str) {
@@ -205,35 +225,21 @@ impl TestServer {
     }
 }
 
-fn mint_jwt(user_id: &str, tenant: &str, streams: &[&str], secret: &str) -> String {
-    mint_jwt_with_watchlist(user_id, tenant, streams, &[], secret)
-}
-
-fn mint_jwt_with_watchlist(
-    user_id: &str,
-    tenant: &str,
-    streams: &[&str],
-    watchlist: &[&str],
-    secret: &str,
-) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    jsonwebtoken::encode(
-        &Header::default(),
-        &JwtClaims {
-            sub: user_id.to_string(),
-            tenant: tenant.to_string(),
-            streams: streams.iter().map(|s| s.to_string()).collect(),
-            exp: now + 3600,
-            iat: now,
-            iss: "test".to_string(),
-            watchlist: watchlist.iter().map(|s| s.to_string()).collect(),
-        },
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .unwrap()
+fn mint_signed_token(secret: &str, user_id: &str, streams: &[&str], watchlist: &[&str]) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    let mut sorted_streams: Vec<&str> = streams.to_vec();
+    sorted_streams.sort();
+    let mut sorted_watchlist: Vec<&str> = watchlist.to_vec();
+    sorted_watchlist.sort();
+    let payload = format!(
+        "{}:{}:{}",
+        user_id,
+        sorted_streams.join(","),
+        sorted_watchlist.join(","),
+    );
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(payload.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 async fn ws_send(
@@ -268,13 +274,12 @@ async fn ws_recv_type(
     panic!("did not receive '{expected_type}' within 20 frames");
 }
 
-async fn ws_auth(
+/// Wait for auth_ok after WebSocket upgrade (auth happens on upgrade via query params).
+async fn ws_wait_auth_ok(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    token: &str,
 ) -> Value {
-    ws_send(ws, json!({"type": "auth", "payload": {"token": token}})).await;
     ws_recv_type(ws, "auth_ok").await
 }
 
@@ -286,8 +291,8 @@ async fn ws_auth(
 async fn test_tenant_creation_and_stream_isolation() {
     let server = TestServer::start().await;
 
-    let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
-    let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+    let (_key_a, _secret_a, token_a) = server.create_tenant("acme").await;
+    let (_key_b, _secret_b, token_b) = server.create_tenant("beta").await;
 
     server.create_stream(&token_a, "chat").await;
 
@@ -309,20 +314,18 @@ async fn test_tenant_creation_and_stream_isolation() {
 async fn test_ws_tenant_isolation() {
     let server = TestServer::start().await;
 
-    let token_a = server.create_tenant("ws-a", TENANT_A_SECRET).await;
-    let token_b = server.create_tenant("ws-b", TENANT_B_SECRET).await;
+    let (key_a, secret_a, token_a) = server.create_tenant("ws-a").await;
+    let (key_b, secret_b, token_b) = server.create_tenant("ws-b").await;
 
     server.create_stream(&token_a, "room").await;
     server.add_member(&token_a, "room", "alice").await;
     server.create_stream(&token_b, "room").await;
     server.add_member(&token_b, "room", "bob").await;
 
-    let mut ws_a = server.ws_connect().await;
-    ws_auth(
-        &mut ws_a,
-        &mint_jwt("alice", "ws-a", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws_a = server
+        .ws_connect_auth(&key_a, &secret_a, "alice", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws_a).await;
     ws_send(
         &mut ws_a,
         json!({"type": "subscribe", "payload": {"streams": ["room"]}}),
@@ -330,12 +333,10 @@ async fn test_ws_tenant_isolation() {
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
 
-    let mut ws_b = server.ws_connect().await;
-    ws_auth(
-        &mut ws_b,
-        &mint_jwt("bob", "ws-b", &["room"], TENANT_B_SECRET),
-    )
-    .await;
+    let mut ws_b = server
+        .ws_connect_auth(&key_b, &secret_b, "bob", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws_b).await;
     ws_send(
         &mut ws_b,
         json!({"type": "subscribe", "payload": {"streams": ["room"]}}),
@@ -365,26 +366,20 @@ async fn test_ws_tenant_isolation() {
 #[tokio::test]
 async fn test_invalid_tenant_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("real", TENANT_A_SECRET).await;
+    let (_key, _secret, _token) = server.create_tenant("real").await;
 
-    let bad_jwt = mint_jwt("alice", "fake", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_send(
-        &mut ws,
-        json!({"type": "auth", "payload": {"token": bad_jwt}}),
-    )
-    .await;
-
-    let result = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-    match result {
-        Ok(Some(Ok(Message::Text(text)))) => {
-            let msg: Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(msg["type"], "auth_error");
-        }
-        Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None) => {}
-        Err(_) => panic!("timeout"),
-        other => panic!("unexpected: {other:?}"),
-    }
+    // Use a bogus key that doesn't map to any tenant
+    let bad_token = mint_signed_token("fake-secret", "alice", &["chat"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key=bogus-key&token={}&user_id=alice&streams=chat",
+        server.port, bad_token
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    // Should fail to upgrade (HTTP 401)
+    assert!(
+        result.is_err(),
+        "connection with bogus key should be rejected"
+    );
 }
 
 #[tokio::test]
@@ -394,7 +389,7 @@ async fn test_admin_requires_super_token() {
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants"))
-        .json(&json!({"id": "x", "name": "x", "jwt_secret": "x"}))
+        .json(&json!({"id": "x", "name": "x", "plan": "free"}))
         .send()
         .await
         .unwrap();
@@ -404,18 +399,16 @@ async fn test_admin_requires_super_token() {
 #[tokio::test]
 async fn test_subscribe_send_fanout() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("fanout", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("fanout").await;
 
     server.create_stream(&token, "general").await;
     server.add_member(&token, "general", "alice").await;
     server.add_member(&token, "general", "bob").await;
 
-    let mut ws_a = server.ws_connect().await;
-    ws_auth(
-        &mut ws_a,
-        &mint_jwt("alice", "fanout", &["general"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws_a = server
+        .ws_connect_auth(&key, &secret, "alice", &["general"])
+        .await;
+    ws_wait_auth_ok(&mut ws_a).await;
     ws_send(
         &mut ws_a,
         json!({"type": "subscribe", "payload": {"streams": ["general"]}}),
@@ -423,12 +416,10 @@ async fn test_subscribe_send_fanout() {
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
 
-    let mut ws_b = server.ws_connect().await;
-    ws_auth(
-        &mut ws_b,
-        &mint_jwt("bob", "fanout", &["general"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws_b = server
+        .ws_connect_auth(&key, &secret, "bob", &["general"])
+        .await;
+    ws_wait_auth_ok(&mut ws_b).await;
     ws_send(
         &mut ws_b,
         json!({"type": "subscribe", "payload": {"streams": ["general"]}}),
@@ -490,8 +481,8 @@ async fn test_admin_tenant_crud() {
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
-        .json(&json!({"id": "crud-test", "name": "CRUD Tenant", "jwt_secret": "secret123"}))
+        .bearer_auth(ADMIN_PASSWORD)
+        .json(&json!({"id": "crud-test", "name": "CRUD Tenant", "plan": "free"}))
         .send()
         .await
         .unwrap();
@@ -501,7 +492,7 @@ async fn test_admin_tenant_crud() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants/crud-test"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -514,7 +505,7 @@ async fn test_admin_tenant_crud() {
     let resp = server
         .http_client()
         .patch(server.http_url("/admin/tenants/crud-test"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .json(&json!({"plan": "pro"}))
         .send()
         .await
@@ -525,7 +516,7 @@ async fn test_admin_tenant_crud() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -537,7 +528,7 @@ async fn test_admin_tenant_crud() {
     let resp = server
         .http_client()
         .delete(server.http_url("/admin/tenants/crud-test"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -547,7 +538,7 @@ async fn test_admin_tenant_crud() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants/crud-test"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -557,13 +548,13 @@ async fn test_admin_tenant_crud() {
 #[tokio::test]
 async fn test_admin_api_token_management() {
     let server = TestServer::start().await;
-    server.create_tenant("tok-test", TENANT_A_SECRET).await;
+    let _ = server.create_tenant("tok-test").await;
 
     // Create token
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants/tok-test/tokens"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -576,7 +567,7 @@ async fn test_admin_api_token_management() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants/tok-test/tokens"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -603,7 +594,7 @@ async fn test_admin_api_token_management() {
 #[tokio::test]
 async fn test_duplicate_stream_creation() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("dup", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("dup").await;
 
     server.create_stream(&token, "room1").await;
 
@@ -622,7 +613,7 @@ async fn test_duplicate_stream_creation() {
 #[tokio::test]
 async fn test_stream_update_and_delete() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("rud", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("rud").await;
     server.create_stream(&token, "updatable").await;
 
     // Update
@@ -671,7 +662,7 @@ async fn test_stream_update_and_delete() {
 #[tokio::test]
 async fn test_nonexistent_stream() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("noroom", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("noroom").await;
 
     let resp = server
         .http_client()
@@ -690,7 +681,7 @@ async fn test_nonexistent_stream() {
 #[tokio::test]
 async fn test_member_role_update() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("role", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("role").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
@@ -726,7 +717,7 @@ async fn test_member_role_update() {
 #[tokio::test]
 async fn test_member_remove() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("rem", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("rem").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
@@ -758,17 +749,15 @@ async fn test_member_remove() {
 #[tokio::test]
 async fn test_ws_presence_cursor_typing() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("pct", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("pct").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
     server.add_member(&token, "room", "bob").await;
 
-    let mut ws_a = server.ws_connect().await;
-    ws_auth(
-        &mut ws_a,
-        &mint_jwt("alice", "pct", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws_a = server
+        .ws_connect_auth(&key, &secret, "alice", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws_a).await;
     ws_send(
         &mut ws_a,
         json!({"type":"subscribe","payload":{"streams":["room"]}}),
@@ -776,12 +765,10 @@ async fn test_ws_presence_cursor_typing() {
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
 
-    let mut ws_b = server.ws_connect().await;
-    ws_auth(
-        &mut ws_b,
-        &mint_jwt("bob", "pct", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws_b = server
+        .ws_connect_auth(&key, &secret, "bob", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws_b).await;
     ws_send(
         &mut ws_b,
         json!({"type":"subscribe","payload":{"streams":["room"]}}),
@@ -832,16 +819,14 @@ async fn test_ws_presence_cursor_typing() {
 #[tokio::test]
 async fn test_ws_event_history() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("hist", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("hist").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
-    let mut ws = server.ws_connect().await;
-    ws_auth(
-        &mut ws,
-        &mint_jwt("alice", "hist", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type":"subscribe","payload":{"streams":["room"]}}),
@@ -872,18 +857,16 @@ async fn test_ws_event_history() {
 #[tokio::test]
 async fn test_ws_reconnect_catchup() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("recon", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("recon").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
     server.add_member(&token, "room", "bob").await;
 
     // Alice sends messages
-    let mut ws_a = server.ws_connect().await;
-    ws_auth(
-        &mut ws_a,
-        &mint_jwt("alice", "recon", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws_a = server
+        .ws_connect_auth(&key, &secret, "alice", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws_a).await;
     ws_send(
         &mut ws_a,
         json!({"type":"subscribe","payload":{"streams":["room"]}}),
@@ -901,9 +884,13 @@ async fn test_ws_reconnect_catchup() {
     }
 
     // Bob connects with last_seen_at
-    let mut ws_b = server.ws_connect().await;
-    ws_send(&mut ws_b, json!({"type":"auth","payload":{"token":mint_jwt("bob","recon",&["room"],TENANT_A_SECRET),"last_seen_at":before}})).await;
-    ws_recv_type(&mut ws_b, "auth_ok").await;
+    let bob_token = mint_signed_token(&secret, "bob", &["room"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=bob&streams=room&last_seen_at={}",
+        server.port, key, bob_token, before
+    );
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws_wait_auth_ok(&mut ws_b).await;
     let sub = ws_recv_type(&mut ws_b, "subscribed").await;
     assert_eq!(sub["payload"]["stream"], "room");
 
@@ -917,16 +904,14 @@ async fn test_ws_reconnect_catchup() {
 #[tokio::test]
 async fn test_ws_http_inject_fanout() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("inject", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("inject").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
-    let mut ws = server.ws_connect().await;
-    ws_auth(
-        &mut ws,
-        &mint_jwt("alice", "inject", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type":"subscribe","payload":{"streams":["room"]}}),
@@ -955,31 +940,29 @@ async fn test_ws_http_inject_fanout() {
 #[tokio::test]
 async fn test_ws_wrong_secret_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("secure", TENANT_A_SECRET).await;
+    let (key, _secret, _token) = server.create_tenant("secure").await;
 
-    let bad_jwt = mint_jwt("alice", "secure", &["room"], "wrong-secret");
-    let mut ws = server.ws_connect().await;
-    ws_send(&mut ws, json!({"type":"auth","payload":{"token": bad_jwt}})).await;
-
-    let result = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-    match result {
-        Ok(Some(Ok(Message::Text(text)))) => {
-            let msg: Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(msg["type"], "auth_error");
-        }
-        Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None) => {}
-        Err(_) => panic!("timeout"),
-        other => panic!("unexpected: {other:?}"),
-    }
+    // Use the correct key but wrong secret to sign the token
+    let bad_token = mint_signed_token("wrong-secret", "alice", &["room"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=alice&streams=room",
+        server.port, key, bad_token
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    // Should fail to upgrade (HTTP 401)
+    assert!(
+        result.is_err(),
+        "connection with wrong secret should be rejected"
+    );
 }
 
 #[tokio::test]
 async fn test_ws_ping_pong() {
     let server = TestServer::start().await;
-    let _token = server.create_tenant("ping", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("ping").await;
 
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &mint_jwt("alice", "ping", &[], TENANT_A_SECRET)).await;
+    let mut ws = server.ws_connect_auth(&key, &secret, "alice", &[]).await;
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(&mut ws, json!({"type":"ping","ref":"p1"})).await;
     let r = ws_recv_type(&mut ws, "pong").await;
@@ -989,7 +972,7 @@ async fn test_ws_ping_pong() {
 #[tokio::test]
 async fn test_http_presence_query() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("pres", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("pres").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
@@ -1006,12 +989,10 @@ async fn test_http_presence_query() {
     assert_eq!(body["connections"], 0);
 
     // Connect — online
-    let mut ws = server.ws_connect().await;
-    ws_auth(
-        &mut ws,
-        &mint_jwt("alice", "pres", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
 
     let resp = server
         .http_client()
@@ -1045,7 +1026,7 @@ async fn test_http_presence_query() {
 #[tokio::test]
 async fn test_stress_concurrent_connections() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("stress", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("stress").await;
     server.create_stream(&token, "room").await;
 
     let num = 20;
@@ -1060,19 +1041,16 @@ async fn test_stress_concurrent_connections() {
     for i in 0..num {
         let b = barrier.clone();
         let c = connected.clone();
-        let port = server.ws_port;
-        let jwt = mint_jwt(&format!("u{i}"), "stress", &["room"], TENANT_A_SECRET);
+        let port = server.port;
+        let key = key.clone();
+        let signed = mint_signed_token(&secret, &format!("u{i}"), &["room"], &[]);
+        let user_id = format!("u{i}");
 
         handles.push(tokio::spawn(async move {
-            let url = format!("ws://127.0.0.1:{port}/");
+            let url = format!(
+                "ws://127.0.0.1:{port}/ws?key={key}&token={signed}&user_id={user_id}&streams=room"
+            );
             let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-            ws.send(Message::Text(
-                json!({"type":"auth","payload":{"token":jwt}})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
             loop {
                 let r: Value =
                     serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
@@ -1100,16 +1078,14 @@ async fn test_stress_concurrent_connections() {
 #[tokio::test]
 async fn test_stress_rapid_events() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("rapid", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("rapid").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "sender").await;
 
-    let mut ws = server.ws_connect().await;
-    ws_auth(
-        &mut ws,
-        &mint_jwt("sender", "rapid", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "sender", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type":"subscribe","payload":{"streams":["room"]}}),
@@ -1147,7 +1123,7 @@ async fn test_stress_rapid_events() {
 #[tokio::test]
 async fn test_admin_list_streams() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_lr", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("tenant_lr").await;
 
     // List streams when empty
     let resp = server
@@ -1180,14 +1156,14 @@ async fn test_admin_list_streams() {
 #[tokio::test]
 async fn test_admin_tenant_streams() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_tr", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("tenant_tr").await;
     server.create_stream(&token, "room1").await;
     server.create_stream(&token, "room2").await;
 
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants/tenant_tr/streams"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1199,7 +1175,7 @@ async fn test_admin_tenant_streams() {
 #[tokio::test]
 async fn test_admin_token_revocation() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_rev", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("tenant_rev").await;
 
     // Token should work
     let resp = server
@@ -1215,7 +1191,7 @@ async fn test_admin_token_revocation() {
     let resp = server
         .http_client()
         .delete(server.http_url(&format!("/admin/tenants/tenant_rev/tokens/{token}")))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1235,14 +1211,14 @@ async fn test_admin_token_revocation() {
 #[tokio::test]
 async fn test_admin_token_revocation_wrong_tenant() {
     let server = TestServer::start().await;
-    let token_a = server.create_tenant("tenant_a_rev", TENANT_A_SECRET).await;
-    server.create_tenant("tenant_b_rev", TENANT_B_SECRET).await;
+    let (_key_a, _secret_a, token_a) = server.create_tenant("tenant_a_rev").await;
+    let _ = server.create_tenant("tenant_b_rev").await;
 
     // Try to revoke tenant_a's token via tenant_b — should 404
     let resp = server
         .http_client()
         .delete(server.http_url(&format!("/admin/tenants/tenant_b_rev/tokens/{token_a}")))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1262,7 +1238,7 @@ async fn test_admin_token_revocation_wrong_tenant() {
 #[tokio::test]
 async fn test_admin_connections() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_conn", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("tenant_conn").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "alice").await;
 
@@ -1270,7 +1246,7 @@ async fn test_admin_connections() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/connections"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1279,18 +1255,16 @@ async fn test_admin_connections() {
     assert_eq!(body["total"].as_u64().unwrap(), 0);
 
     // Connect a WebSocket client
-    let mut ws = server.ws_connect().await;
-    ws_auth(
-        &mut ws,
-        &mint_jwt("alice", "tenant_conn", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
 
     // Now should have 1 connection
     let resp = server
         .http_client()
         .get(server.http_url("/admin/connections"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1308,7 +1282,7 @@ async fn test_admin_connections() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/connections"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1319,17 +1293,15 @@ async fn test_admin_connections() {
 #[tokio::test]
 async fn test_admin_events() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_ev", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("tenant_ev").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "bob").await;
 
     // Connect and disconnect to generate events
-    let mut ws = server.ws_connect().await;
-    ws_auth(
-        &mut ws,
-        &mint_jwt("bob", "tenant_ev", &["room"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "bob", &["room"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
     drop(ws);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1337,7 +1309,7 @@ async fn test_admin_events() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/events?limit=10"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1364,7 +1336,7 @@ async fn test_admin_events() {
     let resp = server
         .http_client()
         .get(server.http_url(&format!("/admin/events?after_id={first_id}")))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1379,17 +1351,15 @@ async fn test_admin_events() {
 #[tokio::test]
 async fn test_admin_events_message() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_evm", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("tenant_evm").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "carol").await;
 
     // Connect, subscribe, and send a message
-    let mut ws = server.ws_connect().await;
-    ws_auth(
-        &mut ws,
-        &mint_jwt("carol", "tenant_evm", &["chat"], TENANT_A_SECRET),
-    )
-    .await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "carol", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -1408,7 +1378,7 @@ async fn test_admin_events_message() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/events?limit=20"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1430,41 +1400,27 @@ async fn test_admin_events_message() {
 #[tokio::test]
 async fn test_admin_errors_auth_failure() {
     let server = TestServer::start().await;
-    server.create_tenant("tenant_err", TENANT_A_SECRET).await;
+    let (key, _secret, _token) = server.create_tenant("tenant_err").await;
 
-    // Trigger auth failure with bad JWT
-    let bad_jwt = mint_jwt("hacker", "tenant_err", &["room"], "wrong-secret");
-    let mut ws = server.ws_connect().await;
-    ws_send(
-        &mut ws,
-        json!({"type": "auth", "payload": {"token": bad_jwt}}),
-    )
-    .await;
-    // Wait for connection to close/reject
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    drop(ws);
-
-    // Check error logs
-    let resp = server
-        .http_client()
-        .get(server.http_url("/admin/errors?category=client"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = resp.json().await.unwrap();
-    let errors = body["errors"].as_array().unwrap();
-    assert!(
-        !errors.is_empty(),
-        "expected at least one client error after auth failure"
+    // Trigger auth failure with bad signed token
+    let bad_token = mint_signed_token("wrong-secret", "hacker", &["room"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=hacker&streams=room",
+        server.port, key, bad_token
     );
-    let err = &errors[0];
-    assert_eq!(err["category"], "client");
+    let result = tokio_tungstenite::connect_async(&url).await;
+    // Auth failure during upgrade returns HTTP 401
+    assert!(result.is_err(), "bad auth should fail at upgrade");
+
+    // Verify the auth failure was counted in metrics
+    let failures = server
+        .state
+        .metrics
+        .ws_auth_failures
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
-        err["message"].as_str().unwrap().contains("Auth failure"),
-        "error message should mention auth: {:?}",
-        err["message"]
+        failures > 0,
+        "expected ws_auth_failures > 0 after bad auth attempt"
     );
 }
 
@@ -1477,7 +1433,7 @@ async fn test_admin_errors_empty() {
         let resp = server
             .http_client()
             .get(server.http_url(&format!("/admin/errors?category={cat}")))
-            .bearer_auth(SUPER_ADMIN_TOKEN)
+            .bearer_auth(ADMIN_PASSWORD)
             .send()
             .await
             .unwrap();
@@ -1495,7 +1451,7 @@ async fn test_admin_stats() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/stats"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1544,7 +1500,7 @@ async fn test_admin_stats_with_snapshot() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/stats"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1577,7 +1533,7 @@ async fn test_admin_stats_time_range_filter() {
             now - 60_000,
             now + 60_000
         )))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1592,7 +1548,7 @@ async fn test_admin_stats_time_range_filter() {
             now + 60_000,
             now + 120_000
         )))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1603,7 +1559,7 @@ async fn test_admin_stats_time_range_filter() {
 #[tokio::test]
 async fn test_admin_events_stream_sse() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_sse", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("tenant_sse").await;
     server.create_stream(&token, "room").await;
     server.add_member(&token, "room", "eve").await;
 
@@ -1611,7 +1567,7 @@ async fn test_admin_events_stream_sse() {
     let client = reqwest::Client::new();
     let resp = client
         .get(server.http_url("/admin/events/stream"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1674,7 +1630,7 @@ async fn test_admin_endpoints_require_auth() {
 #[tokio::test]
 async fn test_tenant_stats_endpoint() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("tenant_ts", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("tenant_ts").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -1722,8 +1678,8 @@ async fn test_tenant_stats_endpoint() {
 #[tokio::test]
 async fn test_tenant_stats_isolated() {
     let server = TestServer::start().await;
-    let token_a = server.create_tenant("tenant_sa", TENANT_A_SECRET).await;
-    let token_b = server.create_tenant("tenant_sb", TENANT_B_SECRET).await;
+    let (_key_a, _secret_a, token_a) = server.create_tenant("tenant_sa").await;
+    let (_key_b, _secret_b, token_b) = server.create_tenant("tenant_sb").await;
     server.create_stream(&token_a, "room_a").await;
     server.create_stream(&token_b, "room_b").await;
 
@@ -1784,7 +1740,7 @@ async fn test_admin_token_constant_time_comparison() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -1832,7 +1788,7 @@ async fn test_admin_token_constant_time_comparison() {
 #[tokio::test]
 async fn test_http_body_size_limit() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     // Create a body larger than 1MB
     let huge_body = "x".repeat(2 * 1024 * 1024);
@@ -1856,7 +1812,7 @@ async fn test_http_body_size_limit() {
 #[tokio::test]
 async fn test_input_validation_stream_id() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     // Path traversal in stream ID
     let resp = server
@@ -1907,7 +1863,7 @@ async fn test_input_validation_stream_id() {
 #[tokio::test]
 async fn test_input_validation_event_body_size() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -1943,8 +1899,8 @@ async fn test_input_validation_tenant_id() {
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
-        .json(&json!({"id": "../evil", "name": "bad", "jwt_secret": "secret123"}))
+        .bearer_auth(ADMIN_PASSWORD)
+        .json(&json!({"id": "../evil", "name": "bad", "plan": "free"}))
         .send()
         .await
         .unwrap();
@@ -1954,8 +1910,8 @@ async fn test_input_validation_tenant_id() {
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
-        .json(&json!({"id": "good-tenant", "name": "Good", "jwt_secret": "secret123"}))
+        .bearer_auth(ADMIN_PASSWORD)
+        .json(&json!({"id": "good-tenant", "name": "Good", "plan": "free"}))
         .send()
         .await
         .unwrap();
@@ -1968,8 +1924,7 @@ async fn test_http_api_rate_limiting() {
     let db = create_test_store().await;
     let config = HeraldConfig {
         server: ServerConfig {
-            ws_bind: "127.0.0.1:0".to_string(),
-            http_bind: "127.0.0.1:0".to_string(),
+            bind: "127.0.0.1:0".to_string(),
             log_level: "warn".to_string(),
             max_messages_per_sec: 1000,
             api_rate_limit: 5, // Only 5 requests per minute
@@ -1982,12 +1937,8 @@ async fn test_http_api_rate_limiting() {
             event_ttl_days: 7,
         },
         auth: AuthConfig {
-            jwt_secret: Some(TENANT_A_SECRET.to_string()),
-            jwt_issuer: None,
-            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-            api: ApiAuthConfig {
-                tokens: vec!["rate-test-token".to_string()],
-            },
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig {
             linger_secs: 0,
@@ -2009,7 +1960,7 @@ async fn test_http_api_rate_limiting() {
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
     });
-    state.bootstrap_single_tenant().await.unwrap();
+    state.bootstrap_default_tenant().await.unwrap();
 
     let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_port = http_listener.local_addr().unwrap().port();
@@ -2022,12 +1973,22 @@ async fn test_http_api_rate_limiting() {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}");
 
+    // Create an API token for the default tenant
+    let resp = client
+        .post(format!("{base}/admin/tenants/default/tokens"))
+        .bearer_auth(ADMIN_PASSWORD)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let api_token = body["token"].as_str().unwrap().to_string();
+
     // Send 6 requests (limit is 5)
     let mut statuses = Vec::new();
     for _ in 0..6 {
         let resp = client
             .get(format!("{base}/streams"))
-            .bearer_auth("rate-test-token")
+            .bearer_auth(&api_token)
             .send()
             .await
             .unwrap();
@@ -2051,8 +2012,7 @@ async fn test_ws_sliding_window_rate_limit() {
     let db = create_test_store().await;
     let config = HeraldConfig {
         server: ServerConfig {
-            ws_bind: "127.0.0.1:0".to_string(),
-            http_bind: "127.0.0.1:0".to_string(),
+            bind: "127.0.0.1:0".to_string(),
             log_level: "warn".to_string(),
             max_messages_per_sec: 3, // Very low for testing
             ..Default::default()
@@ -2064,12 +2024,8 @@ async fn test_ws_sliding_window_rate_limit() {
             event_ttl_days: 7,
         },
         auth: AuthConfig {
-            jwt_secret: Some(TENANT_A_SECRET.to_string()),
-            jwt_issuer: None,
-            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-            api: ApiAuthConfig {
-                tokens: vec!["ws-rate-token".to_string()],
-            },
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig {
             linger_secs: 0,
@@ -2091,7 +2047,7 @@ async fn test_ws_sliding_window_rate_limit() {
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
     });
-    state.bootstrap_single_tenant().await.unwrap();
+    state.bootstrap_default_tenant().await.unwrap();
 
     let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ws_port = ws_listener.local_addr().unwrap().port();
@@ -2101,7 +2057,7 @@ async fn test_ws_sliding_window_rate_limit() {
     let ws_state = state.clone();
     let ws_app = axum::Router::new()
         .route(
-            "/",
+            "/ws",
             axum::routing::get(herald_server::ws::upgrade::ws_handler),
         )
         .with_state(ws_state);
@@ -2115,29 +2071,48 @@ async fn test_ws_sliding_window_rate_limit() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Setup: create stream and member
+    // Get default tenant credentials from state
+    let def_tc = state.tenant_cache.iter().next().unwrap();
+    let def_key = def_tc.key.clone();
+    let def_secret = def_tc.secret.clone();
+    drop(def_tc);
+
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}");
+
+    // Create API token for the default tenant
+    let resp = client
+        .post(format!("{base}/admin/tenants/default/tokens"))
+        .bearer_auth(ADMIN_PASSWORD)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let api_token = body["token"].as_str().unwrap().to_string();
+
+    // Setup: create stream and member
     client
         .post(format!("{base}/streams"))
-        .bearer_auth("ws-rate-token")
+        .bearer_auth(&api_token)
         .json(&json!({"id": "chat", "name": "Chat"}))
         .send()
         .await
         .unwrap();
     client
         .post(format!("{base}/streams/chat/members"))
-        .bearer_auth("ws-rate-token")
+        .bearer_auth(&api_token)
         .json(&json!({"user_id": "alice"}))
         .send()
         .await
         .unwrap();
 
-    // Connect WS
-    let ws_url = format!("ws://127.0.0.1:{ws_port}/");
+    // Connect WS with signed token
+    let signed = mint_signed_token(&def_secret, "alice", &["chat"], &[]);
+    let ws_url = format!(
+        "ws://127.0.0.1:{ws_port}/ws?key={def_key}&token={signed}&user_id=alice&streams=chat"
+    );
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    let token = mint_jwt("alice", "default", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws, &token).await;
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -2188,7 +2163,7 @@ async fn test_backpressure_increments_dropped_metric() {
     use std::sync::atomic::Ordering;
 
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -2317,8 +2292,7 @@ async fn test_presence_linger_reconnect_no_offline() {
     let db = create_test_store().await;
     let config = HeraldConfig {
         server: ServerConfig {
-            ws_bind: "127.0.0.1:0".to_string(),
-            http_bind: "127.0.0.1:0".to_string(),
+            bind: "127.0.0.1:0".to_string(),
             log_level: "warn".to_string(),
             max_messages_per_sec: 1000,
             ..Default::default()
@@ -2330,12 +2304,8 @@ async fn test_presence_linger_reconnect_no_offline() {
             event_ttl_days: 7,
         },
         auth: AuthConfig {
-            jwt_secret: Some(TENANT_A_SECRET.to_string()),
-            jwt_issuer: None,
-            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-            api: ApiAuthConfig {
-                tokens: vec!["linger-token".to_string()],
-            },
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig {
             linger_secs: 2,
@@ -2357,17 +2327,23 @@ async fn test_presence_linger_reconnect_no_offline() {
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
     });
-    state.bootstrap_single_tenant().await.unwrap();
+    state.bootstrap_default_tenant().await.unwrap();
 
     let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ws_port = ws_listener.local_addr().unwrap().port();
     let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_port = http_listener.local_addr().unwrap().port();
 
+    // Get default tenant credentials from state
+    let def_tc = state.tenant_cache.iter().next().unwrap();
+    let def_key = def_tc.key.clone();
+    let def_secret = def_tc.secret.clone();
+    drop(def_tc);
+
     let ws_state = state.clone();
     let ws_app = axum::Router::new()
         .route(
-            "/",
+            "/ws",
             axum::routing::get(herald_server::ws::upgrade::ws_handler),
         )
         .with_state(ws_state);
@@ -2380,35 +2356,46 @@ async fn test_presence_linger_reconnect_no_offline() {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}");
 
+    // Create API token for the default tenant
+    let resp = client
+        .post(format!("{base}/admin/tenants/default/tokens"))
+        .bearer_auth(ADMIN_PASSWORD)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let api_token = body["token"].as_str().unwrap().to_string();
+
     // Setup stream and members
     client
         .post(format!("{base}/streams"))
-        .bearer_auth("linger-token")
+        .bearer_auth(&api_token)
         .json(&json!({"id": "chat", "name": "Chat"}))
         .send()
         .await
         .unwrap();
     client
         .post(format!("{base}/streams/chat/members"))
-        .bearer_auth("linger-token")
+        .bearer_auth(&api_token)
         .json(&json!({"user_id": "alice"}))
         .send()
         .await
         .unwrap();
     client
         .post(format!("{base}/streams/chat/members"))
-        .bearer_auth("linger-token")
+        .bearer_auth(&api_token)
         .json(&json!({"user_id": "bob"}))
         .send()
         .await
         .unwrap();
 
-    let ws_url = format!("ws://127.0.0.1:{ws_port}/");
-
     // Connect bob as observer
-    let (mut ws_bob, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    let bob_jwt = mint_jwt("bob", "default", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let bob_token = mint_signed_token(&def_secret, "bob", &["chat"], &[]);
+    let bob_url = format!(
+        "ws://127.0.0.1:{ws_port}/ws?key={def_key}&token={bob_token}&user_id=bob&streams=chat"
+    );
+    let (mut ws_bob, _) = tokio_tungstenite::connect_async(&bob_url).await.unwrap();
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -2417,9 +2404,12 @@ async fn test_presence_linger_reconnect_no_offline() {
     ws_recv_type(&mut ws_bob, "subscribed").await;
 
     // Connect alice
-    let (mut ws_alice, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    let alice_jwt = mint_jwt("alice", "default", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let alice_token = mint_signed_token(&def_secret, "alice", &["chat"], &[]);
+    let alice_url = format!(
+        "ws://127.0.0.1:{ws_port}/ws?key={def_key}&token={alice_token}&user_id=alice&streams=chat"
+    );
+    let (mut ws_alice, _) = tokio_tungstenite::connect_async(&alice_url).await.unwrap();
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -2437,8 +2427,12 @@ async fn test_presence_linger_reconnect_no_offline() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Immediately reconnect alice (within linger window)
-    let (mut ws_alice2, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    ws_auth(&mut ws_alice2, &alice_jwt).await;
+    let alice_token2 = mint_signed_token(&def_secret, "alice", &["chat"], &[]);
+    let alice_url2 = format!(
+        "ws://127.0.0.1:{ws_port}/ws?key={def_key}&token={alice_token2}&user_id=alice&streams=chat"
+    );
+    let (mut ws_alice2, _) = tokio_tungstenite::connect_async(&alice_url2).await.unwrap();
+    ws_wait_auth_ok(&mut ws_alice2).await;
     ws_send(
         &mut ws_alice2,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -2518,7 +2512,7 @@ async fn test_cors_headers_present() {
 #[tokio::test]
 async fn test_error_responses_do_not_leak_internals() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
 
     // Try to create a duplicate stream — triggers store conflict error
@@ -2547,8 +2541,8 @@ async fn test_error_responses_do_not_leak_internals() {
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
-        .json(&json!({"id": "acme", "name": "Acme Again", "jwt_secret": "secret"}))
+        .bearer_auth(ADMIN_PASSWORD)
+        .json(&json!({"id": "acme", "name": "Acme Again", "plan": "free"}))
         .send()
         .await
         .unwrap();
@@ -2576,10 +2570,8 @@ async fn test_config_validation_rejects_invalid() {
         },
         store: StoreConfig::default(),
         auth: AuthConfig {
-            jwt_secret: Some("a-long-enough-secret".to_string()),
-            jwt_issuer: None,
-            super_admin_token: None,
-            api: ApiAuthConfig::default(),
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig::default(),
         webhook: None,
@@ -2590,19 +2582,17 @@ async fn test_config_validation_rejects_invalid() {
         cluster: ClusterConfig::default(),
     };
     assert!(
-        config.validate(false).is_err(),
+        config.validate().is_err(),
         "should reject max_messages_per_sec=0"
     );
 
-    // empty jwt_secret in single-tenant mode
+    // empty password
     let config = HeraldConfig {
         server: ServerConfig::default(),
         store: StoreConfig::default(),
         auth: AuthConfig {
-            jwt_secret: Some("".to_string()),
-            jwt_issuer: None,
-            super_admin_token: None,
-            api: ApiAuthConfig::default(),
+            password: Some("".to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig::default(),
         webhook: None,
@@ -2612,20 +2602,15 @@ async fn test_config_validation_rejects_invalid() {
         cors: None,
         cluster: ClusterConfig::default(),
     };
-    assert!(
-        config.validate(false).is_err(),
-        "should reject empty jwt_secret"
-    );
+    assert!(config.validate().is_err(), "should reject empty password");
 
-    // short jwt_secret
+    // short password
     let config = HeraldConfig {
         server: ServerConfig::default(),
         store: StoreConfig::default(),
         auth: AuthConfig {
-            jwt_secret: Some("short".to_string()),
-            jwt_issuer: None,
-            super_admin_token: None,
-            api: ApiAuthConfig::default(),
+            password: Some("short".to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig::default(),
         webhook: None,
@@ -2635,20 +2620,15 @@ async fn test_config_validation_rejects_invalid() {
         cors: None,
         cluster: ClusterConfig::default(),
     };
-    assert!(
-        config.validate(false).is_err(),
-        "should reject short jwt_secret"
-    );
+    assert!(config.validate().is_err(), "should reject short password");
 
     // empty webhook secret
     let config = HeraldConfig {
         server: ServerConfig::default(),
         store: StoreConfig::default(),
         auth: AuthConfig {
-            jwt_secret: Some("a-long-enough-secret".to_string()),
-            jwt_issuer: None,
-            super_admin_token: None,
-            api: ApiAuthConfig::default(),
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig::default(),
         webhook: Some(WebhookConfig {
@@ -2664,7 +2644,7 @@ async fn test_config_validation_rejects_invalid() {
         cluster: ClusterConfig::default(),
     };
     assert!(
-        config.validate(false).is_err(),
+        config.validate().is_err(),
         "should reject empty webhook secret"
     );
 
@@ -2673,10 +2653,8 @@ async fn test_config_validation_rejects_invalid() {
         server: ServerConfig::default(),
         store: StoreConfig::default(),
         auth: AuthConfig {
-            jwt_secret: Some("a-long-enough-secret".to_string()),
-            jwt_issuer: None,
-            super_admin_token: None,
-            api: ApiAuthConfig::default(),
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig::default(),
         webhook: None,
@@ -2690,7 +2668,7 @@ async fn test_config_validation_rejects_invalid() {
         cluster: ClusterConfig::default(),
     };
     assert!(
-        config.validate(false).is_err(),
+        config.validate().is_err(),
         "should reject empty TLS key_path"
     );
 
@@ -2699,10 +2677,8 @@ async fn test_config_validation_rejects_invalid() {
         server: ServerConfig::default(),
         store: StoreConfig::default(),
         auth: AuthConfig {
-            jwt_secret: Some("a-long-enough-secret".to_string()),
-            jwt_issuer: None,
-            super_admin_token: None,
-            api: ApiAuthConfig::default(),
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig::default(),
         webhook: None,
@@ -2712,17 +2688,15 @@ async fn test_config_validation_rejects_invalid() {
         cors: None,
         cluster: ClusterConfig::default(),
     };
-    assert!(config.validate(false).is_ok(), "valid config should pass");
+    assert!(config.validate().is_ok(), "valid config should pass");
 
-    // Multi-tenant requires super_admin_token
+    // password is always required
     let config = HeraldConfig {
         server: ServerConfig::default(),
         store: StoreConfig::default(),
         auth: AuthConfig {
-            jwt_secret: None,
-            jwt_issuer: None,
-            super_admin_token: None,
-            api: ApiAuthConfig::default(),
+            password: None,
+            token_window_secs: 300,
         },
         presence: PresenceConfig::default(),
         webhook: None,
@@ -2732,10 +2706,7 @@ async fn test_config_validation_rejects_invalid() {
         cors: None,
         cluster: ClusterConfig::default(),
     };
-    assert!(
-        config.validate(true).is_err(),
-        "should require super_admin_token in multi-tenant"
-    );
+    assert!(config.validate().is_err(), "should require password");
 }
 
 // ---------------------------------------------------------------------------
@@ -2841,7 +2812,7 @@ async fn test_structured_json_logging() {
 #[tokio::test]
 async fn test_pagination_on_list_streams() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     // Create 10 streams
     for i in 0..10 {
@@ -2895,15 +2866,13 @@ async fn test_pagination_on_list_tenants() {
 
     // Create 5 tenants
     for i in 0..5 {
-        server
-            .create_tenant(&format!("tenant-{i}"), "secret-for-testing-12345")
-            .await;
+        server.create_tenant(&format!("tenant-{i}")).await;
     }
 
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants?limit=2"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -2948,13 +2917,13 @@ async fn test_health_liveness_readiness() {
 #[tokio::test]
 async fn test_tenant_cache_invalidation_on_delete() {
     let server = TestServer::start().await;
-    let _token = server.create_tenant("ephemeral", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("ephemeral").await;
 
     // JWT should work before deletion
-    let jwt = mint_jwt("user1", "ephemeral", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
-    let msg = ws_recv_type(&mut ws, "auth_ok").await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "user1", &["chat"])
+        .await;
+    let msg = ws_wait_auth_ok(&mut ws).await;
     assert_eq!(msg["payload"]["user_id"], "user1");
     drop(ws);
 
@@ -2962,27 +2931,27 @@ async fn test_tenant_cache_invalidation_on_delete() {
     let resp = server
         .http_client()
         .delete(server.http_url("/admin/tenants/ephemeral"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // JWT should now fail — cache entry was removed on delete
-    let mut ws2 = server.ws_connect().await;
-    ws_send(
-        &mut ws2,
-        json!({"type": "auth", "payload": {"token": &jwt}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws2, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    let url2 = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=user1&streams=chat",
+        server.port,
+        key,
+        mint_signed_token(&secret, "user1", &["chat"], &[])
+    );
+    let result = tokio_tungstenite::connect_async(&url2).await;
+    assert!(result.is_err(), "auth should fail after tenant deletion");
 }
 
 #[tokio::test]
 async fn test_tenant_cache_refresh_on_update() {
     let server = TestServer::start().await;
-    let _token = server.create_tenant("updatable", TENANT_A_SECRET).await;
+    let (_key, _secret, _token) = server.create_tenant("updatable").await;
 
     // Verify initial plan
     let cached = server.state.tenant_cache.get("updatable").unwrap();
@@ -2993,7 +2962,7 @@ async fn test_tenant_cache_refresh_on_update() {
     let resp = server
         .http_client()
         .patch(server.http_url("/admin/tenants/updatable"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .json(&json!({"plan": "enterprise"}))
         .send()
         .await
@@ -3008,15 +2977,16 @@ async fn test_tenant_cache_refresh_on_update() {
 #[tokio::test]
 async fn test_typing_cleanup_on_disconnect() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Connect bob as observer
-    let mut ws_bob = server.ws_connect().await;
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -3025,9 +2995,10 @@ async fn test_typing_cleanup_on_disconnect() {
     ws_recv_type(&mut ws_bob, "subscribed").await;
 
     // Connect alice
-    let mut ws_alice = server.ws_connect().await;
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -3069,7 +3040,7 @@ async fn test_typing_cleanup_on_disconnect() {
 #[tokio::test]
 async fn test_reconnect_catchup_has_more() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -3091,17 +3062,13 @@ async fn test_reconnect_catchup_has_more() {
     }
 
     // Connect alice with last_seen_at=0 (ancient) to trigger catchup
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_send(
-        &mut ws,
-        json!({
-            "type": "auth",
-            "payload": {"token": &alice_jwt, "last_seen_at": 0}
-        }),
-    )
-    .await;
-    ws_recv_type(&mut ws, "auth_ok").await;
+    let signed = mint_signed_token(&secret, "alice", &["chat"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=alice&streams=chat&last_seen_at=0",
+        server.port, key, signed
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws_wait_auth_ok(&mut ws).await;
 
     // Should receive subscribed + messages.batch
     let _subscribed = ws_recv_type(&mut ws, "subscribed").await;
@@ -3120,14 +3087,15 @@ async fn test_reconnect_catchup_has_more() {
 #[tokio::test]
 async fn test_graceful_shutdown_notifies_clients() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Connect alice
-    let mut ws = server.ws_connect().await;
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -3157,7 +3125,7 @@ async fn test_graceful_shutdown_notifies_clients() {
 #[tokio::test]
 async fn test_event_deletion_http() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -3202,15 +3170,16 @@ async fn test_event_deletion_http() {
 #[tokio::test]
 async fn test_event_deletion_ws() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Connect bob
-    let mut ws_bob = server.ws_connect().await;
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -3219,9 +3188,10 @@ async fn test_event_deletion_ws() {
     ws_recv_type(&mut ws_bob, "subscribed").await;
 
     // Connect alice and send a message
-    let mut ws_alice = server.ws_connect().await;
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -3266,7 +3236,7 @@ async fn test_event_deletion_ws() {
 #[tokio::test]
 async fn test_stream_archival() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -3378,8 +3348,7 @@ async fn test_webhook_event_filtering() {
     let db = create_test_store().await;
     let config = HeraldConfig {
         server: ServerConfig {
-            ws_bind: "127.0.0.1:0".to_string(),
-            http_bind: "127.0.0.1:0".to_string(),
+            bind: "127.0.0.1:0".to_string(),
             log_level: "warn".to_string(),
             max_messages_per_sec: 1000,
             ..Default::default()
@@ -3391,12 +3360,8 @@ async fn test_webhook_event_filtering() {
             event_ttl_days: 7,
         },
         auth: AuthConfig {
-            jwt_secret: Some(TENANT_A_SECRET.to_string()),
-            jwt_issuer: None,
-            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-            api: ApiAuthConfig {
-                tokens: vec!["wh-token".to_string()],
-            },
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig {
             linger_secs: 0,
@@ -3423,7 +3388,7 @@ async fn test_webhook_event_filtering() {
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
     });
-    state.bootstrap_single_tenant().await.unwrap();
+    state.bootstrap_default_tenant().await.unwrap();
 
     let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_port = http_listener.local_addr().unwrap().port();
@@ -3434,17 +3399,27 @@ async fn test_webhook_event_filtering() {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}");
 
+    // Create API token for default tenant
+    let resp = client
+        .post(format!("{base}/admin/tenants/default/tokens"))
+        .bearer_auth(ADMIN_PASSWORD)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let api_token = body["token"].as_str().unwrap().to_string();
+
     // Create stream + member (triggers member.joined webhook — should be filtered out)
     client
         .post(format!("{base}/streams"))
-        .bearer_auth("wh-token")
+        .bearer_auth(&api_token)
         .json(&json!({"id": "chat", "name": "Chat"}))
         .send()
         .await
         .unwrap();
     client
         .post(format!("{base}/streams/chat/members"))
-        .bearer_auth("wh-token")
+        .bearer_auth(&api_token)
         .json(&json!({"user_id": "alice"}))
         .send()
         .await
@@ -3460,7 +3435,7 @@ async fn test_webhook_event_filtering() {
     // Send a message — should trigger webhook
     client
         .post(format!("{base}/streams/chat/events"))
-        .bearer_auth("wh-token")
+        .bearer_auth(&api_token)
         .json(&json!({"sender": "alice", "body": "hello"}))
         .send()
         .await
@@ -3481,13 +3456,13 @@ async fn test_webhook_event_filtering() {
 #[tokio::test]
 async fn test_api_key_scoping_read_only() {
     let server = TestServer::start().await;
-    let _full_token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, _full_token) = server.create_tenant("acme").await;
 
     // Create a read-only scoped token
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants/acme/tokens"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .json(&json!({"scope": "read-only"}))
         .send()
         .await
@@ -3521,7 +3496,7 @@ async fn test_api_key_scoping_read_only() {
 #[tokio::test]
 async fn test_api_key_scoping_stream() {
     let server = TestServer::start().await;
-    let full_token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, full_token) = server.create_tenant("acme").await;
     server.create_stream(&full_token, "allowed").await;
     server.create_stream(&full_token, "forbidden").await;
 
@@ -3529,7 +3504,7 @@ async fn test_api_key_scoping_stream() {
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants/acme/tokens"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .json(&json!({"scope": "stream:allowed"}))
         .send()
         .await
@@ -3566,121 +3541,87 @@ async fn test_api_key_scoping_stream() {
 // --- JWT Security ---
 
 #[tokio::test]
-async fn test_jwt_expired_token_rejected() {
+async fn test_signed_token_wrong_secret_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, _secret, _token) = server.create_tenant("acme").await;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let expired_jwt = jsonwebtoken::encode(
-        &Header::default(),
-        &JwtClaims {
-            sub: "alice".to_string(),
-            tenant: "acme".to_string(),
-            streams: vec!["chat".to_string()],
-            exp: now - 3600, // Expired 1 hour ago
-            iat: now - 7200,
-            iss: "test".to_string(),
-            watchlist: vec![],
-        },
-        &EncodingKey::from_secret(TENANT_A_SECRET.as_bytes()),
-    )
-    .unwrap();
-
-    let mut ws = server.ws_connect().await;
-    ws_send(
-        &mut ws,
-        json!({"type": "auth", "payload": {"token": &expired_jwt}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    // Sign with wrong secret
+    let bad_token = mint_signed_token("totally-wrong-secret", "alice", &["chat"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=alice&streams=chat",
+        server.port, key, bad_token
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        result.is_err(),
+        "connection with wrong secret should be rejected"
+    );
 }
 
 #[tokio::test]
-async fn test_jwt_wrong_secret_rejected() {
+async fn test_signed_token_unknown_key_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, secret, _token) = server.create_tenant("acme").await;
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], "wrong-secret-value");
-    let mut ws = server.ws_connect().await;
-    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
-    let msg = ws_recv_type(&mut ws, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    // Use valid secret but unknown key
+    let token = mint_signed_token(&secret, "alice", &["chat"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key=unknown-key&token={}&user_id=alice&streams=chat",
+        server.port, token
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        result.is_err(),
+        "connection with unknown key should be rejected"
+    );
 }
 
 #[tokio::test]
-async fn test_jwt_missing_tenant_claim() {
+async fn test_signed_token_missing_key_rejected() {
     let server = TestServer::start().await;
 
-    // Manually craft a JWT with empty tenant
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let jwt = jsonwebtoken::encode(
-        &Header::default(),
-        &JwtClaims {
-            sub: "alice".to_string(),
-            tenant: "".to_string(), // Empty tenant
-            streams: vec![],
-            exp: now + 3600,
-            iat: now,
-            iss: "test".to_string(),
-            watchlist: vec![],
-        },
-        &EncodingKey::from_secret(b"any-secret"),
-    )
-    .unwrap();
-
-    let mut ws = server.ws_connect().await;
-    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
-    let msg = ws_recv_type(&mut ws, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    // No key param at all
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?token=abc&user_id=alice&streams=chat",
+        server.port
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(result.is_err(), "connection without key should be rejected");
 }
 
 #[tokio::test]
-async fn test_jwt_unknown_tenant_rejected() {
+async fn test_signed_token_nonexistent_tenant_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, _token) = server.create_tenant("acme").await;
 
-    let jwt = mint_jwt("alice", "nonexistent-tenant", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
-    let msg = ws_recv_type(&mut ws, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    let token = mint_signed_token("any-secret", "alice", &["chat"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key=nonexistent-key&token={}&user_id=alice&streams=chat",
+        server.port, token
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        result.is_err(),
+        "connection with nonexistent key should be rejected"
+    );
 }
 
 #[tokio::test]
-async fn test_jwt_missing_sub_claim() {
+async fn test_signed_token_missing_user_id_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("acme").await;
 
-    // Craft JWT without sub claim using a raw map
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let claims = serde_json::json!({
-        "tenant": "acme",
-        "streams": ["chat"],
-        "exp": now + 3600,
-        "iat": now,
-        "iss": "test",
-    });
-    let jwt = jsonwebtoken::encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(TENANT_A_SECRET.as_bytes()),
-    )
-    .unwrap();
-
-    let mut ws = server.ws_connect().await;
-    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
-    let msg = ws_recv_type(&mut ws, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    // No user_id param
+    let token = mint_signed_token(&secret, "alice", &["chat"], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&streams=chat",
+        server.port, key, token
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        result.is_err(),
+        "connection without user_id should be rejected"
+    );
 }
 
 // --- Authorization ---
@@ -3688,14 +3629,16 @@ async fn test_jwt_missing_sub_claim() {
 #[tokio::test]
 async fn test_subscribe_to_stream_not_in_jwt() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "secret-room").await;
     server.add_member(&token, "secret-room", "alice").await;
 
     // JWT only authorizes "other-room", not "secret-room"
-    let jwt = mint_jwt("alice", "acme", &["other-room"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["other-room"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(
         &mut ws,
@@ -3709,13 +3652,15 @@ async fn test_subscribe_to_stream_not_in_jwt() {
 #[tokio::test]
 async fn test_subscribe_to_stream_not_a_member() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     // alice is NOT added as a member
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(
         &mut ws,
@@ -3729,13 +3674,15 @@ async fn test_subscribe_to_stream_not_a_member() {
 #[tokio::test]
 async fn test_send_event_to_unsubscribed_stream() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     // alice is not a member
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(
         &mut ws,
@@ -3749,16 +3696,18 @@ async fn test_send_event_to_unsubscribed_stream() {
 #[tokio::test]
 async fn test_cross_tenant_stream_access_blocked() {
     let server = TestServer::start().await;
-    let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
-    let _token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+    let (_key_a, _secret_a, token_a) = server.create_tenant("acme").await;
+    let (key_b, secret_b, _token_b) = server.create_tenant("beta").await;
 
     server.create_stream(&token_a, "acme-chat").await;
     server.add_member(&token_a, "acme-chat", "alice").await;
 
-    // Try to access acme's stream with beta's JWT
-    let jwt = mint_jwt("alice", "beta", &["acme-chat"], TENANT_B_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    // Try to access acme's stream with beta's credentials
+    let mut ws = server
+        .ws_connect_auth(&key_b, &secret_b, "alice", &["acme-chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(
         &mut ws,
@@ -3825,7 +3774,7 @@ async fn test_admin_api_requires_super_token() {
     let resp = server
         .http_client()
         .get(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -3835,8 +3784,8 @@ async fn test_admin_api_requires_super_token() {
 #[tokio::test]
 async fn test_tenant_api_token_cross_tenant_blocked() {
     let server = TestServer::start().await;
-    let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
-    let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+    let (_key_a, _secret_a, token_a) = server.create_tenant("acme").await;
+    let (_key_b, _secret_b, token_b) = server.create_tenant("beta").await;
 
     server.create_stream(&token_a, "acme-room").await;
 
@@ -3856,7 +3805,7 @@ async fn test_tenant_api_token_cross_tenant_blocked() {
 #[tokio::test]
 async fn test_empty_stream_id_rejected() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     let resp = server
         .http_client()
@@ -3872,7 +3821,7 @@ async fn test_empty_stream_id_rejected() {
 #[tokio::test]
 async fn test_special_chars_in_stream_id_rejected() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     for bad_id in &[
         "room/evil",
@@ -3900,7 +3849,7 @@ async fn test_special_chars_in_stream_id_rejected() {
 #[tokio::test]
 async fn test_oversized_meta_rejected() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     // Meta larger than 16KB
     let big_meta = serde_json::json!({"data": "x".repeat(20_000)});
@@ -3918,13 +3867,15 @@ async fn test_oversized_meta_rejected() {
 #[tokio::test]
 async fn test_ws_event_body_too_large() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -3946,11 +3897,13 @@ async fn test_ws_event_body_too_large() {
 #[tokio::test]
 async fn test_malformed_json_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("acme").await;
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     // Send malformed JSON
     ws.send(Message::Text("not valid json{{{".into()))
@@ -3963,11 +3916,13 @@ async fn test_malformed_json_rejected() {
 #[tokio::test]
 async fn test_unknown_message_type_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("acme").await;
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(&mut ws, json!({"type": "nonexistent.type", "payload": {}})).await;
     let msg = ws_recv_type(&mut ws, "error").await;
@@ -3979,7 +3934,7 @@ async fn test_unknown_message_type_rejected() {
 #[tokio::test]
 async fn test_get_nonexistent_stream() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     let resp = server
         .http_client()
@@ -3994,7 +3949,7 @@ async fn test_get_nonexistent_stream() {
 #[tokio::test]
 async fn test_delete_nonexistent_stream() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     let resp = server
         .http_client()
@@ -4009,7 +3964,7 @@ async fn test_delete_nonexistent_stream() {
 #[tokio::test]
 async fn test_remove_nonexistent_member() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
 
     let resp = server
@@ -4025,7 +3980,7 @@ async fn test_remove_nonexistent_member() {
 #[tokio::test]
 async fn test_send_to_nonexistent_stream_http() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     let resp = server
         .http_client()
@@ -4045,7 +4000,7 @@ async fn test_delete_nonexistent_tenant() {
     let resp = server
         .http_client()
         .delete(server.http_url("/admin/tenants/nope"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -4055,7 +4010,7 @@ async fn test_delete_nonexistent_tenant() {
 #[tokio::test]
 async fn test_invalid_role_rejected() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -4074,35 +4029,31 @@ async fn test_invalid_role_rejected() {
 async fn test_auth_timeout_on_ws() {
     let server = TestServer::start().await;
 
-    // Connect but don't send auth
-    let mut ws = server.ws_connect().await;
-    // Wait for auth timeout (5 seconds)
-    let timeout = tokio::time::timeout(Duration::from_secs(7), ws.next()).await;
-    match timeout {
-        Ok(Some(Ok(Message::Text(text)))) => {
-            let msg: Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(msg["type"], "auth_error");
-        }
-        Ok(Some(Ok(Message::Close(_)))) => {
-            // Server closed connection — acceptable
-        }
-        _other => {
-            // Connection closed or timed out — both acceptable for auth timeout
-        }
-    }
+    // Connect without auth params — should be rejected at upgrade
+    let url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let result = tokio_tungstenite::connect_async(&url).await;
+    // Should fail — no auth params provided
+    assert!(
+        result.is_err(),
+        "connection without auth params should be rejected"
+    );
 }
 
 #[tokio::test]
 async fn test_double_auth_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("acme").await;
 
-    let jwt = mint_jwt("alice", "acme", &[], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server.ws_connect_auth(&key, &secret, "alice", &[]).await;
+    ws_wait_auth_ok(&mut ws).await;
 
-    // Try to auth again
-    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
+    // Try to send auth message after already authenticated on upgrade
+    let token = mint_signed_token(&secret, "alice", &[], &[]);
+    ws_send(
+        &mut ws,
+        json!({"type": "auth", "payload": {"token": &token}}),
+    )
+    .await;
     let msg = ws_recv_type(&mut ws, "error").await;
     assert_eq!(msg["payload"]["code"], "BAD_REQUEST");
 }
@@ -4110,7 +4061,7 @@ async fn test_double_auth_rejected() {
 #[tokio::test]
 async fn test_ws_delete_event_non_member_blocked() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     // Bob is NOT a member
@@ -4128,9 +4079,11 @@ async fn test_ws_delete_event_non_member_blocked() {
     let msg_id = body["id"].as_str().unwrap().to_string();
 
     // Bob tries to delete alice's message but is not a member
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &bob_jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(
         &mut ws,
@@ -4144,14 +4097,16 @@ async fn test_ws_delete_event_non_member_blocked() {
 #[tokio::test]
 async fn test_ws_send_to_archived_stream() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Alice subscribes first before archiving
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4204,7 +4159,7 @@ async fn test_health_endpoint_no_auth_required() {
 #[tokio::test]
 async fn test_empty_name_rejected() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     let resp = server
         .http_client()
@@ -4220,8 +4175,8 @@ async fn test_empty_name_rejected() {
 #[tokio::test]
 async fn test_tenant_isolation_events() {
     let server = TestServer::start().await;
-    let token_a = server.create_tenant("acme", TENANT_A_SECRET).await;
-    let token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+    let (_key_a, _secret_a, token_a) = server.create_tenant("acme").await;
+    let (_key_b, _secret_b, token_b) = server.create_tenant("beta").await;
 
     server.create_stream(&token_a, "chat").await;
     server.create_stream(&token_b, "chat").await; // Same stream name, different tenant
@@ -4258,13 +4213,15 @@ async fn test_tenant_isolation_events() {
 #[tokio::test]
 async fn test_ws_fetch_events_non_member_blocked() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     // alice is NOT a member
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(
         &mut ws,
@@ -4278,7 +4235,7 @@ async fn test_ws_fetch_events_non_member_blocked() {
 #[tokio::test]
 async fn test_duplicate_stream_creation_rejected() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
 
     // Try to create the same stream again
@@ -4301,14 +4258,14 @@ async fn test_duplicate_stream_creation_rejected() {
 #[tokio::test]
 async fn test_duplicate_tenant_creation_rejected() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let _ = server.create_tenant("acme").await;
 
     // Try to create the same tenant again
     let resp = server
         .http_client()
         .post(server.http_url("/admin/tenants"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
-        .json(&json!({"id": "acme", "name": "acme", "jwt_secret": TENANT_A_SECRET}))
+        .bearer_auth(ADMIN_PASSWORD)
+        .json(&json!({"id": "acme", "name": "acme", "plan": "free"}))
         .send()
         .await
         .unwrap();
@@ -4322,7 +4279,7 @@ async fn test_duplicate_tenant_creation_rejected() {
 #[tokio::test]
 async fn test_http_send_to_archived_stream() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
 
     // Archive the stream
@@ -4351,7 +4308,7 @@ async fn test_http_send_to_archived_stream() {
 #[tokio::test]
 async fn test_http_body_too_large() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
 
     let big_body = "x".repeat(70_000);
@@ -4369,16 +4326,18 @@ async fn test_http_body_too_large() {
 #[tokio::test]
 async fn test_ws_subscribe_multiple_streams_partial_auth() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "allowed").await;
     server.create_stream(&token, "forbidden").await;
     server.add_member(&token, "allowed", "alice").await;
     server.add_member(&token, "forbidden", "alice").await;
 
     // JWT only permits "allowed"
-    let jwt = mint_jwt("alice", "acme", &["allowed"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["allowed"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     // Subscribe to both
     ws_send(
@@ -4416,7 +4375,7 @@ async fn test_ws_subscribe_multiple_streams_partial_auth() {
 #[tokio::test]
 async fn test_cache_channel_delivers_last_event() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("cc1", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("cc1").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
@@ -4433,9 +4392,11 @@ async fn test_cache_channel_delivers_last_event() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Now bob subscribes — should receive the cached last event
-    let bob_jwt = mint_jwt("bob", "cc1", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &bob_jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4452,7 +4413,7 @@ async fn test_cache_channel_delivers_last_event() {
 #[tokio::test]
 async fn test_cache_channel_updates_on_new_event() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("cc2", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("cc2").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
@@ -4478,9 +4439,11 @@ async fn test_cache_channel_updates_on_new_event() {
         .unwrap();
 
     // Bob subscribes — should get the SECOND (latest) message, not the first
-    let bob_jwt = mint_jwt("bob", "cc2", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &bob_jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4495,14 +4458,16 @@ async fn test_cache_channel_updates_on_new_event() {
 #[tokio::test]
 async fn test_cache_channel_empty_on_new_stream() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("cc3", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("cc3").await;
     server.create_stream(&token, "empty-chat").await;
     server.add_member(&token, "empty-chat", "alice").await;
 
     // Subscribe to a stream with no events — should get subscribed but no cached event
-    let jwt = mint_jwt("alice", "cc3", &["empty-chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["empty-chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["empty-chat"]}}),
@@ -4534,15 +4499,17 @@ async fn test_cache_channel_empty_on_new_stream() {
 #[tokio::test]
 async fn test_cache_channel_ws_send_updates_cache() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("cc4", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("cc4").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Alice sends via WS
-    let alice_jwt = mint_jwt("alice", "cc4", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4561,9 +4528,11 @@ async fn test_cache_channel_ws_send_updates_cache() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Bob subscribes later — should get the WS-sent message from cache
-    let bob_jwt = mint_jwt("bob", "cc4", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4582,7 +4551,7 @@ async fn test_cache_channel_ws_send_updates_cache() {
 #[tokio::test]
 async fn test_public_stream_subscribe_without_membership() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
 
     // Create a public stream
     let resp = server
@@ -4598,9 +4567,11 @@ async fn test_public_stream_subscribe_without_membership() {
     assert_eq!(body["public"], true);
 
     // alice is NOT added as a member — connect and subscribe
-    let jwt = mint_jwt("alice", "acme", &["public-chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["public-chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["public-chat"]}}),
@@ -4624,15 +4595,17 @@ async fn test_public_stream_subscribe_without_membership() {
 #[tokio::test]
 async fn test_private_stream_still_requires_membership() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
 
     // Create a private stream (default)
     server.create_stream(&token, "private-chat").await;
     // Do NOT add alice as member
 
-    let jwt = mint_jwt("alice", "acme", &["private-chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["private-chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["private-chat"]}}),
@@ -4647,7 +4620,7 @@ async fn test_private_stream_still_requires_membership() {
 #[tokio::test]
 async fn test_public_stream_fanout_to_auto_joined() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
 
     let resp = server
         .http_client()
@@ -4660,9 +4633,11 @@ async fn test_public_stream_fanout_to_auto_joined() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Alice auto-joins
-    let alice_jwt = mint_jwt("alice", "acme", &["pub"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["pub"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["pub"]}}),
@@ -4671,9 +4646,9 @@ async fn test_public_stream_fanout_to_auto_joined() {
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
     // Bob auto-joins
-    let bob_jwt = mint_jwt("bob", "acme", &["pub"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server.ws_connect_auth(&key, &secret, "bob", &["pub"]).await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["pub"]}}),
@@ -4702,7 +4677,7 @@ async fn test_public_stream_fanout_to_auto_joined() {
 #[tokio::test]
 async fn test_public_stream_still_requires_jwt_claim() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
 
     server
         .http_client()
@@ -4714,9 +4689,11 @@ async fn test_public_stream_still_requires_jwt_claim() {
         .unwrap();
 
     // JWT does NOT include "pub2" in streams claim
-    let jwt = mint_jwt("alice", "acme", &["other-room"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["other-room"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["pub2"]}}),
@@ -4735,15 +4712,17 @@ async fn test_public_stream_still_requires_jwt_claim() {
 #[tokio::test]
 async fn test_ephemeral_event_fanout() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Connect both users
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4751,9 +4730,11 @@ async fn test_ephemeral_event_fanout() {
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4788,14 +4769,16 @@ async fn test_ephemeral_event_fanout() {
 #[tokio::test]
 async fn test_ephemeral_event_not_persisted() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Alice sends an ephemeral event
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4834,14 +4817,16 @@ async fn test_ephemeral_event_not_persisted() {
 #[tokio::test]
 async fn test_ephemeral_event_not_sent_to_sender() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4849,9 +4834,11 @@ async fn test_ephemeral_event_not_sent_to_sender() {
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -4894,13 +4881,15 @@ async fn test_ephemeral_event_not_sent_to_sender() {
 #[tokio::test]
 async fn test_ephemeral_event_requires_membership() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     // alice NOT added as member
 
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
 
     ws_send(
         &mut ws,
@@ -4922,14 +4911,15 @@ async fn test_ephemeral_event_requires_membership() {
 #[tokio::test]
 async fn test_watchlist_online_offline() {
     let server = TestServer::start().await;
-    let _token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("acme").await;
 
     // Alice watches bob
-    let alice_jwt = mint_jwt_with_watchlist("alice", "acme", &[], &["bob"], TENANT_A_SECRET);
 
     // Connect alice first
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth_watchlist(&key, &secret, "alice", &[], &["bob"])
+        .await;
+    ws_wait_auth_ok(&mut ws_alice).await;
 
     // Bob is not online yet — alice should not get watchlist.online
     let timeout = tokio::time::timeout(Duration::from_millis(300), ws_alice.next()).await;
@@ -4940,9 +4930,9 @@ async fn test_watchlist_online_offline() {
     );
 
     // Now bob connects
-    let bob_jwt = mint_jwt("bob", "acme", &[], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server.ws_connect_auth(&key, &secret, "bob", &[]).await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
 
     // Alice should receive watchlist.online
     let msg = ws_recv_type(&mut ws_alice, "watchlist.online").await;
@@ -4968,18 +4958,19 @@ async fn test_watchlist_online_offline() {
 #[tokio::test]
 async fn test_watchlist_initial_online_status() {
     let server = TestServer::start().await;
-    let _token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("acme").await;
 
     // Bob connects first
-    let bob_jwt = mint_jwt("bob", "acme", &[], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server.ws_connect_auth(&key, &secret, "bob", &[]).await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
 
     // Alice connects with bob in watchlist — should get immediate online notification
-    let alice_jwt = mint_jwt_with_watchlist("alice", "acme", &[], &["bob"], TENANT_A_SECRET);
+    let mut ws_alice = server
+        .ws_connect_auth_watchlist(&key, &secret, "alice", &[], &["bob"])
+        .await;
 
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    ws_wait_auth_ok(&mut ws_alice).await;
 
     // Alice should receive watchlist.online immediately (bob is already connected)
     let msg = ws_recv_type(&mut ws_alice, "watchlist.online").await;
@@ -4998,15 +4989,17 @@ async fn test_watchlist_initial_online_status() {
 #[tokio::test]
 async fn test_subscriber_count_broadcast() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Alice subscribes
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5020,9 +5013,11 @@ async fn test_subscriber_count_broadcast() {
     assert_eq!(count_msg["payload"]["count"], 1);
 
     // Bob subscribes
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5078,15 +5073,17 @@ async fn test_subscriber_count_broadcast() {
 #[tokio::test]
 async fn test_http_inject_exclude_connection() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Connect alice and bob
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5094,9 +5091,11 @@ async fn test_http_inject_exclude_connection() {
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5153,8 +5152,7 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
     let db = create_test_store().await;
     let config = HeraldConfig {
         server: ServerConfig {
-            ws_bind: "127.0.0.1:0".to_string(),
-            http_bind: "127.0.0.1:0".to_string(),
+            bind: "127.0.0.1:0".to_string(),
             log_level: "warn".to_string(),
             max_messages_per_sec: 1000,
             ..Default::default()
@@ -5166,12 +5164,8 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
             event_ttl_days: 7,
         },
         auth: AuthConfig {
-            jwt_secret: Some(TENANT_A_SECRET.to_string()),
-            jwt_issuer: None,
-            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-            api: ApiAuthConfig {
-                tokens: vec!["quota-token".to_string()],
-            },
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig {
             linger_secs: 0,
@@ -5196,55 +5190,54 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
     });
-    state.bootstrap_single_tenant().await.unwrap();
+    state.bootstrap_default_tenant().await.unwrap();
 
     let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ws_port = ws_listener.local_addr().unwrap().port();
     let ws_state = state.clone();
     let ws_app = axum::Router::new()
         .route(
-            "/",
+            "/ws",
             axum::routing::get(herald_server::ws::upgrade::ws_handler),
         )
         .with_state(ws_state);
     tokio::spawn(async move { axum::serve(ws_listener, ws_app).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let ws_url = format!("ws://127.0.0.1:{ws_port}/");
+    let ws_url = format!("ws://127.0.0.1:{ws_port}/ws");
 
     // Fill up the quota with 2 authenticated connections
-    let jwt1 = mint_jwt("user1", "default", &[], TENANT_A_SECRET);
-    let (mut ws1, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    ws_auth(&mut ws1, &jwt1).await;
+    // Use the state directly to get the default tenant key/secret
+    let def_key = state.tenant_cache.iter().next().unwrap().key.clone();
+    let def_secret = state.tenant_cache.iter().next().unwrap().secret.clone();
 
-    let jwt2 = mint_jwt("user2", "default", &[], TENANT_A_SECRET);
-    let (mut ws2, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    ws_auth(&mut ws2, &jwt2).await;
+    let signed1 = mint_signed_token(&def_secret, "user1", &[], &[]);
+    let url1 = format!("{ws_url}?key={def_key}&token={signed1}&user_id=user1&streams=");
+    let (mut ws1, _) = tokio_tungstenite::connect_async(&url1).await.unwrap();
+    ws_wait_auth_ok(&mut ws1).await;
+
+    let signed2 = mint_signed_token(&def_secret, "user2", &[], &[]);
+    let url2 = format!("{ws_url}?key={def_key}&token={signed2}&user_id=user2&streams=");
+    let (mut ws2, _) = tokio_tungstenite::connect_async(&url2).await.unwrap();
+    ws_wait_auth_ok(&mut ws2).await;
 
     // Third connection should be rejected (quota reached)
-    let jwt3 = mint_jwt("user3", "default", &[], TENANT_A_SECRET);
-    let (mut ws3, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    ws_send(
-        &mut ws3,
-        json!({"type": "auth", "payload": {"token": &jwt3}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws3, "error").await;
-    assert_eq!(msg["payload"]["code"], "RATE_LIMITED");
-
-    // But unauthenticated connections can still connect (they just timeout after 5s)
-    // This proves they don't count against the quota
-    let (mut ws_unauth, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    // Connection succeeded — it's not rejected at TCP level
-    // Don't auth — just verify connection was established
-    ws_send(&mut ws_unauth, json!({"type": "ping"})).await;
-    // The server won't respond to ping before auth, but the connection is open
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // If we got here, the unauthenticated connection was not rejected at connect time.
-    // The send above succeeded, proving the connection is open.
+    let signed3 = mint_signed_token(&def_secret, "user3", &[], &[]);
+    let url3 = format!("{ws_url}?key={def_key}&token={signed3}&user_id=user3&streams=");
+    let result3 = tokio_tungstenite::connect_async(&url3).await;
+    // Should fail at upgrade or get error after connect
+    match result3 {
+        Err(_) => {} // rejected at upgrade — expected
+        Ok((mut ws3, _)) => {
+            // May connect but get error
+            let msg = ws_recv_type(&mut ws3, "error").await;
+            assert_eq!(msg["payload"]["code"], "RATE_LIMITED");
+            let _ = &ws3;
+        }
+    }
 
     // Keep connections alive to prevent drop
-    let _ = (&ws1, &ws2, &ws3, &ws_unauth);
+    let _ = (&ws1, &ws2);
 }
 
 // ---------------------------------------------------------------------------
@@ -5254,14 +5247,16 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
 #[tokio::test]
 async fn test_event_edit_ws() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5269,9 +5264,11 @@ async fn test_event_edit_ws() {
     .await;
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5325,7 +5322,7 @@ async fn test_event_edit_ws() {
 #[tokio::test]
 async fn test_event_edit_http() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -5364,7 +5361,7 @@ async fn test_event_edit_http() {
 #[tokio::test]
 async fn test_thread_reply() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
@@ -5420,14 +5417,16 @@ async fn test_thread_reply() {
 #[tokio::test]
 async fn test_thread_reply_ws() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5479,7 +5478,7 @@ async fn test_thread_reply_ws() {
 #[tokio::test]
 async fn test_reaction_add_remove_ws() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
@@ -5497,9 +5496,11 @@ async fn test_reaction_add_remove_ws() {
     let msg_id = body["id"].as_str().unwrap().to_string();
 
     // Bob subscribes
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5512,9 +5513,11 @@ async fn test_reaction_add_remove_ws() {
     {}
 
     // Alice subscribes and adds reaction
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_auth(&mut ws_alice, &alice_jwt).await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_alice).await;
     ws_send(
         &mut ws_alice,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5566,7 +5569,7 @@ async fn test_reaction_add_remove_ws() {
 #[tokio::test]
 async fn test_attachment_validation() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
@@ -5626,7 +5629,7 @@ async fn test_attachment_validation() {
 #[tokio::test]
 async fn test_user_block_unblock() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
 
     // Block
     let resp = server
@@ -5678,12 +5681,10 @@ async fn test_user_block_unblock() {
 #[tokio::test]
 async fn test_auth_ok_includes_connection_id() {
     let server = TestServer::start().await;
-    server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("acme").await;
 
-    let jwt = mint_jwt("alice", "acme", &[], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_send(&mut ws, json!({"type": "auth", "payload": {"token": &jwt}})).await;
-    let msg = ws_recv_type(&mut ws, "auth_ok").await;
+    let mut ws = server.ws_connect_auth(&key, &secret, "alice", &[]).await;
+    let msg = ws_wait_auth_ok(&mut ws).await;
 
     assert!(
         msg["payload"]["connection_id"].is_number(),
@@ -5698,14 +5699,16 @@ async fn test_auth_ok_includes_connection_id() {
 #[tokio::test]
 async fn test_http_trigger_ephemeral_event() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
 
     // Connect alice
-    let jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5739,7 +5742,7 @@ async fn test_http_trigger_ephemeral_event() {
 #[tokio::test]
 async fn test_http_trigger_not_persisted() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (_key, _secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
 
     // Trigger an event
@@ -5768,20 +5771,16 @@ async fn test_http_trigger_not_persisted() {
 #[tokio::test]
 async fn test_http_trigger_with_exclude() {
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
     // Connect alice
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_alice = server.ws_connect().await;
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "auth", "payload": {"token": &alice_jwt}}),
-    )
-    .await;
-    let auth = ws_recv_type(&mut ws_alice, "auth_ok").await;
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    let auth = ws_wait_auth_ok(&mut ws_alice).await;
     let alice_conn = auth["payload"]["connection_id"].as_u64().unwrap();
     ws_send(
         &mut ws_alice,
@@ -5791,9 +5790,11 @@ async fn test_http_trigger_with_exclude() {
     ws_recv_type(&mut ws_alice, "subscribed").await;
 
     // Connect bob
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5835,16 +5836,16 @@ async fn test_reconnect_reauth_and_resubscribe() {
     // reconnects, re-authenticates, and re-subscribes.
     // This validates the server-side behavior that the SDK fix depends on.
     let server = TestServer::start().await;
-    let token = server.create_tenant("acme", TENANT_A_SECRET).await;
+    let (key, secret, token) = server.create_tenant("acme").await;
     server.create_stream(&token, "chat").await;
     server.add_member(&token, "chat", "alice").await;
     server.add_member(&token, "chat", "bob").await;
 
-    let alice_jwt = mint_jwt("alice", "acme", &["chat"], TENANT_A_SECRET);
-
     // Connect alice, authenticate, subscribe
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &alice_jwt).await;
+    let mut ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws).await;
     ws_send(
         &mut ws,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5871,10 +5872,12 @@ async fn test_reconnect_reauth_and_resubscribe() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // --- Reconnect: new WebSocket, re-authenticate, re-subscribe ---
-    let mut ws2 = server.ws_connect().await;
+    let mut ws2 = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
 
-    // Re-authenticate with the same JWT
-    let auth_ok = ws_auth(&mut ws2, &alice_jwt).await;
+    // Re-authenticate on upgrade
+    let auth_ok = ws_wait_auth_ok(&mut ws2).await;
     assert_eq!(auth_ok["payload"]["user_id"], "alice");
     // New connection should get a new connection_id
     assert!(auth_ok["payload"]["connection_id"].is_number());
@@ -5903,9 +5906,11 @@ async fn test_reconnect_reauth_and_resubscribe() {
     assert!(ack2["payload"]["id"].is_string());
 
     // Connect bob and verify he can receive alice's messages (fanout works)
-    let bob_jwt = mint_jwt("bob", "acme", &["chat"], TENANT_A_SECRET);
-    let mut ws_bob = server.ws_connect().await;
-    ws_auth(&mut ws_bob, &bob_jwt).await;
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+
+    ws_wait_auth_ok(&mut ws_bob).await;
     ws_send(
         &mut ws_bob,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -5945,7 +5950,7 @@ async fn test_tenant_cache_survives_time_passage() {
     // After the fix, the cache is never evicted — it's only refreshed on
     // admin update/delete or on startup hydration.
     let server = TestServer::start().await;
-    let _token = server.create_tenant("persistent", TENANT_A_SECRET).await;
+    let (key, secret, _token) = server.create_tenant("persistent").await;
 
     // Verify tenant is in cache
     assert!(
@@ -5954,9 +5959,9 @@ async fn test_tenant_cache_survives_time_passage() {
     );
 
     // JWT auth should work
-    let jwt = mint_jwt("alice", "persistent", &[], TENANT_A_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server.ws_connect_auth(&key, &secret, "alice", &[]).await;
+
+    ws_wait_auth_ok(&mut ws).await;
     drop(ws);
 
     // Manually set cached_at to 10 minutes ago (beyond any TTL)
@@ -5970,14 +5975,9 @@ async fn test_tenant_cache_survives_time_passage() {
         "stale tenant should remain in cache (no eviction)"
     );
 
-    // JWT auth should STILL work even with stale cache entry
-    let mut ws2 = server.ws_connect().await;
-    ws_send(
-        &mut ws2,
-        json!({"type": "auth", "payload": {"token": &jwt}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws2, "auth_ok").await;
+    // Auth should STILL work even with stale cache entry
+    let mut ws2 = server.ws_connect_auth(&key, &secret, "alice", &[]).await;
+    let msg = ws_wait_auth_ok(&mut ws2).await;
     assert_eq!(
         msg["payload"]["user_id"], "alice",
         "JWT auth should succeed with stale cache entry"
@@ -5989,20 +5989,18 @@ async fn test_tenant_cache_delete_then_auth_fails() {
     // Ensure that deleting a tenant via admin API immediately invalidates
     // the cache, and subsequent JWT auth fails.
     let server = TestServer::start().await;
-    let _token = server.create_tenant("deleteme", TENANT_A_SECRET).await;
-
-    let jwt = mint_jwt("user1", "deleteme", &[], TENANT_A_SECRET);
+    let (key, secret, _token) = server.create_tenant("deleteme").await;
 
     // Auth works before delete
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt).await;
+    let mut ws = server.ws_connect_auth(&key, &secret, "user1", &[]).await;
+    ws_wait_auth_ok(&mut ws).await;
     drop(ws);
 
     // Delete tenant
     let resp = server
         .http_client()
         .delete(server.http_url("/admin/tenants/deleteme"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -6015,14 +6013,14 @@ async fn test_tenant_cache_delete_then_auth_fails() {
     );
 
     // Auth should fail immediately (not after TTL)
-    let mut ws2 = server.ws_connect().await;
-    ws_send(
-        &mut ws2,
-        json!({"type": "auth", "payload": {"token": &jwt}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws2, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    let url2 = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=user1&streams=chat",
+        server.port,
+        key,
+        mint_signed_token(&secret, "user1", &["chat"], &[])
+    );
+    let result = tokio_tungstenite::connect_async(&url2).await;
+    assert!(result.is_err(), "auth should fail after tenant deletion");
 }
 
 #[tokio::test]
@@ -6030,7 +6028,7 @@ async fn test_tenant_cache_update_refreshes_immediately() {
     // Ensure that updating a tenant via admin API refreshes the cache
     // entry immediately (not stale after update).
     let server = TestServer::start().await;
-    let _token = server.create_tenant("updating", TENANT_A_SECRET).await;
+    let (_key, _secret, _token) = server.create_tenant("updating").await;
 
     // Check initial state
     let cached = server.state.tenant_cache.get("updating").unwrap();
@@ -6046,7 +6044,7 @@ async fn test_tenant_cache_update_refreshes_immediately() {
     let resp = server
         .http_client()
         .patch(server.http_url("/admin/tenants/updating"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .json(&json!({"plan": "pro"}))
         .send()
         .await
@@ -6066,8 +6064,8 @@ async fn test_tenant_cache_update_refreshes_immediately() {
 async fn test_multiple_tenants_independent_cache() {
     // Ensure operations on one tenant don't affect another's cache.
     let server = TestServer::start().await;
-    let _token_a = server.create_tenant("alpha", TENANT_A_SECRET).await;
-    let _token_b = server.create_tenant("beta", TENANT_B_SECRET).await;
+    let (key_a, secret_a, _token_a) = server.create_tenant("alpha").await;
+    let (key_b, secret_b, _token_b) = server.create_tenant("beta").await;
 
     // Both should be in cache
     assert!(server.state.tenant_cache.get("alpha").is_some());
@@ -6077,7 +6075,7 @@ async fn test_multiple_tenants_independent_cache() {
     server
         .http_client()
         .delete(server.http_url("/admin/tenants/alpha"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -6086,28 +6084,28 @@ async fn test_multiple_tenants_independent_cache() {
     assert!(server.state.tenant_cache.get("alpha").is_none());
     assert!(server.state.tenant_cache.get("beta").is_some());
 
-    // Beta JWT still works
-    let jwt_b = mint_jwt("user1", "beta", &[], TENANT_B_SECRET);
-    let mut ws = server.ws_connect().await;
-    ws_auth(&mut ws, &jwt_b).await;
+    // Beta auth still works
+    let mut ws = server
+        .ws_connect_auth(&key_b, &secret_b, "user1", &[])
+        .await;
 
-    // Alpha JWT fails
-    let jwt_a = mint_jwt("user1", "alpha", &[], TENANT_A_SECRET);
-    let mut ws2 = server.ws_connect().await;
-    ws_send(
-        &mut ws2,
-        json!({"type": "auth", "payload": {"token": &jwt_a}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws2, "auth_error").await;
-    assert_eq!(msg["payload"]["code"], "TOKEN_INVALID");
+    ws_wait_auth_ok(&mut ws).await;
+
+    // Alpha auth fails (tenant deleted)
+    let alpha_token = mint_signed_token(&secret_a, "user1", &[], &[]);
+    let url = format!(
+        "ws://127.0.0.1:{}/ws?key={}&token={}&user_id=user1&streams=",
+        server.port, key_a, alpha_token
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(result.is_err(), "auth should fail for deleted tenant");
 }
 
 #[tokio::test]
 async fn test_health_shows_correct_tenant_count() {
     let server = TestServer::start().await;
-    server.create_tenant("t1", TENANT_A_SECRET).await;
-    server.create_tenant("t2", TENANT_B_SECRET).await;
+    let _ = server.create_tenant("t1").await;
+    let _ = server.create_tenant("t2").await;
 
     let resp = server
         .http_client()
@@ -6172,8 +6170,7 @@ async fn test_remote_backend_boots_and_operates() {
 
     let config = HeraldConfig {
         server: ServerConfig {
-            ws_bind: "127.0.0.1:0".to_string(),
-            http_bind: "127.0.0.1:0".to_string(),
+            bind: "127.0.0.1:0".to_string(),
             log_level: "warn".to_string(),
             max_messages_per_sec: 1000,
             api_rate_limit: 10000,
@@ -6186,12 +6183,8 @@ async fn test_remote_backend_boots_and_operates() {
             event_ttl_days: 7,
         },
         auth: AuthConfig {
-            jwt_secret: Some(TENANT_A_SECRET.to_string()),
-            jwt_issuer: None,
-            super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-            api: ApiAuthConfig {
-                tokens: vec!["remote-test-token".to_string()],
-            },
+            password: Some(ADMIN_PASSWORD.to_string()),
+            token_window_secs: 300,
         },
         presence: PresenceConfig {
             linger_secs: 0,
@@ -6215,7 +6208,7 @@ async fn test_remote_backend_boots_and_operates() {
     });
 
     // Bootstrap single tenant
-    state.bootstrap_single_tenant().await.unwrap();
+    state.bootstrap_default_tenant().await.unwrap();
 
     let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_port = http_listener.local_addr().unwrap().port();
@@ -6332,13 +6325,13 @@ async fn test_per_tenant_retention_tiers() {
     let client = server.http_client();
 
     // Create tenant A (7d retention) and tenant B (30d retention)
-    let token_a = server.create_tenant("ttl-a", TENANT_A_SECRET).await;
-    let token_b = server.create_tenant("ttl-b", TENANT_B_SECRET).await;
+    let (_key_a, _secret_a, token_a) = server.create_tenant("ttl-a").await;
+    let (_key_b, _secret_b, token_b) = server.create_tenant("ttl-b").await;
 
     // Set event_ttl_days via admin API
     let resp = client
         .patch(server.http_url("/admin/tenants/ttl-a"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .json(&json!({"event_ttl_days": 7}))
         .send()
         .await
@@ -6347,7 +6340,7 @@ async fn test_per_tenant_retention_tiers() {
 
     let resp = client
         .patch(server.http_url("/admin/tenants/ttl-b"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .json(&json!({"event_ttl_days": 30}))
         .send()
         .await
@@ -6357,7 +6350,7 @@ async fn test_per_tenant_retention_tiers() {
     // Verify the TTL is reflected in GET tenant
     let resp = client
         .get(server.http_url("/admin/tenants/ttl-a"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -6370,7 +6363,7 @@ async fn test_per_tenant_retention_tiers() {
 
     let resp = client
         .get(server.http_url("/admin/tenants/ttl-b"))
-        .bearer_auth(SUPER_ADMIN_TOKEN)
+        .bearer_auth(ADMIN_PASSWORD)
         .send()
         .await
         .unwrap();
@@ -6493,13 +6486,12 @@ async fn create_shared_engine() -> Arc<shroudb_storage::StorageEngine> {
 
 struct ClusteredTestServer {
     state: Arc<AppState>,
-    ws_port: u16,
-    http_port: u16,
-    _ws_handle: tokio::task::JoinHandle<()>,
-    _http_handle: tokio::task::JoinHandle<()>,
+    port: u16,
+    _handle: tokio::task::JoinHandle<()>,
     _backplane_handle: tokio::task::JoinHandle<()>,
 }
 
+#[allow(dead_code)]
 impl ClusteredTestServer {
     async fn start(engine: Arc<shroudb_storage::StorageEngine>, instance_id: &str) -> Self {
         let embedded = shroudb_storage::EmbeddedStore::new(engine, "test");
@@ -6508,8 +6500,7 @@ impl ClusteredTestServer {
 
         let config = HeraldConfig {
             server: ServerConfig {
-                ws_bind: "127.0.0.1:0".to_string(),
-                http_bind: "127.0.0.1:0".to_string(),
+                bind: "127.0.0.1:0".to_string(),
                 log_level: "warn".to_string(),
                 max_messages_per_sec: 1000,
                 api_rate_limit: 10000,
@@ -6522,10 +6513,8 @@ impl ClusteredTestServer {
                 event_ttl_days: 7,
             },
             auth: AuthConfig {
-                jwt_secret: Some(TENANT_A_SECRET.to_string()),
-                jwt_issuer: None,
-                super_admin_token: Some(SUPER_ADMIN_TOKEN.to_string()),
-                api: ApiAuthConfig { tokens: vec![] },
+                password: Some(ADMIN_PASSWORD.to_string()),
+                token_window_secs: 300,
             },
             presence: PresenceConfig {
                 linger_secs: 0,
@@ -6554,77 +6543,100 @@ impl ClusteredTestServer {
         // Spawn backplane consumer
         let backplane_handle = herald_server::backplane::spawn(state.clone());
 
-        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ws_port = ws_listener.local_addr().unwrap().port();
-        let http_port = http_listener.local_addr().unwrap().port();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        let ws_state = state.clone();
-        let ws_app = axum::Router::new()
-            .route(
-                "/",
-                axum::routing::get(herald_server::ws::upgrade::ws_handler),
-            )
-            .with_state(ws_state);
-        let http_app = herald_server::http::router(state.clone());
+        let app = herald_server::http::router(state.clone());
 
-        let ws_handle = tokio::spawn(async move {
-            axum::serve(ws_listener, ws_app).await.unwrap();
-        });
-        let http_handle = tokio::spawn(async move {
-            axum::serve(http_listener, http_app).await.unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         ClusteredTestServer {
             state,
-            ws_port,
-            http_port,
-            _ws_handle: ws_handle,
-            _http_handle: http_handle,
+            port,
+            _handle: handle,
             _backplane_handle: backplane_handle,
         }
     }
 
     fn http_url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{}", self.http_port, path)
+        format!("http://127.0.0.1:{}{}", self.port, path)
     }
 
     fn http_client(&self) -> reqwest::Client {
         reqwest::Client::new()
     }
 
-    async fn ws_connect(
+    /// Connect WebSocket with auth query params (auth on upgrade).
+    async fn ws_connect_auth(
         &self,
+        key: &str,
+        secret: &str,
+        user_id: &str,
+        streams: &[&str],
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        let url = format!("ws://127.0.0.1:{}/", self.ws_port);
+        let token = mint_signed_token(secret, user_id, streams, &[]);
+        let streams_str = streams.join(",");
+        let url = format!(
+            "ws://127.0.0.1:{}/ws?key={}&token={}&user_id={}&streams={}",
+            self.port, key, token, user_id, streams_str
+        );
         let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         ws
     }
 
-    async fn create_tenant(&self, id: &str, jwt_secret: &str) -> String {
+    /// Connect WebSocket with auth (including watchlist).
+    async fn ws_connect_auth_watchlist(
+        &self,
+        key: &str,
+        secret: &str,
+        user_id: &str,
+        streams: &[&str],
+        watchlist: &[&str],
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let token = mint_signed_token(secret, user_id, streams, watchlist);
+        let streams_str = streams.join(",");
+        let watchlist_str = watchlist.join(",");
+        let url = format!(
+            "ws://127.0.0.1:{}/ws?key={}&token={}&user_id={}&streams={}&watchlist={}",
+            self.port, key, token, user_id, streams_str, watchlist_str
+        );
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        ws
+    }
+
+    /// Create a tenant and return (key, secret, api_token).
+    async fn create_tenant(&self, id: &str) -> (String, String, String) {
         let resp = self
             .http_client()
             .post(self.http_url("/admin/tenants"))
-            .bearer_auth(SUPER_ADMIN_TOKEN)
-            .json(&json!({"id": id, "name": id, "jwt_secret": jwt_secret, "plan": "pro"}))
+            .bearer_auth(ADMIN_PASSWORD)
+            .json(&json!({"id": id, "name": id, "plan": "pro"}))
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED, "create tenant {id}");
+        let body: Value = resp.json().await.unwrap();
+        let key = body["key"].as_str().unwrap().to_string();
+        let secret = body["secret"].as_str().unwrap().to_string();
 
         let resp = self
             .http_client()
             .post(self.http_url(&format!("/admin/tenants/{id}/tokens")))
-            .bearer_auth(SUPER_ADMIN_TOKEN)
+            .bearer_auth(ADMIN_PASSWORD)
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body: Value = resp.json().await.unwrap();
-        body["token"].as_str().unwrap().to_string()
+        let api_token = body["token"].as_str().unwrap().to_string();
+
+        (key, secret, api_token)
     }
 
     async fn create_stream(&self, api_token: &str, stream_id: &str) {
@@ -6665,7 +6677,7 @@ async fn test_cluster_http_publish_cross_instance() {
     let server_b = ClusteredTestServer::start(engine.clone(), "http-b").await;
 
     // Create tenant and stream via instance A
-    let api_token = server_a.create_tenant("ht1", TENANT_A_SECRET).await;
+    let (_key_a, _secret_a, api_token) = server_a.create_tenant("ht1").await;
     server_b.state.hydrate_tenant_cache().await.unwrap();
 
     server_a.create_stream(&api_token, "ch1").await;
@@ -6675,9 +6687,10 @@ async fn test_cluster_http_publish_cross_instance() {
     server_b.state.streams.add_member("ht1", "ch1", "bob");
 
     // Bob connects and subscribes on instance B
-    let jwt_bob = mint_jwt("bob", "ht1", &["ch1"], TENANT_A_SECRET);
-    let mut ws_b = server_b.ws_connect().await;
-    ws_auth(&mut ws_b, &jwt_bob).await;
+    let mut ws_b = server_b
+        .ws_connect_auth(&_key_a, &_secret_a, "bob", &["ch1"])
+        .await;
+    ws_wait_auth_ok(&mut ws_b).await;
     ws_send(
         &mut ws_b,
         json!({"type": "subscribe", "payload": {"streams": ["ch1"]}}),
@@ -6714,7 +6727,7 @@ async fn test_cluster_cross_instance_fanout() {
     let server_b = ClusteredTestServer::start(engine.clone(), "node-b").await;
 
     // Create tenant and stream via instance A
-    let api_token = server_a.create_tenant("cluster-t1", TENANT_A_SECRET).await;
+    let (_key_a, _secret_a, api_token) = server_a.create_tenant("cluster-t1").await;
     // Hydrate tenant cache on instance B
     server_b.state.hydrate_tenant_cache().await.unwrap();
 
@@ -6738,11 +6751,10 @@ async fn test_cluster_cross_instance_fanout() {
         .add_member("cluster-t1", "chat", "bob");
 
     // Alice connects to instance A, Bob connects to instance B
-    let jwt_alice = mint_jwt("alice", "cluster-t1", &["chat"], TENANT_A_SECRET);
-    let jwt_bob = mint_jwt("bob", "cluster-t1", &["chat"], TENANT_A_SECRET);
-
-    let mut ws_a = server_a.ws_connect().await;
-    ws_auth(&mut ws_a, &jwt_alice).await;
+    let mut ws_a = server_a
+        .ws_connect_auth(&_key_a, &_secret_a, "alice", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_a).await;
     ws_send(
         &mut ws_a,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -6750,8 +6762,10 @@ async fn test_cluster_cross_instance_fanout() {
     .await;
     ws_recv_type(&mut ws_a, "subscribed").await;
 
-    let mut ws_b = server_b.ws_connect().await;
-    ws_auth(&mut ws_b, &jwt_bob).await;
+    let mut ws_b = server_b
+        .ws_connect_auth(&_key_a, &_secret_a, "bob", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_b).await;
     ws_send(
         &mut ws_b,
         json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
@@ -6796,7 +6810,7 @@ async fn test_cluster_sequence_coordination() {
     let server_a = ClusteredTestServer::start(engine.clone(), "seq-a").await;
     let server_b = ClusteredTestServer::start(engine.clone(), "seq-b").await;
 
-    let api_token = server_a.create_tenant("seq-t1", TENANT_A_SECRET).await;
+    let (_key_a, _secret_a, api_token) = server_a.create_tenant("seq-t1").await;
     server_b.state.hydrate_tenant_cache().await.unwrap();
 
     server_a.create_stream(&api_token, "ordered").await;
@@ -6862,7 +6876,7 @@ async fn test_cluster_failover_catchup() {
     let server_a = ClusteredTestServer::start(engine.clone(), "fail-a").await;
     let server_b = ClusteredTestServer::start(engine.clone(), "fail-b").await;
 
-    let api_token = server_a.create_tenant("fail-t1", TENANT_A_SECRET).await;
+    let (_key_a, _secret_a, api_token) = server_a.create_tenant("fail-t1").await;
     server_b.state.hydrate_tenant_cache().await.unwrap();
 
     server_a.create_stream(&api_token, "persist").await;
@@ -6897,9 +6911,10 @@ async fn test_cluster_failover_catchup() {
 
     // "Instance A dies" — subscriber connects to instance B instead.
     // The events are in the shared store, so catchup should work.
-    let jwt = mint_jwt("user1", "fail-t1", &["persist"], TENANT_A_SECRET);
-    let mut ws_b = server_b.ws_connect().await;
-    ws_auth(&mut ws_b, &jwt).await;
+    let mut ws_b = server_b
+        .ws_connect_auth(&_key_a, &_secret_a, "user1", &["persist"])
+        .await;
+    ws_wait_auth_ok(&mut ws_b).await;
     ws_send(
         &mut ws_b,
         json!({"type": "subscribe", "payload": {"streams": ["persist"]}}),

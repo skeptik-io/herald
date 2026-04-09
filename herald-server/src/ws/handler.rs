@@ -203,7 +203,7 @@ pub async fn handle_message(
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
         }
-        ClientMessage::Auth { ref_, .. } | ClientMessage::AuthRefresh { ref_, .. } => {
+        ClientMessage::Auth { ref_, .. } => {
             let _ = tx
                 .send(ServerMessage::error(
                     ref_,

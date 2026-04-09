@@ -151,10 +151,8 @@ class TenantNamespace:
     def __init__(self, t: HttpTransport) -> None:
         self._t = t
 
-    def create(self, id: str, name: str, jwt_secret: str, *, jwt_issuer: str | None = None, plan: str | None = None) -> dict[str, Any]:
-        body: dict[str, Any] = {"id": id, "name": name, "jwt_secret": jwt_secret}
-        if jwt_issuer is not None:
-            body["jwt_issuer"] = jwt_issuer
+    def create(self, id: str, name: str, *, plan: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"id": id, "name": name}
         if plan is not None:
             body["plan"] = plan
         return self._t.request("POST", "/admin/tenants", body)

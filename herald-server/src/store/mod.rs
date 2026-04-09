@@ -22,6 +22,7 @@ pub const NS_CURSORS: &str = "herald.cursors";
 pub const NS_REACTIONS: &str = "herald.reactions";
 pub const NS_BLOCKS: &str = "herald.blocks";
 pub const NS_SEQUENCES: &str = "herald.sequences";
+pub const NS_TENANT_KEYS: &str = "herald.tenant_keys";
 
 /// Initialize all namespaces on startup.
 #[cfg(test)]
@@ -54,6 +55,7 @@ pub async fn init_namespaces<S: Store>(store: &S) -> Result<(), shroudb_store::S
         NS_REACTIONS,
         NS_BLOCKS,
         NS_SEQUENCES,
+        NS_TENANT_KEYS,
     ] {
         match store.namespace_create(ns, config.clone()).await {
             Ok(()) => {}

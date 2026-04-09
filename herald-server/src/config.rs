@@ -64,10 +64,8 @@ pub struct ShroudbConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
-    #[serde(default = "default_ws_bind")]
-    pub ws_bind: String,
-    #[serde(default = "default_http_bind")]
-    pub http_bind: String,
+    #[serde(default = "default_bind")]
+    pub bind: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_max_messages_per_sec")]
@@ -84,8 +82,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            ws_bind: default_ws_bind(),
-            http_bind: default_http_bind(),
+            bind: default_bind(),
             log_level: default_log_level(),
             max_messages_per_sec: default_max_messages_per_sec(),
             api_rate_limit: default_api_rate_limit(),
@@ -133,20 +130,15 @@ fn default_store_mode() -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct AuthConfig {
-    #[serde(default)]
-    pub jwt_secret: Option<String>,
-    #[serde(default)]
-    pub jwt_issuer: Option<String>,
-    #[serde(default)]
-    pub super_admin_token: Option<String>,
-    #[serde(default)]
-    pub api: ApiAuthConfig,
+    /// Server admin password. Required. Used for all `/admin/*` endpoints.
+    pub password: Option<String>,
+    /// Maximum age (seconds) of a signed connection token. Default 300 (5 min).
+    #[serde(default = "default_token_window")]
+    pub token_window_secs: u64,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct ApiAuthConfig {
-    #[serde(default)]
-    pub tokens: Vec<String>,
+fn default_token_window() -> u64 {
+    300
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,11 +196,8 @@ pub struct CorsConfig {
     pub allowed_origins: Vec<String>,
 }
 
-fn default_ws_bind() -> String {
+fn default_bind() -> String {
     "0.0.0.0:6200".to_string()
-}
-fn default_http_bind() -> String {
-    "0.0.0.0:6201".to_string()
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -240,7 +229,7 @@ fn default_shutdown_timeout() -> u64 {
 
 impl HeraldConfig {
     /// Validate configuration values at startup. Returns descriptive errors.
-    pub fn validate(&self, multi_tenant: bool) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         // Server config
         if self.server.max_messages_per_sec == 0 {
             anyhow::bail!("server.max_messages_per_sec must be > 0");
@@ -269,22 +258,15 @@ impl HeraldConfig {
         }
 
         // Auth config
-        if multi_tenant {
-            let token = self.auth.super_admin_token.as_deref().unwrap_or("");
-            if token.is_empty() {
-                anyhow::bail!("auth.super_admin_token is required for multi-tenant mode");
-            }
-            if token.len() < 16 {
-                anyhow::bail!("auth.super_admin_token should be at least 16 characters");
-            }
-        } else {
-            let secret = self.auth.jwt_secret.as_deref().unwrap_or("");
-            if secret.is_empty() {
-                anyhow::bail!("auth.jwt_secret is required for single-tenant mode");
-            }
-            if secret.len() < 16 {
-                anyhow::bail!("auth.jwt_secret should be at least 16 characters for security");
-            }
+        let password = self.auth.password.as_deref().unwrap_or("");
+        if password.is_empty() {
+            anyhow::bail!("auth.password is required");
+        }
+        if password.len() < 16 {
+            anyhow::bail!("auth.password should be at least 16 characters");
+        }
+        if self.auth.token_window_secs == 0 {
+            anyhow::bail!("auth.token_window_secs must be > 0");
         }
 
         // TLS config
@@ -339,17 +321,12 @@ impl HeraldConfig {
         let env_or =
             |key: &str, default: &str| std::env::var(key).unwrap_or_else(|_| default.to_string());
 
-        // Railway sets PORT — use it for HTTP (the public domain routes here).
-        // WS gets a separate port (PORT+1, or HERALD_WS_BIND override).
-        let port = env_or("PORT", "6201");
-        let http_bind = format!("0.0.0.0:{port}");
-        let ws_port: u16 = port.parse::<u16>().unwrap_or(6201) + 1;
-        let ws_bind = format!("0.0.0.0:{ws_port}");
+        let port = env_or("PORT", "6200");
+        let bind = format!("0.0.0.0:{port}");
 
         Ok(Self {
             server: ServerConfig {
-                ws_bind: env("HERALD_WS_BIND").unwrap_or(ws_bind),
-                http_bind: env("HERALD_HTTP_BIND").unwrap_or(http_bind),
+                bind: env("HERALD_BIND").unwrap_or(bind),
                 log_level: env_or("HERALD_LOG_LEVEL", "info"),
                 max_messages_per_sec: env("HERALD_MAX_MSG_PER_SEC")
                     .and_then(|v| v.parse().ok())
@@ -373,14 +350,10 @@ impl HeraldConfig {
                     .unwrap_or(7),
             },
             auth: AuthConfig {
-                jwt_secret: env("HERALD_JWT_SECRET"),
-                jwt_issuer: env("HERALD_JWT_ISSUER"),
-                super_admin_token: env("HERALD_SUPER_ADMIN_TOKEN"),
-                api: ApiAuthConfig {
-                    tokens: env("HERALD_API_TOKENS")
-                        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
-                        .unwrap_or_default(),
-                },
+                password: env("HERALD_PASSWORD"),
+                token_window_secs: env("HERALD_TOKEN_WINDOW_SECS")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(300),
             },
             presence: PresenceConfig {
                 linger_secs: env("HERALD_LINGER_SECS")
@@ -477,39 +450,15 @@ impl HeraldConfig {
             Ok(String::from_utf8(bytes)?)
         };
 
-        match client.get("herald/jwt-secret", None).await {
+        match client.get("herald/password", None).await {
             Ok(result) => match decode_keep(&result.value) {
-                Ok(secret) => {
-                    self.auth.jwt_secret = Some(secret);
-                    tracing::info!("loaded herald/jwt-secret from Keep");
+                Ok(password) => {
+                    self.auth.password = Some(password);
+                    tracing::info!("loaded herald/password from Keep");
                 }
-                Err(e) => tracing::warn!("herald/jwt-secret decode failed: {e}"),
+                Err(e) => tracing::warn!("herald/password decode failed: {e}"),
             },
-            Err(e) => tracing::warn!("herald/jwt-secret not in Keep: {e}"),
-        }
-        match client.get("herald/super-admin-token", None).await {
-            Ok(result) => match decode_keep(&result.value) {
-                Ok(token) => {
-                    self.auth.super_admin_token = Some(token);
-                    tracing::info!("loaded herald/super-admin-token from Keep");
-                }
-                Err(e) => tracing::warn!("herald/super-admin-token decode failed: {e}"),
-            },
-            Err(e) => tracing::warn!("herald/super-admin-token not in Keep: {e}"),
-        }
-        match client.get("herald/api-tokens", None).await {
-            Ok(result) => match decode_keep(&result.value) {
-                Ok(tokens) => {
-                    self.auth.api.tokens = tokens
-                        .split(',')
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                    tracing::info!("loaded herald/api-tokens from Keep");
-                }
-                Err(e) => tracing::warn!("herald/api-tokens decode failed: {e}"),
-            },
-            Err(e) => tracing::warn!("herald/api-tokens not in Keep: {e}"),
+            Err(e) => tracing::warn!("herald/password not in Keep: {e}"),
         }
         match client.get("herald/webhook-secret", None).await {
             Ok(result) => match decode_keep(&result.value) {

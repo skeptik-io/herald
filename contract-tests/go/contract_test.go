@@ -111,7 +111,6 @@ func getBool(m map[string]interface{}, key string) bool {
 
 type runner struct {
 	client *herald.HeraldAdmin
-	admin  *herald.HeraldAdmin
 	saved  map[string]interface{}
 	passed int
 	failed int
@@ -548,7 +547,6 @@ func TestContract(t *testing.T) {
 
 	url := os.Getenv("HERALD_URL")
 	apiToken := os.Getenv("HERALD_API_TOKEN")
-	adminToken := os.Getenv("HERALD_ADMIN_TOKEN")
 
 	if url == "" || apiToken == "" {
 		t.Skip("HERALD_URL and HERALD_API_TOKEN required")
@@ -556,11 +554,8 @@ func TestContract(t *testing.T) {
 
 	r := &runner{
 		client: herald.New(herald.Options{URL: url, Token: apiToken, TenantID: "default"}),
-		admin:  herald.New(herald.Options{URL: url, Token: adminToken, TenantID: "default"}),
 		saved:  make(map[string]interface{}),
 	}
-
-	_ = r.admin // for future admin-scoped tests
 
 	ctx := context.Background()
 

@@ -15,15 +15,13 @@ import { HeraldClient } from '@skeptik-io/herald-sdk';
 
 const client = new HeraldClient({
   url: 'wss://herald.example.com/ws',
-  token: jwt, // must include tenant claim
-  onTokenExpiring: async () => {
-    const resp = await fetch('/api/refresh-token');
-    return resp.text();
-  },
+  key: 'your-tenant-key',
+  token: hmacToken, // HMAC-SHA256 signed token using tenant secret
+  userId: 'alice',
+  streams: ['general', 'notifications'],
 });
 
 await client.connect();
-await client.subscribe(['general', 'notifications']);
 
 client.on('event', (evt) => {
   console.log(`${evt.sender}: ${evt.body}`);
@@ -51,7 +49,10 @@ import { HeraldClient, initE2EE, generateKeyPair, deriveSharedSecret, createSess
 
 const client = new HeraldClient({
   url: 'wss://herald.example.com/ws',
-  token: jwt,
+  key: 'your-tenant-key',
+  token: hmacToken,
+  userId: 'alice',
+  streams: ['private-stream'],
   e2ee: true, // enables WASM crypto module
 });
 
@@ -115,20 +116,19 @@ client.setE2EESession('private-stream', restored);
 - **Key derivation**: x25519 key exchange, then HKDF-SHA256 with separate domain separators for cipher (`herald-cipher-v1`) and search (`herald-veil-v1`) keys.
 - **Zero overhead**: WASM module is only loaded when `e2ee: true` is set. Non-E2EE usage has no additional dependencies.
 
-## JWT Format
+## Auth
 
-Your backend mints JWTs with:
+Herald uses HMAC-SHA256 signed tokens (key+secret model). Your backend generates tokens using the tenant secret:
 
-```json
-{
-  "sub": "user_id",
-  "tenant": "your-tenant-id",
-  "streams": ["general", "notifications"],
-  "exp": 1712003600,
-  "iat": 1712000000,
-  "iss": "your-app"
-}
+```typescript
+// Server-side token generation
+import { createHmac } from 'crypto';
+
+const payload = `${userId}:${streams.join(',')}:${timestamp}`;
+const token = createHmac('sha256', tenantSecret).update(payload).digest('hex');
 ```
+
+The client passes `key`, `token`, `userId`, and `streams` when constructing `HeraldClient`. Auth happens on WebSocket upgrade via query params.
 
 ## Events
 

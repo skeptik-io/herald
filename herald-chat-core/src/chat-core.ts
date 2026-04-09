@@ -175,12 +175,15 @@ export class ChatCore {
 
   async listen(streamId: string): Promise<void> {
     this.listenOnly.add(streamId);
-    await this.client.subscribe([streamId]);
+    const [payload] = await this.client.subscribe([streamId]);
+    // Initialize cursors so unread counts work for listen-only streams
+    this.cursors.initStream(streamId, payload.cursor, payload.latest_seq);
   }
 
   unlisten(streamId: string): void {
     this.listenOnly.delete(streamId);
     this.lastEphemeral.delete(streamId);
+    this.cursors.clear(streamId);
     this.client.unsubscribe([streamId]);
   }
 
@@ -354,12 +357,12 @@ export class ChatCore {
     const listen = this.listenOnly.has(event.stream);
     this.runMiddleware({ type: "event", data: event }, () => {
       this.notifier.notify(`event:${event.stream}`);
+      // Bump latestSeq for both full-state and listen-only (unread counts)
+      this.cursors.bumpLatestSeq(event.stream, event.seq);
       if (listen) return;
 
       const inserted = this.messages.appendEvent(event);
       if (!inserted) return;
-
-      this.cursors.bumpLatestSeq(event.stream, event.seq);
 
       const scroll = this.scrollStates.get(event.stream);
       if (scroll) {

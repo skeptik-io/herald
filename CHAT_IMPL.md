@@ -57,9 +57,11 @@ interface ChatCoreOptions {
 
 | Method | What it does |
 |---|---|
-| `attach()` | Registers 11 event handlers on HeraldClient. Starts typing expiry interval (2s). Attaches liveness controller. Idempotent. |
-| `detach()` | Deregisters all handlers. Stops typing expiry. Detaches liveness. Idempotent. |
-| `destroy()` | Calls detach(), then clears all stores and notifier listeners. |
+| `attach()` | Registers 12 event handlers on HeraldClient. Starts typing expiry interval (1s). Attaches liveness controller. Idempotent. |
+| `detach()` | Deregisters all handlers. Stops typing expiry. Detaches liveness. Idempotent. Does **not** clear stores — state persists for re-attach. |
+| `destroy()` | Calls detach(), then clears all stores and notifier listeners. **One-way** — instance cannot be reused after destroy. |
+
+**Session lifecycle:** The React Provider calls `attach()` on mount and `detach()` on unmount. It does **not** call `destroy()`, so stores persist across React re-renders and StrictMode double-mounts. For session changes (logout → login with different user), the app must call `destroy()` and create a new ChatCore instance. The Provider does not handle this automatically — the app should unmount the Provider, discard the client/chat objects, and remount with new credentials.
 
 `attach()` registers handlers for: `event`, `event.edited`, `event.deleted`, `reaction.changed`, `presence`, `cursor`, `typing`, `member.joined`, `member.left`, `event.received`, `connected`, `disconnected`.
 
@@ -78,12 +80,14 @@ Unsubscribes and clears all state for the stream (messages, cursors, members, ty
 ```typescript
 listen(streamId): Promise<void>
 ```
-Lightweight subscription — subscribes via transport, events flow through middleware and Notifier slices, but no stores are initialized (no MessageStore, CursorStore, ScrollState overhead). Useful for inbox/notification rooms.
+Lightweight subscription — subscribes via transport, initializes cursor tracking (for unread counts), but skips MessageStore, MemberStore, TypingStore, and ScrollState. Events flow through middleware and Notifier slices. Useful for inbox/notification rooms where you need unread badges and event notifications without full chat state.
 
 ```typescript
 unlisten(streamId): void
 ```
-Unsubscribes a lightweight stream. Clears ephemeral state.
+Unsubscribes a lightweight stream. Clears cursor and ephemeral state.
+
+**What `listen()` provides:** Unread counts via `getUnreadCount(streamId)` and `getTotalUnreadCount()`. Raw event notifications via `event:{streamId}` and `ephemeral:{streamId}` slices. Middleware interception. **What it does not provide:** Message history, member lists, typing indicators, scroll state. For those, use `joinStream()`.
 
 ### Actions
 
@@ -173,6 +177,10 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 - `connected`/`disconnected` are internal lifecycle events — not routed through middleware
 - After-store reactions that don't need to intercept events use the existing `subscribe()` pattern
 
+**Middleware is synchronous by design.** `next()` applies the store mutation synchronously, and React's `useSyncExternalStore` requires that store updates are synchronous within a single microtask. Async middleware (fetch display names, decrypt, call external services) would break the contract: the store update would be deferred, causing tearing between subscribe and getSnapshot. For async enrichment, do the async work outside the middleware chain (e.g. in a `subscribe()` callback that updates a separate store) or pre-process data before it enters ChatCore.
+
+**`event:{streamId}` slice:** Fires on every event-type handler (`event`, `event.edited`, `event.deleted`, `reaction.changed`) for both full-state and listen-only streams. Not consumed by any built-in hook. Intended for consumers that need a raw "something happened on this stream" signal — e.g. updating a sidebar preview, triggering a notification toast, or driving middleware after-effects via the Notifier rather than inside the middleware chain itself.
+
 **Listen-only streams:** For streams opened via `listen(streamId)`, all handlers skip store mutations but still run middleware and emit Notifier slices (`event:{streamId}`, `typing:{streamId}`, `members:{streamId}`, `ephemeral:{streamId}`). Consumer subscribes to slices directly for routing.
 
 ---
@@ -210,7 +218,11 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 
 **Unread calculation:** `max(0, latestSeq - myCursor)`.
 
-**Remote cursors:** Tracks other users' cursor positions per stream. When a remote cursor advances past a self-sent message's seq, that message's status flips to `read`. Consumers needing per-user granularity access `getRemoteCursors(streamId)` directly.
+**Remote cursors:** Tracks other users' cursor positions per stream. When a remote cursor advances past a self-sent message's seq, that message's status flips to `read`.
+
+**Read semantics:** `status = "read"` means "at least one remote user's cursor >= this message's seq" (WhatsApp-style). This is intentional — it answers "has anyone seen this?" which is the useful signal for both 1:1 and group conversations. The `Message.status` field is a convenience enum, not a per-user tracker. For per-user granularity (e.g. "read by 3 of 5 members" or a read-receipts UI showing who read what), consumers derive it from `getRemoteCursors(streamId)` at render time — no `readBy: Set<string>` on Message because the same information is already in the cursor map.
+
+**No `"delivered"` state.** Herald has no delivery receipt primitive — `"sent"` (server ack) is the strongest signal the transport provides. Adding `"delivered"` would require a new protocol frame ("client received event X"). Herald's ack mode (N-2) is for at-least-once delivery guarantees, not user-visible delivery receipts.
 
 ### MemberStore
 
@@ -218,13 +230,13 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 
 **Member:** `{userId, role, presence}`. Presence is `"online" | "away" | "dnd"`.
 
-`streamsForUser(userId)` returns all streams containing a user — used by presence handler to fan out presence changes across streams.
+`streamsForUser(userId)` returns all streams containing a user — used by presence handler to fan out presence changes across streams. O(streams × members) — fine for typical usage, would need an index if a user is in hundreds of streams.
 
 ### TypingStore
 
 **Key:** `Map<string, Map<string, number>>` — per-stream map of userId → timestamp.
 
-**TTL:** 12s client-side (slightly > server's 10s). Expiry check runs every 2s via `setInterval`.
+**TTL:** 8s client-side (expires before server's 10s to avoid stale indicators). Expiry check runs every 1s via `setInterval`.
 
 **Optimization:** Only notifies on actual list changes, not timestamp refreshes. Compares old vs new snapshot array before firing.
 
@@ -232,9 +244,11 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 
 Per-stream scroll coordination: `{atLiveEdge, pendingCount, isLoadingMore}`.
 
-- `pendingCount` increments when events arrive while scrolled up (not at live edge)
+- `pendingCount` increments when events arrive while scrolled up (not at live edge). This is a presentation convenience — the canonical message data lives in MessageStore, and `pendingCount` saves every consumer from independently tracking "how many arrived since I scrolled away." UIs that want different behavior (auto-scroll, batch notifications) can ignore it and derive from MessageStore directly.
 - `setAtLiveEdge(true)` resets pending count
 - `setLoadingMore` gates concurrent `loadMore()` calls
+
+**`loadMore` dual signals:** `loadMore()` returns `boolean` (has_more) as an imperative result and also sets `isLoadingMore` on ScrollState reactively. Use the return value for awaiting in imperative code; use the reactive state for rendering loading indicators via `useSyncExternalStore`.
 
 ---
 
@@ -258,6 +272,36 @@ active ←─(idle timeout)──► idle
 **Output:** Calls `syncPresence(state)` on transition. Maps: active → `online`, idle/hidden → `away`. Sends `presence.set` frame.
 
 **Abstraction:** `LivenessEnvironment` interface wraps DOM APIs — fully testable without a browser.
+
+---
+
+## Reconnection and Gap-Fill
+
+Herald SDK handles reconnection at the transport layer. On disconnect, the SDK reconnects automatically and re-subscribes to all streams. The server replays events missed during the gap using cursor-based catchup (implemented in M-1): the client sends its last known seq per stream, and the server delivers all events since that point with pagination.
+
+ChatCore's role during reconnection:
+- `handleDisconnected()` clears typing indicators (ephemeral state is stale after disconnect)
+- `handleConnected()` is a no-op — the SDK handles re-subscription and catchup
+- `MessageStore.appendEvent()` deduplicates via `byId` (event ID), so replayed events that already exist are safely ignored
+- `CursorStore` uses MAX semantics, so replayed cursor positions cannot regress
+
+**Ordering:** Events may arrive out of order during catchup replay. `appendEvent` uses binary search insertion by seq, so messages are always stored in correct order regardless of arrival order. The `byId` dedup guard prevents double-insertion.
+
+**Idempotency:** All event handlers are idempotent. `appendEvent` returns false for duplicates. `applyEdit`, `applyDelete`, `applyReaction` operate on existing messages by ID — applying the same edit twice is harmless. Cursor MAX semantics prevent regression.
+
+---
+
+## Cross-Stream Ordering
+
+Sequence numbers (`seq`) are per-stream — there is no global ordering across streams. Consumers that need a unified view (e.g. "latest message across all my rooms, sorted by time") must use `sentAt` timestamps. During optimistic sends, `sentAt` is client-estimated (`Date.now()`); after reconciliation, it carries the server-assigned timestamp.
+
+The `listen()` feature provides per-stream unread counts but no cross-stream ordering primitive. A unified inbox with time-sorted previews is an app-level concern — derive it from `getMessages(streamId)` across streams, sorting by `sentAt`.
+
+---
+
+## Tombstones
+
+`applyDelete` keeps deleted messages as tombstones (`deleted: true`, `body: ""`). This allows the UI to render "this message was deleted" placeholders. Tombstones are not pruned by ChatCore — they are bounded by the server's event TTL (per-tenant retention, default 7 days). When a client fetches history via `loadMore()`, expired events are already pruned server-side, so tombstones naturally age out of the client's view.
 
 ---
 
@@ -377,6 +421,8 @@ interface PendingMessage {
 }
 ```
 Wrapper around `retrySend()`/`cancelSend()`.
+
+**Reactive vs. imperative:** Most UIs observe message status reactively via `useMessages()` — the optimistic message appears in the list with `status: "sending"` and updates to `"sent"` or `"failed"` automatically via Notifier. `PendingMessage` is for imperative flows: fire-and-forget sends where the caller needs `retry()` or `cancel()` handles without searching the message list. The `status` getter reads current state lazily from MessageStore — it is not a snapshot, so it reflects the latest status at read time.
 
 ---
 

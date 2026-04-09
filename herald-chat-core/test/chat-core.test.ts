@@ -1321,7 +1321,7 @@ await test("remote cursor MAX semantics — does not go backward", async () => {
 
 // ── Lightweight subscriptions (N-5) ───────────────────────────────
 
-await test("listen subscribes but does not create stores", async () => {
+await test("listen subscribes but does not create message stores", async () => {
   const { client, core } = makeCore();
   core.attach();
   await core.listen("inbox");
@@ -1331,6 +1331,34 @@ await test("listen subscribes but does not create stores", async () => {
   // Emit an event — should not create message in store
   client.emit("event", { stream: "inbox", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
   assert(core.getMessages("inbox").length === 0, "no messages in listen-only store");
+  core.destroy();
+});
+
+await test("listen-only stream tracks unread counts", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  assert(core.getUnreadCount("inbox") === 0, "initially 0 unread");
+
+  client.emit("event", { stream: "inbox", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
+  client.emit("event", { stream: "inbox", id: "e2", seq: 2, sender: "a", body: "yo", sent_at: 2 });
+
+  assert(core.getUnreadCount("inbox") === 2, `expected 2 unread, got ${core.getUnreadCount("inbox")}`);
+  assert(core.getTotalUnreadCount() === 2, "total unread includes listen-only");
+  core.destroy();
+});
+
+await test("unlisten clears cursor state", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  client.emit("event", { stream: "inbox", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
+  assert(core.getUnreadCount("inbox") === 1, "1 unread before unlisten");
+
+  core.unlisten("inbox");
+  assert(core.getUnreadCount("inbox") === 0, "unread cleared after unlisten");
   core.destroy();
 });
 

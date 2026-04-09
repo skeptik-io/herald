@@ -1,7 +1,7 @@
 import { Notifier } from "../notifier.js";
 
-const CLIENT_TYPING_TTL_MS = 12_000; // slightly > server's 10s
-const EXPIRY_CHECK_INTERVAL_MS = 2_000;
+const CLIENT_TYPING_TTL_MS = 8_000; // expire slightly before server's 10s to avoid stale indicators
+const EXPIRY_CHECK_INTERVAL_MS = 1_000;
 
 export class TypingStore {
   private streams = new Map<string, Map<string, number>>(); // streamId → (userId → timestamp)

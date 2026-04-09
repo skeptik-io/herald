@@ -213,6 +213,8 @@ Ephemeral events do not trigger webhooks and do not affect event history or sequ
 | `GET /admin/tenants/:id/tokens` | List API tokens | |
 | `DELETE /admin/tenants/:id/tokens/:token` | Delete API token | Verifies token belongs to tenant |
 | `GET /admin/tenants/:id/streams` | List tenant streams | Admin view of streams for a tenant |
+| `GET /admin/tenants/:id/audit` | Query audit log | `?operation=&resource_type=&resource_id=&actor=&result=&since=&until=&limit=` |
+| `GET /admin/tenants/:id/audit/count` | Count audit entries | Same filters as query (excluding `limit`) |
 | `GET /admin/connections` | List active connections | Active WebSocket connections |
 | `GET /admin/events` | List admin events | Recent admin events |
 | `GET /admin/events/stream` | SSE admin event stream | Server-Sent Events stream |

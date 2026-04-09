@@ -12,4 +12,6 @@ export type {
   LivenessConfig,
   LivenessEnvironment,
   ChatCoreOptions,
+  ChatEvent,
+  Middleware,
 } from "./types.js";

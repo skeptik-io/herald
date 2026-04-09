@@ -3,6 +3,7 @@ import { Notifier } from "../notifier.js";
 export class CursorStore {
   private myCursor = new Map<string, number>();
   private latestSeq = new Map<string, number>();
+  private remoteCursors = new Map<string, Map<string, number>>();
   private versions = new Map<string, number>();
 
   constructor(private notifier: Notifier) {}
@@ -47,6 +48,22 @@ export class CursorStore {
     return total;
   }
 
+  updateRemoteCursor(streamId: string, userId: string, seq: number): boolean {
+    let userMap = this.remoteCursors.get(streamId);
+    if (!userMap) {
+      userMap = new Map();
+      this.remoteCursors.set(streamId, userMap);
+    }
+    const current = userMap.get(userId) ?? 0;
+    if (seq <= current) return false; // MAX semantics
+    userMap.set(userId, seq);
+    return true;
+  }
+
+  getRemoteCursors(streamId: string): Map<string, number> {
+    return this.remoteCursors.get(streamId) ?? EMPTY_CURSORS;
+  }
+
   getVersion(streamId: string): number {
     return this.versions.get(streamId) ?? 0;
   }
@@ -54,12 +71,14 @@ export class CursorStore {
   clear(streamId: string): void {
     this.myCursor.delete(streamId);
     this.latestSeq.delete(streamId);
+    this.remoteCursors.delete(streamId);
     this.versions.delete(streamId);
   }
 
   clearAll(): void {
     this.myCursor.clear();
     this.latestSeq.clear();
+    this.remoteCursors.clear();
     this.versions.clear();
   }
 
@@ -68,3 +87,5 @@ export class CursorStore {
     this.notifier.notifyMany([`unread:${streamId}`, "unread:total"]);
   }
 }
+
+const EMPTY_CURSORS: Map<string, number> = new Map();

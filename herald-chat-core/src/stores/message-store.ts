@@ -210,6 +210,22 @@ export class MessageStore {
     this.bumpVersion(reaction.stream);
   }
 
+  markRead(streamId: string, upToSeq: number, sender: string): boolean {
+    const list = this.streams.get(streamId);
+    if (!list) return false;
+    let changed = false;
+    for (const msg of list) {
+      if (msg.seq === 0) continue; // optimistic
+      if (msg.seq > upToSeq) break; // sorted ascending, no need to continue
+      if (msg.sender === sender && msg.status === "sent") {
+        msg.status = "read";
+        changed = true;
+      }
+    }
+    if (changed) this.bumpVersion(streamId);
+    return changed;
+  }
+
   // ── Reads ──────────────────────────────────────────────────────────
 
   getMessages(streamId: string): Message[] {

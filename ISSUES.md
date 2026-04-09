@@ -113,7 +113,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`at-least-once`~~ | ~~N-2~~ | ~~Opt-in ack mode for at-least-once delivery~~ | **done** |
 | ~~`contract-tests`~~ | ~~N-3~~ | ~~Define spec + wire all 4 existing SDKs~~ | **done** |
 | ~~`sdk-hardening`~~ | ~~N-4~~ | ~~Error handling, incomplete features, missing tests across TS chat/admin packages~~ | **done** |
-| `chat-extensions` | N-5 | Ephemeral events, per-message delivery status, event middleware | |
+| ~~`chat-extensions`~~ | ~~N-5~~ | ~~Ephemeral events, per-message delivery status, event middleware~~ | **done** |
 | `sdk-packaging` | N-6 | READMEs for chat SDKs, publish chat packages in release pipeline | |
 | `openapi` | S-1 | `utoipa` annotations → `openapi.yaml` from Rust handlers | |
 | `admin-codegen` | S-2 | Replace hand-rolled admin SDKs with generated + add PHP, C# | |
@@ -257,34 +257,34 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Existing integration tests pass
   - [x] All existing contract tests pass
 
-- [ ] **N-5: ChatCore completeness** `session:chat-extensions`
+- [x] **N-5: ChatCore completeness** `session:chat-extensions`
   ChatCore handles the chat-generic transport/state layer but has gaps in features that any chat SDK is expected to provide. Specifically: ephemeral events are silently dropped, there's no per-message delivery status, and the event processing pipeline is closed (no middleware for consumers to layer domain logic on top). These are chat primitives, not application-specific features.
 
   **Ephemeral event support**
-  - [ ] Register `event.received` handler — currently the only SDK event type ChatCore ignores
-  - [ ] Forward through middleware chain, then emit on `ephemeral:{streamId}` Notifier slice
+  - [x] Register `event.received` handler — currently the only SDK event type ChatCore ignores
+  - [x] Forward through middleware chain, then emit on `ephemeral:{streamId}` Notifier slice
 
   **Lightweight stream subscriptions**
-  - [ ] Add `listen(streamId)` — subscribes to stream via the same transport, events flow through middleware and Notifier, but no stores initialized (no MessageStore, CursorStore, ScrollState overhead)
-  - [ ] Covers inbox/notification rooms (e.g. `user:{userId}`) without forcing consumers onto a separate raw HeraldClient. Same middleware chain, same Notifier slices
-  - [ ] `unlisten(streamId)` to unsubscribe. `leaveStream` remains for full-state streams
+  - [x] Add `listen(streamId)` — subscribes to stream via the same transport, events flow through middleware and Notifier, but no stores initialized (no MessageStore, CursorStore, ScrollState overhead)
+  - [x] Covers inbox/notification rooms (e.g. `user:{userId}`) without forcing consumers onto a separate raw HeraldClient. Same middleware chain, same Notifier slices
+  - [x] `unlisten(streamId)` to unsubscribe. `leaveStream` remains for full-state streams
 
   **Per-message read status**
-  - [ ] Extend `Message.status`: add `read` → `sending | sent | failed | read`
-  - [ ] Track remote cursors in CursorStore (`remoteCursors: Map<streamId, Map<userId, seq>>`). Wire `handleCursor` (currently a no-op) to update remote cursor positions
-  - [ ] When a remote cursor advances past a self-sent message's seq, flip that message's status to `read`. Reactive via Notifier
-  - [ ] Group chat semantics: `status = "read"` means "at least one remote user's cursor >= this seq." Consumers needing per-user granularity derive it from the remote cursor data in CursorStore directly
-  - [ ] No `delivered` state — Herald has no delivery receipt primitive (would require a new protocol frame). `sent` (server ack) is the strongest signal the transport provides
+  - [x] Extend `Message.status`: add `read` → `sending | sent | failed | read`
+  - [x] Track remote cursors in CursorStore (`remoteCursors: Map<streamId, Map<userId, seq>>`). Wire `handleCursor` (currently a no-op) to update remote cursor positions
+  - [x] When a remote cursor advances past a self-sent message's seq, flip that message's status to `read`. Reactive via Notifier
+  - [x] Group chat semantics: `status = "read"` means "at least one remote user's cursor >= this seq." Consumers needing per-user granularity derive it from the remote cursor data in CursorStore directly
+  - [x] No `delivered` state — Herald has no delivery receipt primitive (would require a new protocol frame). `sent` (server ack) is the strongest signal the transport provides
 
   **Event middleware**
-  - [ ] Define `ChatEvent` discriminated union over all 10 event types (event, edited, deleted, reaction, presence, cursor, typing, member.joined, member.left, ephemeral)
-  - [ ] Add `middleware?: Array<(event: ChatEvent, next: () => void) => void>` to `ChatCoreOptions`
-  - [ ] `next()` applies the store mutation synchronously. Enrichment before `next()`, side-effects after. Skipping `next()` drops the event
-  - [ ] Middleware sees raw events, not computed effects. Cursor → read-status flips happen inside the store update. Consumers reacting to computed state changes (e.g. "message marked read") use Notifier `subscribe()`, not middleware
+  - [x] Define `ChatEvent` discriminated union over all 10 event types (event, edited, deleted, reaction, presence, cursor, typing, member.joined, member.left, ephemeral)
+  - [x] Add `middleware?: Array<(event: ChatEvent, next: () => void) => void>` to `ChatCoreOptions`
+  - [x] `next()` applies the store mutation synchronously. Enrichment before `next()`, side-effects after. Skipping `next()` drops the event
+  - [x] Middleware sees raw events, not computed effects. Cursor → read-status flips happen inside the store update. Consumers reacting to computed state changes (e.g. "message marked read") use Notifier `subscribe()`, not middleware
 
   **Validation**
-  - [ ] Unit tests: ephemeral events forwarded, per-message status transitions (sent → read on remote cursor), middleware chain (enrich, skip, passthrough, ordering)
-  - [ ] Existing chat-core unit tests still pass (all additions are opt-in)
+  - [x] Unit tests: ephemeral events forwarded, per-message status transitions (sent → read on remote cursor), middleware chain (enrich, skip, passthrough, ordering)
+  - [x] Existing chat-core unit tests still pass (all additions are opt-in)
 
 - [ ] **N-6: SDK packaging and documentation** `session:sdk-packaging`
   Chat packages are not published in the release pipeline. No READMEs in any chat SDK directory. Blocks external consumption.

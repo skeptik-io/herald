@@ -1,8 +1,8 @@
 import type { HeraldClient, EventNew, EventEdited, EventDeleted, EventAck, EventsBatch,
   ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
-  SubscribedPayload } from "herald-sdk";
+  EventReceived, SubscribedPayload } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
-import type { ChatCoreOptions, Message, PendingMessage, Member, ScrollStateSnapshot, LivenessState } from "./types.js";
+import type { ChatCoreOptions, Message, PendingMessage, Member, ScrollStateSnapshot, LivenessState, ChatEvent, Middleware } from "./types.js";
 import { Notifier } from "./notifier.js";
 import { MessageStore } from "./stores/message-store.js";
 import { CursorStore } from "./stores/cursor-store.js";
@@ -27,8 +27,11 @@ export class ChatCore {
   private livenessState: LivenessState = "active";
   private scrollIdleMs: number;
   private loadMoreLimit: number;
+  private middleware: Middleware[];
   private readTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private attached = false;
+  private listenOnly = new Set<string>();
+  private lastEphemeral = new Map<string, EventReceived>();
 
   // Track pending optimistic sends for retry/cancel
   private pendingSends = new Map<string, { streamId: string; body: string; meta?: unknown; parentId?: string }>();
@@ -43,6 +46,7 @@ export class ChatCore {
   private _onTyping: Handler<TypingEvent>;
   private _onMemberJoined: Handler<MemberEvent>;
   private _onMemberLeft: Handler<MemberEvent>;
+  private _onEphemeral: Handler<EventReceived>;
   private _onConnected: Handler<void>;
   private _onDisconnected: Handler<void>;
 
@@ -52,6 +56,7 @@ export class ChatCore {
     this.userId = options.userId;
     this.scrollIdleMs = options.scrollIdleMs ?? 1000;
     this.loadMoreLimit = options.loadMoreLimit ?? 50;
+    this.middleware = options.middleware ?? [];
 
     this.notifier = new Notifier();
     this.messages = new MessageStore(this.notifier);
@@ -82,6 +87,7 @@ export class ChatCore {
     this._onTyping = (e) => this.handleTyping(e);
     this._onMemberJoined = (e) => this.handleMemberJoined(e);
     this._onMemberLeft = (e) => this.handleMemberLeft(e);
+    this._onEphemeral = (e) => this.handleEphemeral(e);
     this._onConnected = () => this.handleConnected();
     this._onDisconnected = () => this.handleDisconnected();
   }
@@ -101,6 +107,7 @@ export class ChatCore {
     this.client.on("typing", this._onTyping);
     this.client.on("member.joined", this._onMemberJoined);
     this.client.on("member.left", this._onMemberLeft);
+    this.client.on("event.received", this._onEphemeral);
     this.client.on("connected", this._onConnected);
     this.client.on("disconnected", this._onDisconnected);
 
@@ -121,6 +128,7 @@ export class ChatCore {
     this.client.off("typing", this._onTyping);
     this.client.off("member.joined", this._onMemberJoined);
     this.client.off("member.left", this._onMemberLeft);
+    this.client.off("event.received", this._onEphemeral);
     this.client.off("connected", this._onConnected);
     this.client.off("disconnected", this._onDisconnected);
 
@@ -137,6 +145,8 @@ export class ChatCore {
     this.members.clearAll();
     this.typing.clearAll();
     this.scrollStates.clear();
+    this.listenOnly.clear();
+    this.lastEphemeral.clear();
     this.notifier.clear();
   }
 
@@ -160,6 +170,18 @@ export class ChatCore {
     this.members.clear(streamId);
     this.typing.clear(streamId);
     this.scrollStates.delete(streamId);
+    this.lastEphemeral.delete(streamId);
+  }
+
+  async listen(streamId: string): Promise<void> {
+    this.listenOnly.add(streamId);
+    await this.client.subscribe([streamId]);
+  }
+
+  unlisten(streamId: string): void {
+    this.listenOnly.delete(streamId);
+    this.lastEphemeral.delete(streamId);
+    this.client.unsubscribe([streamId]);
   }
 
   // ── Actions ──────────────────────────────────────────────────────
@@ -273,6 +295,14 @@ export class ChatCore {
     return this.livenessState;
   }
 
+  getLastEphemeral(streamId: string): EventReceived | undefined {
+    return this.lastEphemeral.get(streamId);
+  }
+
+  getRemoteCursors(streamId: string): Map<string, number> {
+    return this.cursors.getRemoteCursors(streamId);
+  }
+
   // ── Scroll coordination ──────────────────────────────────────────
 
   setAtLiveEdge(streamId: string, atEdge: boolean): void {
@@ -315,55 +345,108 @@ export class ChatCore {
   // ── Internal event handlers ──────────────────────────────────────
 
   private handleEvent(event: EventNew): void {
-    const inserted = this.messages.appendEvent(event);
-    if (!inserted) return;
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "event", data: event }, () => {
+      this.notifier.notify(`event:${event.stream}`);
+      if (listen) return;
 
-    this.cursors.bumpLatestSeq(event.stream, event.seq);
+      const inserted = this.messages.appendEvent(event);
+      if (!inserted) return;
 
-    const scroll = this.scrollStates.get(event.stream);
-    if (scroll) {
-      if (scroll.atLiveEdge && this.livenessState !== "hidden") {
-        this.scheduleAutoMarkRead(event.stream);
-      } else {
-        scroll.incrementPending();
+      this.cursors.bumpLatestSeq(event.stream, event.seq);
+
+      const scroll = this.scrollStates.get(event.stream);
+      if (scroll) {
+        if (scroll.atLiveEdge && this.livenessState !== "hidden") {
+          this.scheduleAutoMarkRead(event.stream);
+        } else {
+          scroll.incrementPending();
+        }
       }
-    }
+    });
   }
 
   private handleEdited(edit: EventEdited): void {
-    this.messages.applyEdit(edit);
+    const listen = this.listenOnly.has(edit.stream);
+    this.runMiddleware({ type: "event.edited", data: edit }, () => {
+      this.notifier.notify(`event:${edit.stream}`);
+      if (!listen) this.messages.applyEdit(edit);
+    });
   }
 
   private handleDeleted(del: EventDeleted): void {
-    this.messages.applyDelete(del);
+    const listen = this.listenOnly.has(del.stream);
+    this.runMiddleware({ type: "event.deleted", data: del }, () => {
+      this.notifier.notify(`event:${del.stream}`);
+      if (!listen) this.messages.applyDelete(del);
+    });
   }
 
   private handleReaction(reaction: ReactionChanged): void {
-    this.messages.applyReaction(reaction);
+    const listen = this.listenOnly.has(reaction.stream);
+    this.runMiddleware({ type: "reaction.changed", data: reaction }, () => {
+      this.notifier.notify(`event:${reaction.stream}`);
+      if (!listen) this.messages.applyReaction(reaction);
+    });
   }
 
   private handlePresence(event: PresenceChanged): void {
-    for (const streamId of this.members.streamsForUser(event.user_id)) {
-      this.members.updatePresence(streamId, event.user_id, event.presence);
-    }
+    this.runMiddleware({ type: "presence", data: event }, () => {
+      for (const streamId of this.members.streamsForUser(event.user_id)) {
+        this.members.updatePresence(streamId, event.user_id, event.presence);
+      }
+    });
   }
 
-  private handleCursor(_event: CursorMoved): void {
-    // Other users' cursor movements — currently a no-op in chat-core.
-    // Could be used to show "last read" indicators in the future.
+  private handleCursor(event: CursorMoved): void {
+    this.runMiddleware({ type: "cursor", data: event }, () => {
+      if (event.user_id === this.userId) return;
+      if (this.listenOnly.has(event.stream)) return;
+      const advanced = this.cursors.updateRemoteCursor(event.stream, event.user_id, event.seq);
+      if (!advanced) return;
+      this.messages.markRead(event.stream, event.seq, this.userId);
+    });
   }
 
   private handleTyping(event: TypingEvent): void {
-    if (event.user_id === this.userId) return; // don't show own typing
-    this.typing.setTyping(event.stream, event.user_id, event.active);
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "typing", data: event }, () => {
+      if (listen) {
+        this.notifier.notify(`typing:${event.stream}`);
+        return;
+      }
+      if (event.user_id === this.userId) return; // don't show own typing
+      this.typing.setTyping(event.stream, event.user_id, event.active);
+    });
   }
 
   private handleMemberJoined(event: MemberEvent): void {
-    this.members.addMember(event.stream, event.user_id, event.role);
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "member.joined", data: event }, () => {
+      if (listen) {
+        this.notifier.notify(`members:${event.stream}`);
+        return;
+      }
+      this.members.addMember(event.stream, event.user_id, event.role);
+    });
   }
 
   private handleMemberLeft(event: MemberEvent): void {
-    this.members.removeMember(event.stream, event.user_id);
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "member.left", data: event }, () => {
+      if (listen) {
+        this.notifier.notify(`members:${event.stream}`);
+        return;
+      }
+      this.members.removeMember(event.stream, event.user_id);
+    });
+  }
+
+  private handleEphemeral(event: EventReceived): void {
+    this.runMiddleware({ type: "ephemeral", data: event }, () => {
+      this.lastEphemeral.set(event.stream, event);
+      this.notifier.notify(`ephemeral:${event.stream}`);
+    });
   }
 
   private handleConnected(): void {
@@ -435,6 +518,23 @@ export class ChatCore {
         this.chat.updateCursor(streamId, latestSeq);
       }
     }
+  }
+
+  private runMiddleware(event: ChatEvent, apply: () => void): void {
+    if (this.middleware.length === 0) {
+      apply();
+      return;
+    }
+    let idx = 0;
+    const next = (): void => {
+      if (idx < this.middleware.length) {
+        const mw = this.middleware[idx++];
+        mw(event, next);
+      } else {
+        apply();
+      }
+    };
+    next();
   }
 
   private syncPresence(state: LivenessState): void {

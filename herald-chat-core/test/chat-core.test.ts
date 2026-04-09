@@ -999,6 +999,407 @@ await test("PendingMessage: retry re-sends failed message", async () => {
   core.destroy();
 });
 
+// ── Ephemeral events (N-5) ─────────────────────────────────────────
+
+await test("ephemeral event fires notifier and is accessible via getLastEphemeral", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  let notified = 0;
+  core.subscribe("ephemeral:s1", () => { notified++; });
+
+  client.emit("event.received", { stream: "s1", event: "custom.ping", sender: "alice", data: { ts: 123 } });
+
+  assert(notified === 1, "notifier fired");
+  const last = core.getLastEphemeral("s1");
+  assert(last !== undefined, "lastEphemeral set");
+  assert(last!.event === "custom.ping", "correct event type");
+  assert(last!.sender === "alice", "correct sender");
+  assert((last!.data as { ts: number }).ts === 123, "correct data");
+  core.destroy();
+});
+
+await test("ephemeral events do not persist in message store", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event.received", { stream: "s1", event: "custom.ping", sender: "alice" });
+
+  assert(core.getMessages("s1").length === 0, "no messages from ephemeral");
+  core.destroy();
+});
+
+await test("leaveStream clears lastEphemeral", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event.received", { stream: "s1", event: "custom.ping", sender: "alice" });
+  assert(core.getLastEphemeral("s1") !== undefined, "set before leave");
+
+  core.leaveStream("s1");
+  assert(core.getLastEphemeral("s1") === undefined, "cleared after leave");
+  core.destroy();
+});
+
+// ── Middleware (N-5) ──────────────────────────────────────────────
+
+await test("middleware: passthrough (calling next) preserves normal behavior", async () => {
+  const log: string[] = [];
+  const { client, core } = makeCore(undefined, {
+    middleware: [
+      (_event, next) => { log.push("before"); next(); log.push("after"); },
+    ],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
+
+  assert(core.getMessages("s1").length === 1, "message stored");
+  assert(log[0] === "before", "ran before next");
+  assert(log[1] === "after", "ran after next");
+  core.destroy();
+});
+
+await test("middleware: skip (not calling next) drops event", async () => {
+  const { client, core } = makeCore(undefined, {
+    middleware: [
+      (_event, _next) => { /* intentionally skip next() */ },
+    ],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
+
+  assert(core.getMessages("s1").length === 0, "event dropped by middleware");
+  core.destroy();
+});
+
+await test("middleware: enrich (modify event data before next)", async () => {
+  const { client, core } = makeCore(undefined, {
+    middleware: [
+      (event, next) => {
+        if (event.type === "event") {
+          (event.data as { body: string }).body = "enriched";
+        }
+        next();
+      },
+    ],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "original", sent_at: 1 });
+
+  assert(core.getMessages("s1")[0].body === "enriched", "body was enriched");
+  core.destroy();
+});
+
+await test("middleware: ordering — multiple middleware run in order", async () => {
+  const order: number[] = [];
+  const { client, core } = makeCore(undefined, {
+    middleware: [
+      (_event, next) => { order.push(1); next(); },
+      (_event, next) => { order.push(2); next(); },
+      (_event, next) => { order.push(3); next(); },
+    ],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "x", sent_at: 1 });
+
+  assert(order.length === 3, "all 3 ran");
+  assert(order[0] === 1 && order[1] === 2 && order[2] === 3, "correct order");
+  core.destroy();
+});
+
+await test("middleware: early middleware can prevent later ones from running", async () => {
+  const ran: number[] = [];
+  const { client, core } = makeCore(undefined, {
+    middleware: [
+      (_event, _next) => { ran.push(1); /* skip next */ },
+      (_event, next) => { ran.push(2); next(); },
+    ],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "x", sent_at: 1 });
+
+  assert(ran.length === 1, "only first ran");
+  assert(ran[0] === 1, "first middleware");
+  assert(core.getMessages("s1").length === 0, "event dropped");
+  core.destroy();
+});
+
+await test("middleware: receives correct ChatEvent type for each handler", async () => {
+  const types: string[] = [];
+  const { client, core } = makeCore(undefined, {
+    middleware: [
+      (event, next) => { types.push(event.type); next(); },
+    ],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "x", sent_at: 1 });
+  client.emit("event.edited", { stream: "s1", id: "e1", seq: 1, body: "edited", edited_at: 2 });
+  client.emit("event.deleted", { stream: "s1", id: "e1", seq: 1 });
+  client.emit("reaction.changed", { stream: "s1", event_id: "e1", emoji: "🔥", user_id: "a", action: "add" });
+  client.emit("typing", { stream: "s1", user_id: "alice", active: true });
+  client.emit("member.joined", { stream: "s1", user_id: "bob", role: "member" });
+  client.emit("member.left", { stream: "s1", user_id: "bob", role: "member" });
+  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 1 });
+  client.emit("presence", { user_id: "alice", presence: "away" });
+  client.emit("event.received", { stream: "s1", event: "custom", sender: "alice" });
+
+  const expected = [
+    "event", "event.edited", "event.deleted", "reaction.changed",
+    "typing", "member.joined", "member.left", "cursor", "presence", "ephemeral",
+  ];
+  assert(types.length === expected.length, `got ${types.length} events, expected ${expected.length}`);
+  for (let i = 0; i < expected.length; i++) {
+    assert(types[i] === expected[i], `type[${i}] expected ${expected[i]}, got ${types[i]}`);
+  }
+  core.destroy();
+});
+
+await test("middleware: can intercept ephemeral events", async () => {
+  let intercepted = false;
+  const { client, core } = makeCore(undefined, {
+    middleware: [
+      (event, next) => {
+        if (event.type === "ephemeral") {
+          intercepted = true;
+        }
+        next();
+      },
+    ],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event.received", { stream: "s1", event: "custom", sender: "alice" });
+  assert(intercepted, "ephemeral intercepted by middleware");
+  assert(core.getLastEphemeral("s1") !== undefined, "still stored after passthrough");
+  core.destroy();
+});
+
+// ── Per-message read status (N-5) ─────────────────────────────────
+
+await test("remote cursor flips self-sent message to read", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  // Send a message (auto-reconciles with mock)
+  await core.send("s1", "hello");
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "1 message");
+  assert(msgs[0].status === "sent", "initially sent");
+
+  // Remote user advances cursor past our message's seq
+  client.emit("cursor", { stream: "s1", user_id: "bob", seq: msgs[0].seq });
+
+  const after = core.getMessages("s1");
+  assert(after[0].status === "read", `expected read, got ${after[0].status}`);
+  core.destroy();
+});
+
+await test("own cursor does not trigger read status change", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  // Own cursor — should not flip to read
+  client.emit("cursor", { stream: "s1", user_id: "me", seq });
+
+  assert(core.getMessages("s1")[0].status === "sent", "still sent — own cursor ignored");
+  core.destroy();
+});
+
+await test("cursor behind message seq does not trigger read", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  // Remote cursor at seq - 1 — should not flip
+  client.emit("cursor", { stream: "s1", user_id: "bob", seq: seq - 1 });
+
+  assert(core.getMessages("s1")[0].status === "sent", "still sent — cursor behind");
+  core.destroy();
+});
+
+await test("remote cursor does not flip other users' messages to read", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  // Another user's message
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "from alice", sent_at: 1 });
+
+  // Remote cursor past it
+  client.emit("cursor", { stream: "s1", user_id: "bob", seq: 5 });
+
+  assert(core.getMessages("s1")[0].status === "sent", "other user's message stays sent");
+  core.destroy();
+});
+
+await test("getRemoteCursors returns remote cursor positions", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 5 });
+  client.emit("cursor", { stream: "s1", user_id: "bob", seq: 10 });
+
+  const cursors = core.getRemoteCursors("s1");
+  assert(cursors.get("alice") === 5, "alice at 5");
+  assert(cursors.get("bob") === 10, "bob at 10");
+  core.destroy();
+});
+
+await test("remote cursor MAX semantics — does not go backward", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 10 });
+  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 5 });
+
+  assert(core.getRemoteCursors("s1").get("alice") === 10, "stays at 10");
+  core.destroy();
+});
+
+// ── Lightweight subscriptions (N-5) ───────────────────────────────
+
+await test("listen subscribes but does not create stores", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  assert(client.subscribeCalls.length === 1, "subscribe called");
+
+  // Emit an event — should not create message in store
+  client.emit("event", { stream: "inbox", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
+  assert(core.getMessages("inbox").length === 0, "no messages in listen-only store");
+  core.destroy();
+});
+
+await test("listen-only stream fires event: notifier slice", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  let eventCount = 0;
+  core.subscribe("event:inbox", () => { eventCount++; });
+
+  client.emit("event", { stream: "inbox", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
+  assert(eventCount === 1, "event: slice notified");
+  core.destroy();
+});
+
+await test("listen-only stream does not update typing store", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  client.emit("typing", { stream: "inbox", user_id: "alice", active: true });
+  assert(core.getTypingUsers("inbox").length === 0, "typing not stored");
+  core.destroy();
+});
+
+await test("listen-only stream fires typing: notifier slice", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  let typingCount = 0;
+  core.subscribe("typing:inbox", () => { typingCount++; });
+
+  client.emit("typing", { stream: "inbox", user_id: "alice", active: true });
+  assert(typingCount === 1, "typing: slice notified");
+  core.destroy();
+});
+
+await test("listen-only stream receives ephemeral events", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  let ephCount = 0;
+  core.subscribe("ephemeral:inbox", () => { ephCount++; });
+
+  client.emit("event.received", { stream: "inbox", event: "custom", sender: "a" });
+  assert(ephCount === 1, "ephemeral notified on listen-only");
+  assert(core.getLastEphemeral("inbox") !== undefined, "ephemeral stored");
+  core.destroy();
+});
+
+await test("unlisten unsubscribes and cleans up", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  client.emit("event.received", { stream: "inbox", event: "custom", sender: "a" });
+  assert(core.getLastEphemeral("inbox") !== undefined, "ephemeral before unlisten");
+
+  core.unlisten("inbox");
+
+  assert(client.unsubscribeCalls.length === 1, "unsubscribe called");
+  assert(core.getLastEphemeral("inbox") === undefined, "ephemeral cleared");
+  core.destroy();
+});
+
+await test("full-state stream also fires event: notifier slice", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  let eventCount = 0;
+  core.subscribe("event:s1", () => { eventCount++; });
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "hi", sent_at: 1 });
+  assert(eventCount === 1, "event: slice fires for full-state streams too");
+  assert(core.getMessages("s1").length === 1, "messages still stored");
+  core.destroy();
+});
+
+await test("listen-only member events fire notifier but don't update store", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  let memberCount = 0;
+  core.subscribe("members:inbox", () => { memberCount++; });
+
+  client.emit("member.joined", { stream: "inbox", user_id: "alice", role: "member" });
+  assert(memberCount === 1, "members: slice notified");
+  assert(core.getMembers("inbox").length === 0, "no members in listen-only store");
+  core.destroy();
+});
+
+await test("listen-only cursor events are skipped", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  client.emit("cursor", { stream: "inbox", user_id: "alice", seq: 5 });
+  assert(core.getRemoteCursors("inbox").size === 0, "no remote cursors for listen-only");
+  core.destroy();
+});
+
 // ── Summary ────────────────────────────────────────────────────────
 console.log(`\nchat-core: ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

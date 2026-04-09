@@ -1,11 +1,13 @@
-import type { HeraldClient } from "herald-sdk";
+import type { HeraldClient, EventNew, EventEdited, EventDeleted,
+  ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
+  EventReceived } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
 
 // ---------------------------------------------------------------------------
 // Message
 // ---------------------------------------------------------------------------
 
-export type MessageStatus = "sending" | "sent" | "failed";
+export type MessageStatus = "sending" | "sent" | "failed" | "read";
 
 export interface Message {
   id: string;
@@ -75,6 +77,24 @@ export interface LivenessEnvironment {
 }
 
 // ---------------------------------------------------------------------------
+// Event middleware
+// ---------------------------------------------------------------------------
+
+export type ChatEvent =
+  | { type: "event"; data: EventNew }
+  | { type: "event.edited"; data: EventEdited }
+  | { type: "event.deleted"; data: EventDeleted }
+  | { type: "reaction.changed"; data: ReactionChanged }
+  | { type: "presence"; data: PresenceChanged }
+  | { type: "cursor"; data: CursorMoved }
+  | { type: "typing"; data: TypingEvent }
+  | { type: "member.joined"; data: MemberEvent }
+  | { type: "member.left"; data: MemberEvent }
+  | { type: "ephemeral"; data: EventReceived };
+
+export type Middleware = (event: ChatEvent, next: () => void) => void;
+
+// ---------------------------------------------------------------------------
 // ChatCore options
 // ---------------------------------------------------------------------------
 
@@ -89,4 +109,6 @@ export interface ChatCoreOptions {
   scrollIdleMs?: number;
   /** Number of events to fetch per loadMore() call. Default 50. */
   loadMoreLimit?: number;
+  /** Optional middleware chain for intercepting events before store mutations. */
+  middleware?: Middleware[];
 }

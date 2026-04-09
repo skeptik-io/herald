@@ -61,9 +61,7 @@ interface ChatCoreOptions {
 | `detach()` | Deregisters all handlers. Stops typing expiry. Detaches liveness. Idempotent. |
 | `destroy()` | Calls detach(), then clears all stores and notifier listeners. |
 
-`attach()` registers handlers for: `event`, `event.edited`, `event.deleted`, `reaction.changed`, `presence`, `cursor`, `typing`, `member.joined`, `member.left`, `connected`, `disconnected`.
-
-**Gap (N-5):** `event.received` (ephemeral events) is not registered — silently dropped.
+`attach()` registers handlers for: `event`, `event.edited`, `event.deleted`, `reaction.changed`, `presence`, `cursor`, `typing`, `member.joined`, `member.left`, `event.received`, `connected`, `disconnected`.
 
 ### Stream Management
 
@@ -76,6 +74,16 @@ Subscribes via `client.subscribe([streamId])`. Initializes cursor state (my curs
 leaveStream(streamId): void
 ```
 Unsubscribes and clears all state for the stream (messages, cursors, members, typing, scroll).
+
+```typescript
+listen(streamId): Promise<void>
+```
+Lightweight subscription — subscribes via transport, events flow through middleware and Notifier slices, but no stores are initialized (no MessageStore, CursorStore, ScrollState overhead). Useful for inbox/notification rooms.
+
+```typescript
+unlisten(streamId): void
+```
+Unsubscribes a lightweight stream. Clears ephemeral state.
 
 ### Actions
 
@@ -90,7 +98,7 @@ Unsubscribes and clears all state for the stream (messages, cursors, members, ty
 | `removeReaction(streamId, eventId, emoji)` | Fire-and-forget via `chat.removeReaction()`. |
 | `startTyping(streamId)` / `stopTyping(streamId)` | Send typing frames. |
 
-**Return type change (N-4):** `send()` will return `Promise<PendingMessage>` instead of `Promise<string>`. PendingMessage exposes `localId`, `status`, `retry()`, `cancel()` — wrapping the internal machinery that already exists.
+**Return type:** `send()` returns `Promise<PendingMessage>`. PendingMessage exposes `localId`, `status`, `retry()`, `cancel()` — wrapping the internal machinery.
 
 ### Reads
 
@@ -103,6 +111,8 @@ Unsubscribes and clears all state for the stream (messages, cursors, members, ty
 | `getTotalUnreadCount()` | `number` — sum across all streams |
 | `getScrollState(streamId)` | `ScrollStateSnapshot` — `{atLiveEdge, pendingCount, isLoadingMore}` |
 | `getLivenessState()` | `"active" \| "idle" \| "hidden"` |
+| `getLastEphemeral(streamId)` | `EventReceived \| undefined` — last ephemeral event on this stream |
+| `getRemoteCursors(streamId)` | `Map<string, number>` — remote user cursor positions (userId → seq) |
 
 All array-returning methods produce new references on mutation (required for `useSyncExternalStore`).
 
@@ -127,38 +137,32 @@ subscribe(slice: string, listener: () => void): () => void
 ```
 Delegates to Notifier. Returns unsubscribe function.
 
-**Slice naming:** `messages:{streamId}`, `typing:{streamId}`, `members:{streamId}`, `unread:{streamId}`, `unread:total`, `scroll:{streamId}`, `liveness`.
+**Slice naming:** `messages:{streamId}`, `typing:{streamId}`, `members:{streamId}`, `unread:{streamId}`, `unread:total`, `scroll:{streamId}`, `liveness`, `ephemeral:{streamId}`, `event:{streamId}`.
 
 ---
 
 ## Event Handlers
 
-### Current Pipeline
-
-```
-HeraldClient event → ChatCore handler → store mutation → Notifier.notify(slice)
-```
-
-| SDK Event | Handler | Store Effect |
-|---|---|---|
-| `event` | `handleEvent` | `messages.appendEvent()` (binary search insert), `cursors.bumpLatestSeq()`, auto-mark-read if at edge |
-| `event.edited` | `handleEdited` | `messages.applyEdit()` — updates body + editedAt |
-| `event.deleted` | `handleDeleted` | `messages.applyDelete()` — sets deleted=true, clears body |
-| `reaction.changed` | `handleReaction` | `messages.applyReaction()` — add/remove user from emoji set |
-| `presence` | `handlePresence` | `members.updatePresence()` across all streams containing user |
-| `cursor` | `handleCursor` | **No-op.** Comment: "could be used for last-read indicators" |
-| `typing` | `handleTyping` | `typing.setTyping()` — skips own events, TTL 12s |
-| `member.joined` | `handleMemberJoined` | `members.addMember()` — idempotent, presence=online |
-| `member.left` | `handleMemberLeft` | `members.removeMember()` |
-| `connected` | `handleConnected` | Documents that SDK re-subscribes automatically |
-| `disconnected` | `handleDisconnected` | `typing.clearAll()` + restart expiry timer |
-| `event.received` | **Not registered** | Silently dropped |
-
-### Planned Pipeline (N-5)
+### Pipeline
 
 ```
 HeraldClient event → middleware chain → next() → store mutation → Notifier.notify(slice)
 ```
+
+| SDK Event | Handler | Store Effect |
+|---|---|---|
+| `event` | `handleEvent` | `messages.appendEvent()` (binary search insert), `cursors.bumpLatestSeq()`, auto-mark-read if at edge. Emits `event:{streamId}` |
+| `event.edited` | `handleEdited` | `messages.applyEdit()` — updates body + editedAt. Emits `event:{streamId}` |
+| `event.deleted` | `handleDeleted` | `messages.applyDelete()` — sets deleted=true, clears body. Emits `event:{streamId}` |
+| `reaction.changed` | `handleReaction` | `messages.applyReaction()` — add/remove user from emoji set. Emits `event:{streamId}` |
+| `presence` | `handlePresence` | `members.updatePresence()` across all streams containing user |
+| `cursor` | `handleCursor` | `cursors.updateRemoteCursor()` — tracks remote cursor positions. Flips self-sent messages to `status: "read"` when remote cursor advances past their seq |
+| `typing` | `handleTyping` | `typing.setTyping()` — skips own events, TTL 12s |
+| `member.joined` | `handleMemberJoined` | `members.addMember()` — idempotent, presence=online |
+| `member.left` | `handleMemberLeft` | `members.removeMember()` |
+| `event.received` | `handleEphemeral` | Stores in `lastEphemeral` map, emits `ephemeral:{streamId}` |
+| `connected` | `handleConnected` | Documents that SDK re-subscribes automatically |
+| `disconnected` | `handleDisconnected` | `typing.clearAll()` + restart expiry timer |
 
 **Middleware signature:** `(event: ChatEvent, next: () => void) => void`
 
@@ -166,11 +170,10 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 - `next()` applies the store mutation synchronously
 - Code after `next()` runs after state is updated (side-effects)
 - Skipping `next()` drops the event entirely
+- `connected`/`disconnected` are internal lifecycle events — not routed through middleware
 - After-store reactions that don't need to intercept events use the existing `subscribe()` pattern
 
-**Ephemeral events:** `event.received` handler registered. Forwarded through middleware then emitted via Notifier on a new `ephemeral:{streamId}` slice. Consumer subscribes to receive custom signaling (pins, session lifecycle, etc).
-
-**Cursor handler wired:** `handleCursor` will track remote cursors in CursorStore and flip `Message.status` to `read` for self-sent messages with seq <= remote cursor.
+**Listen-only streams:** For streams opened via `listen(streamId)`, all handlers skip store mutations but still run middleware and emit Notifier slices (`event:{streamId}`, `typing:{streamId}`, `members:{streamId}`, `ephemeral:{streamId}`). Consumer subscribes to slices directly for routing.
 
 ---
 
@@ -197,20 +200,17 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 | `applyEdit(edit)` | Updates body + editedAt on existing message. |
 | `applyDelete(del)` | Sets deleted=true, clears body. Message stays as tombstone. |
 | `applyReaction(reaction)` | Adds/removes userId from emoji Set on the message's reactions Map. |
-
-**Issue (N-4):** `applyEdit` has no guard against `deleted: true` — will update body on a deleted message.
-
-**Issue (N-4):** `prependBatch` uses `Array.sort` (O(n log n)) while `appendEvent` uses binary search insertion (O(log n)). Should use binary insertion for consistency.
+| `markRead(streamId, upToSeq, sender)` | Walks messages, flips self-sent (msg.sender === sender) messages with seq <= upToSeq from `sent` to `read`. |
 
 ### CursorStore
 
-**Key:** `myCursor: Map<string, number>`, `latestSeq: Map<string, number>`.
+**Key:** `myCursor: Map<string, number>`, `latestSeq: Map<string, number>`, `remoteCursors: Map<string, Map<string, number>>`.
 
-**Semantics:** MAX-only — cursors never go backward. `updateMyCursor(streamId, seq)` ignores if seq <= current.
+**Semantics:** MAX-only — cursors never go backward. `updateMyCursor(streamId, seq)` and `updateRemoteCursor(streamId, userId, seq)` ignore if seq <= current.
 
 **Unread calculation:** `max(0, latestSeq - myCursor)`.
 
-**Planned (N-5):** Add `remoteCursors: Map<string, Map<string, number>>` — tracks other users' cursor positions per stream. When a remote cursor advances past a self-sent message's seq, that message's status flips to `read`.
+**Remote cursors:** Tracks other users' cursor positions per stream. When a remote cursor advances past a self-sent message's seq, that message's status flips to `read`. Consumers needing per-user granularity access `getRemoteCursors(streamId)` directly.
 
 ### MemberStore
 
@@ -311,6 +311,7 @@ All hooks use `useSyncExternalStore` subscribing to Notifier slices.
 | `useTotalUnreadCount()` | `unread:total` | `number` |
 | `useLiveness()` | `liveness` | `"active" \| "idle" \| "hidden"` |
 | `usePresence()` | `liveness` | `"online" \| "away"` (derived) |
+| `useEphemeral(streamId)` | `ephemeral:{streamId}` | `EventReceived \| undefined` |
 
 ### Components (Headless, Render-Prop)
 
@@ -366,7 +367,7 @@ cancelSend(localId)
 
 **Race condition:** If `event` (from server broadcast) arrives before the publish ack, `appendEvent` inserts the server event. When `reconcile` runs, it finds the event ID already in `byId` and simply removes the optimistic duplicate.
 
-**Planned (N-4):** `send()` returns `PendingMessage` instead of `string`:
+`send()` returns `PendingMessage`:
 ```typescript
 interface PendingMessage {
   localId: string;
@@ -375,7 +376,7 @@ interface PendingMessage {
   cancel(): void;
 }
 ```
-Wrapper around existing `retrySend()`/`cancelSend()` — the internal machinery is already tested.
+Wrapper around `retrySend()`/`cancelSend()`.
 
 ---
 
@@ -390,17 +391,14 @@ Wrapper around existing `retrySend()`/`cancelSend()` — the internal machinery 
 2. If latestSeq > myCursor: update cursor locally + send `cursor.update` frame
 3. CursorStore uses MAX semantics — cursor never goes backward
 
-**Current behavior:** Fires immediately on trigger.
-
-**Planned (N-4):** Debounce by `scrollIdleMs` (default 1000ms). Prevents marking as read during fast scrolling. Timer cleared when user scrolls away from edge.
+**Debounce:** Fires after `scrollIdleMs` (default 1000ms) of idle time at the live edge. Prevents marking as read during fast scrolling. Timer cleared when user scrolls away from edge.
 
 ---
 
 ## Types
 
 ```typescript
-type MessageStatus = "sending" | "sent" | "failed";
-// Planned (N-5): add "read"
+type MessageStatus = "sending" | "sent" | "failed" | "read";
 
 interface Message {
   id: string;
@@ -418,7 +416,7 @@ interface Message {
   reactions: Map<string, Set<string>>;   // emoji → set of userIds
 }
 
-interface PendingMessage {          // (N-4) Returned by send()
+interface PendingMessage {          // Returned by send()
   localId: string;
   readonly status: MessageStatus;
   retry(): Promise<void>;
@@ -444,7 +442,7 @@ interface LivenessConfig {
   throttleMs?: number;              // default 5000
 }
 
-// (N-5) Discriminated union for middleware
+// Discriminated union for middleware
 type ChatEvent =
   | { type: "event"; data: EventNew }
   | { type: "event.edited"; data: EventEdited }
@@ -459,103 +457,6 @@ type ChatEvent =
 
 type Middleware = (event: ChatEvent, next: () => void) => void;
 ```
-
----
-
-## Planned: N-4 (SDK Hardening)
-
-Changes that fix incomplete features and bugs in the existing implementation.
-
-### herald-chat-core
-
-**Wire `scrollIdleMs` debounce.** Add a per-stream timer. `autoMarkRead()` calls in `setAtLiveEdge()` and `handleEvent()` schedule the cursor update after `scrollIdleMs` instead of firing immediately. Timer cleared when user scrolls away from edge. Prevents false "read" marks during fast scrolling.
-
-**Wire `PendingMessage`.** Implement wrapper class delegating to existing `retrySend()`/`cancelSend()`. Change `send()` return from `Promise<string>` to `Promise<PendingMessage>`. The internal machinery (pendingSends map, reconcile, fail, retry, cancel) is already implemented and tested — this wires it to the public interface that was designed for it.
-
-**Fix `prependBatch` insertion.** Replace `Array.sort` with binary insertion loop, consistent with `appendEvent`.
-
-**Guard edit-after-delete.** `applyEdit()` should no-op if `message.deleted === true`.
-
-**Resilient Notifier.** Wrap each listener call in try/catch so one throwing listener doesn't break the notification loop.
-
-**Configurable `loadMore` limit.** Read from `this.loadMoreLimit` (constructor option, default 50) instead of hardcoded.
-
-### herald-chat-react
-
-**Update `useMessages` hook.** `send()` return type changes from `string` to `PendingMessage`.
-
-**Error handling in hook actions.** `send()`, `edit()`, `deleteEvent()`, `loadMore()` must not produce unhandled rejections — catch and surface via return value or callback.
-
-**Input validation.** Undefined `streamId` or null `scrollRef` should throw or no-op cleanly.
-
-**Component tests.** HeraldChat scroll anchoring, MessageList, MessageInput, PresenceIndicator, TypingIndicator — currently untested.
-
-### herald-admin-typescript
-
-**Fix transport error handling.** Empty catch block masks JSON parse failures. Complete HTTP error code mapping (400, 403, 409, 429, 500, 503). Add timeout via AbortSignal.
-
-**Type `Promise<unknown>` methods.** `connections()`, `adminEvents()`, `errors()`, `stats()`.
-
-**Migrate deprecated `presence`/`blocks`.** Update test-integration to `chat.*`, then remove top-level properties.
-
----
-
-## Planned: N-5 (ChatCore Completeness)
-
-Features that any chat SDK is expected to provide but are currently missing.
-
-### Ephemeral Event Support
-
-Register handler for `event.received`. Forward through middleware, then emit on `ephemeral:{streamId}` Notifier slice. Any chat app needs custom signaling — typing-with-content, pin toggling, session lifecycle, custom indicators.
-
-Ephemeral events flow for all ChatCore-managed streams — both full-state (`joinStream`) and lightweight (`listen`).
-
-### Lightweight Stream Subscriptions
-
-```typescript
-listen(streamId): Promise<void>     // subscribe, events flow through middleware + Notifier, no stores
-unlisten(streamId): void            // unsubscribe lightweight stream
-```
-
-`joinStream` initializes full chat state (MessageStore, CursorStore, MemberStore, TypingStore, ScrollState). `listen` subscribes to the same transport but only routes events through middleware and Notifier slices — no store overhead. Covers inbox/notification rooms (e.g. `user:{userId}`) without forcing consumers onto a separate raw `HeraldClient`.
-
-Same client, same middleware chain, same Notifier. Consumer subscribes to `event:{streamId}` or `ephemeral:{streamId}` slices for routing. `leaveStream` remains for full-state streams, `unlisten` for lightweight ones.
-
-**Implementation:** ChatCore tracks listen-only stream IDs in a `Set<string>`. Every existing handler (`handleEvent`, `handleTyping`, `handleCursor`, etc.) checks this set before accessing stores. For listen-only streams: route through middleware, emit on Notifier slices, skip store mutations entirely. For full-state streams: current behavior unchanged.
-
-### Per-Message Read Status
-
-Extend `MessageStatus`: `"sending" | "sent" | "failed" | "read"`.
-
-Track remote cursors in CursorStore (`remoteCursors: Map<streamId, Map<userId, seq>>`). When `handleCursor` fires for a remote user and their seq advances past a self-sent message, flip that message's status to `"read"`.
-
-**Group chat semantics:** `status = "read"` means "at least one remote user's cursor >= this message's seq." This is the useful signal for both 1:1 and group conversations — "has anyone seen this?" Consumers that need per-user granularity (e.g. a read receipts UI showing exactly who read what) derive it from the remote cursor data in CursorStore directly, not from the status enum. No `readBy: Set<string>` on Message — the same information is already available from `remoteCursors.get(streamId)`.
-
-**No `"delivered"` state.** Herald has no delivery receipt primitive — `"sent"` (server ack) is the strongest delivery signal the transport provides. An explicit "client received event X" frame would be needed at the protocol level to support `delivered`. Herald's ack mode (N-2) is for at-least-once delivery guarantees, not for user-visible delivery receipts. Consumers with secondary persistence (DB write confirmation) handle that concept in their own layer via middleware.
-
-### Event Middleware
-
-```typescript
-type ChatEvent =
-  | { type: "event"; data: EventNew }
-  | { type: "event.edited"; data: EventEdited }
-  | { type: "event.deleted"; data: EventDeleted }
-  | { type: "reaction.changed"; data: ReactionChanged }
-  | { type: "presence"; data: PresenceChanged }
-  | { type: "cursor"; data: CursorMoved }
-  | { type: "typing"; data: TypingEvent }
-  | { type: "member.joined"; data: MemberEvent }
-  | { type: "member.left"; data: MemberEvent }
-  | { type: "ephemeral"; data: EventReceived };
-
-type Middleware = (event: ChatEvent, next: () => void) => void;
-```
-
-Optional middleware chain in constructor. `next()` applies the store mutation synchronously. Consumer does enrichment before `next()`, side-effects after `next()`. Skipping `next()` drops the event.
-
-Middleware sees the raw event, not computed effects. For example: when a cursor event triggers per-message read status flips, middleware sees the cursor event itself — not "message X was just marked read." Consumers that want to react to computed state changes (like a message's status changing to `read`) use a Notifier `subscribe()` on `messages:{streamId}` for that. Different tools: middleware intercepts the pipeline, subscriptions react to state.
-
-After-store reactions that don't need to intercept events use the existing `subscribe()` pattern — middleware is only for cases where the consumer must transform or gate events before they hit state.
 
 ---
 
@@ -566,18 +467,18 @@ After-store reactions that don't need to intercept events use the existing `subs
 | Area | File | Coverage |
 |---|---|---|
 | Notifier | `test/notifier.test.ts` | Comprehensive — subscribe, notify, isolation, edge cases |
-| MessageStore | `test/message-store.test.ts` | Comprehensive — ordering, dedup, optimistic, edit/delete/reactions, stress |
-| CursorStore | `test/cursor-store.test.ts` | Good — init, MAX semantics, unread calc, totals |
+| MessageStore | `test/message-store.test.ts` | Comprehensive — ordering, dedup, optimistic, edit/delete/reactions, markRead, stress |
+| CursorStore | `test/cursor-store.test.ts` | Good — init, MAX semantics, unread calc, remote cursors, totals |
 | LivenessController | `test/liveness.test.ts` | Comprehensive — state machine, throttle, visibility, re-attach |
-| ChatCore lifecycle | `test/chat-core.test.ts` | Partial — attach/detach/destroy, join/leave, event handling |
-| Hook contracts | `test/hooks.test.ts` | Partial — documents slice subscriptions, mock-based |
+| ChatCore lifecycle | `test/chat-core.test.ts` | Good — attach/detach/destroy, join/leave, all event handlers |
+| ChatCore middleware | `test/chat-core.test.ts` | Good — passthrough, skip, enrich, ordering, all event types |
+| ChatCore ephemeral | `test/chat-core.test.ts` | Good — forwarding, notifier, cleanup on leave/destroy |
+| ChatCore read status | `test/chat-core.test.ts` | Good — sent→read on remote cursor, own cursor ignored, other users' msgs unaffected |
+| ChatCore listen/unlisten | `test/chat-core.test.ts` | Good — no stores, notifier slices, cleanup |
+| Hook contracts | `test/hooks.test.ts` | Good — documents slice subscriptions, mock-based |
 
 ### What's Not Tested
 
-- **Send pipeline end-to-end** — reconcile, retry, cancel, fail paths through ChatCore (store-level tested, integration not)
-- **Race conditions** — event.new arriving before ack, concurrent sends, concurrent edits
 - **Scroll anchoring** — HeraldChat's useLayoutEffect delta calculation
 - **React components** — all five render-prop components have zero tests
 - **Provider lifecycle** — mount/unmount, missing context error
-- **Multi-stream** — presence fanout, total unread aggregation across streams
-- **Disconnect/reconnect** — typing clear, state recovery

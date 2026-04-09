@@ -126,9 +126,16 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          jq '.name = "@skeptik-io/herald-chat-sdk" | .version = env.VERSION | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp && mv package.tmp package.json
+          jq --arg v "$VERSION" '
+            .name = "@skeptik-io/herald-chat-sdk" |
+            .version = $v |
+            .publishConfig = {"registry": "https://npm.pkg.github.com"} |
+            .peerDependencies = {"@skeptik-io/herald-sdk": "^2.0.0"}
+          ' package.json > package.tmp && mv package.tmp package.json
           npm install
           npx tsc
+          # Rewrite unscoped imports to scoped names in compiled output
+          find dist -name '*.js' -o -name '*.d.ts' | xargs sed -i 's|"herald-sdk"|"@skeptik-io/herald-sdk"|g'
           npm publish
 
       - name: Publish herald-chat (ChatCore state machine)
@@ -136,9 +143,18 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          jq '.name = "@skeptik-io/herald-chat" | .version = env.VERSION | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp && mv package.tmp package.json
+          jq --arg v "$VERSION" '
+            .name = "@skeptik-io/herald-chat" |
+            .version = $v |
+            .publishConfig = {"registry": "https://npm.pkg.github.com"} |
+            .peerDependencies = {
+              "@skeptik-io/herald-sdk": "^2.0.0",
+              "@skeptik-io/herald-chat-sdk": "^0.1.0"
+            }
+          ' package.json > package.tmp && mv package.tmp package.json
           npm install
           npx tsc
+          find dist -name '*.js' -o -name '*.d.ts' | xargs sed -i 's|"herald-chat-sdk"|"@skeptik-io/herald-chat-sdk"|g; s|"herald-sdk"|"@skeptik-io/herald-sdk"|g'
           npm publish
 
       - name: Publish herald-chat-react (React hooks + components)
@@ -146,9 +162,19 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          jq '.name = "@skeptik-io/herald-chat-react" | .version = env.VERSION | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp && mv package.tmp package.json
+          jq --arg v "$VERSION" '
+            .name = "@skeptik-io/herald-chat-react" |
+            .version = $v |
+            .publishConfig = {"registry": "https://npm.pkg.github.com"} |
+            .peerDependencies = {
+              "@skeptik-io/herald-chat": "^0.1.0",
+              "@skeptik-io/herald-chat-sdk": "^0.1.0",
+              "react": "^18.0.0 || ^19.0.0"
+            }
+          ' package.json > package.tmp && mv package.tmp package.json
           npm install
           npx tsc
+          find dist -name '*.js' -o -name '*.d.ts' | xargs sed -i 's|"herald-chat-sdk"|"@skeptik-io/herald-chat-sdk"|g; s|"herald-chat"|"@skeptik-io/herald-chat"|g; s|"herald-sdk"|"@skeptik-io/herald-sdk"|g'
           npm publish
 
   publish-go:

@@ -91,7 +91,6 @@ impl TestServer {
             tls: None,
             tenant_limits: Default::default(),
             cors: None,
-            metering: None,
         };
 
         let state = AppState::build(AppStateBuilder {
@@ -100,8 +99,6 @@ impl TestServer {
             sentry: None,
             courier: None,
             chronicle: None,
-            metering: None,
-            sigil: None,
         });
 
         let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1998,7 +1995,6 @@ async fn test_http_api_rate_limiting() {
         tls: None,
         tenant_limits: Default::default(),
         cors: None,
-        metering: None,
     };
 
     let state = AppState::build(AppStateBuilder {
@@ -2007,8 +2003,6 @@ async fn test_http_api_rate_limiting() {
         sentry: None,
         courier: None,
         chronicle: None,
-        sigil: None,
-        metering: None,
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -2081,7 +2075,6 @@ async fn test_ws_sliding_window_rate_limit() {
         tls: None,
         tenant_limits: Default::default(),
         cors: None,
-        metering: None,
     };
 
     let state = AppState::build(AppStateBuilder {
@@ -2089,9 +2082,7 @@ async fn test_ws_sliding_window_rate_limit() {
         db,
         sentry: None,
         courier: None,
-        sigil: None,
         chronicle: None,
-        metering: None,
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -2348,17 +2339,14 @@ async fn test_presence_linger_reconnect_no_offline() {
         tls: None,
         tenant_limits: Default::default(),
         cors: None,
-        metering: None,
     };
 
     let state = AppState::build(AppStateBuilder {
         config,
         db,
         sentry: None,
-        sigil: None,
         courier: None,
         chronicle: None,
-        metering: None,
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -2590,7 +2578,6 @@ async fn test_config_validation_rejects_invalid() {
         tls: None,
         tenant_limits: TenantLimitsConfig::default(),
         cors: None,
-        metering: None,
     };
     assert!(
         config.validate(false).is_err(),
@@ -2613,7 +2600,6 @@ async fn test_config_validation_rejects_invalid() {
         tls: None,
         tenant_limits: TenantLimitsConfig::default(),
         cors: None,
-        metering: None,
     };
     assert!(
         config.validate(false).is_err(),
@@ -2636,7 +2622,6 @@ async fn test_config_validation_rejects_invalid() {
         tls: None,
         tenant_limits: TenantLimitsConfig::default(),
         cors: None,
-        metering: None,
     };
     assert!(
         config.validate(false).is_err(),
@@ -2664,7 +2649,6 @@ async fn test_config_validation_rejects_invalid() {
         tls: None,
         tenant_limits: TenantLimitsConfig::default(),
         cors: None,
-        metering: None,
     };
     assert!(
         config.validate(false).is_err(),
@@ -2690,7 +2674,6 @@ async fn test_config_validation_rejects_invalid() {
         }),
         tenant_limits: TenantLimitsConfig::default(),
         cors: None,
-        metering: None,
     };
     assert!(
         config.validate(false).is_err(),
@@ -2713,7 +2696,6 @@ async fn test_config_validation_rejects_invalid() {
         tls: None,
         tenant_limits: TenantLimitsConfig::default(),
         cors: None,
-        metering: None,
     };
     assert!(config.validate(false).is_ok(), "valid config should pass");
 
@@ -2733,7 +2715,6 @@ async fn test_config_validation_rejects_invalid() {
         tls: None,
         tenant_limits: TenantLimitsConfig::default(),
         cors: None,
-        metering: None,
     };
     assert!(
         config.validate(true).is_err(),
@@ -3415,17 +3396,14 @@ async fn test_webhook_event_filtering() {
         tls: None,
         tenant_limits: Default::default(),
         cors: None,
-        metering: None,
     };
 
     let state = AppState::build(AppStateBuilder {
         config,
         db,
-        sigil: None,
         sentry: None,
         courier: None,
         chronicle: None,
-        metering: None,
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -5189,17 +5167,14 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
             max_streams_per_tenant: 10000,
         },
         cors: None,
-        metering: None,
     };
 
     let state = AppState::build(AppStateBuilder {
         config,
-        sigil: None,
         db,
         sentry: None,
         courier: None,
         chronicle: None,
-        metering: None,
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -6207,17 +6182,14 @@ async fn test_remote_backend_boots_and_operates() {
         tls: None,
         tenant_limits: Default::default(),
         cors: None,
-        metering: None,
     };
 
     let state = AppState::build(AppStateBuilder {
-        sigil: None,
         config,
         db,
         sentry: None,
         courier: None,
         chronicle: None,
-        metering: None,
     });
 
     // Bootstrap single tenant

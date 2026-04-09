@@ -444,29 +444,6 @@ async fn handle_publish(
         return;
     }
 
-    // Meterd quota check (remote, with circuit breaker — fails open)
-    if let Some(ref metering) = state.metering {
-        let result = metering.check_quota("events_published", tid, 1).await;
-        if !result.allowed {
-            let _ = tx
-                .send(ServerMessage::error(
-                    ref_,
-                    ErrorCode::RateLimited,
-                    "event quota exceeded",
-                ))
-                .await;
-            return;
-        }
-        if result.soft_overage {
-            tracing::warn!(
-                tenant = tid,
-                usage = ?result.current_usage,
-                limit = ?result.limit,
-                "soft quota overage — event allowed but tenant is over limit"
-            );
-        }
-    }
-
     let total_start = std::time::Instant::now();
 
     // Sequence is allocated before storage. If the store write below fails,
@@ -512,10 +489,6 @@ async fn handle_publish(
         .events_published
         .fetch_add(1, Ordering::Relaxed);
     state.increment_tenant_events(tid);
-
-    if let Some(ref metering) = state.metering {
-        metering.track("events_published", tid, 1.0, None);
-    }
 
     state.event_bus.push_event(
         crate::admin_events::EventKind::Message,

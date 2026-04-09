@@ -48,11 +48,7 @@ pub async fn create_stream(
 
     let tid = &tenant.0;
 
-    // Enforce per-plan stream limit (Meterd-driven when metering enabled, global config otherwise)
-    let max_streams = state
-        .get_plan_limits_cached(tid)
-        .map(|pl| pl.max_streams)
-        .unwrap_or(state.config.tenant_limits.max_streams_per_tenant);
+    let max_streams = state.config.tenant_limits.max_streams_per_tenant;
     match store::streams::list_by_tenant(&*state.db, tid).await {
         Ok(existing) if existing.len() >= max_streams as usize => {
             return (

@@ -75,32 +75,6 @@ pub async fn inject_event(
             .into_response();
     }
 
-    // Meterd quota check (remote, with circuit breaker — fails open)
-    let mut quota_warning: Option<String> = None;
-    if let Some(ref metering) = state.metering {
-        let result = metering.check_quota("events_published", tid, 1).await;
-        if !result.allowed {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({"error": "event quota exceeded"})),
-            )
-                .into_response();
-        }
-        if result.soft_overage {
-            let msg = format!(
-                "usage {} of {} (soft cap)",
-                result.current_usage.unwrap_or(0),
-                result.limit.unwrap_or(0)
-            );
-            tracing::warn!(
-                tenant = tid,
-                warning = %msg,
-                "soft quota overage — event allowed but tenant is over limit"
-            );
-            quota_warning = Some(msg);
-        }
-    }
-
     // See ws/handler.rs handle_publish for why seq gaps on storage failure are accepted.
     let seq = state.streams.next_seq(tid, &stream_id);
     let now = now_millis();
@@ -129,10 +103,6 @@ pub async fn inject_event(
     }
 
     state.increment_tenant_events(tid);
-
-    if let Some(ref metering) = state.metering {
-        metering.track("events_published", tid, 1.0, None);
-    }
 
     let new_event = ServerMessage::EventNew {
         payload: EventNewPayload {
@@ -178,19 +148,11 @@ pub async fn inject_event(
         },
     );
 
-    let mut response = (
+    (
         StatusCode::CREATED,
         Json(serde_json::json!({"id": event_id, "seq": seq, "sent_at": now})),
     )
-        .into_response();
-
-    if let Some(warning) = quota_warning {
-        if let Ok(val) = warning.parse() {
-            response.headers_mut().insert("X-Herald-Quota-Warning", val);
-        }
-    }
-
-    response
+        .into_response()
 }
 
 pub async fn list_events(

@@ -49,6 +49,6 @@ Tests use `EphemeralKey` (random master key per test) and `tempfile` directories
 
 ## Ecosystem
 
-- **ShroudB Sigil** — tenant user auth (signup, login, JWT sessions)
 - **ShroudB Sentry** — ABAC authorization (embedded or remote)
-- **Meterd** (`/Users/nlucas/dev/skeptik/meterd/`) — MAU tracking, quota enforcement, Stripe billing
+- **ShroudB Sigil** — standalone tenant user auth service (signup, login, JWT sessions). Not embedded in Herald — runs separately.
+- **Meterd** (`/Users/nlucas/dev/skeptik/meterd/`) — MAU tracking, quota enforcement, Stripe billing. Runs at the proxy layer via Envoy ExtProc, not embedded in Herald.

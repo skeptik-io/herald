@@ -113,10 +113,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     // Enforce per-tenant connection limit
     let tenant_conns = state.connections.tenant_connection_count(&tenant_id);
-    let max_conns = state
-        .get_plan_limits_cached(&tenant_id)
-        .map(|pl| pl.max_connections as usize)
-        .unwrap_or(state.config.tenant_limits.max_connections_per_tenant as usize);
+    let max_conns = state.config.tenant_limits.max_connections_per_tenant as usize;
     if tenant_conns >= max_conns {
         let _ = msg_tx
             .send(ServerMessage::error(

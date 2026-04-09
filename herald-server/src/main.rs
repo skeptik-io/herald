@@ -206,41 +206,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize Meterd metering client if enabled.
-    let metering: Option<Arc<herald_server::metering::MeteringClient>> =
-        config.metering.as_ref().map(|mc| {
-            info!(
-                base_url = %mc.base_url,
-                flush_interval = mc.flush_interval_secs,
-                "Meterd metering enabled"
-            );
-            Arc::new(herald_server::metering::MeteringClient::new(mc.clone()))
-        });
-
-    let metering_flush_interval = config
-        .metering
-        .as_ref()
-        .map(|mc| mc.flush_interval_secs)
-        .unwrap_or(10);
-
-    // Initialize Sigil client for self-serve signup (via Moat HTTP API).
-    let sigil: Option<Arc<herald_server::signup::SigilHttpClient>> =
-        config.shroudb.as_ref().and_then(|shroudb| {
-            let moat_url = shroudb.moat_addr.as_ref()?;
-            let client =
-                herald_server::signup::SigilHttpClient::new(moat_url, shroudb.auth_token.clone());
-            info!(moat_url = %moat_url, "Sigil client initialized (Moat HTTP)");
-            Some(Arc::new(client))
-        });
-
     let state = AppState::build(AppStateBuilder {
         config,
         db,
         sentry,
         courier,
         chronicle,
-        metering: metering.clone(),
-        sigil,
     });
 
     // Always hydrate all tenants from Store
@@ -320,13 +291,6 @@ async fn main() -> anyhow::Result<()> {
                     t_webhooks,
                     t_streams,
                 );
-
-                // Report peak concurrent connections to Meterd
-                if t_connections > 0 {
-                    if let Some(ref metering) = stats_state.metering {
-                        metering.track("peak_connections", tid, t_connections as f64, None);
-                    }
-                }
             }
         }
     });
@@ -373,18 +337,6 @@ async fn main() -> anyhow::Result<()> {
                 _ => {}
             }
         }
-    });
-
-    // Metering flush task
-    let metering_handle = metering.map(|mc| {
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(metering_flush_interval)).await;
-                if let Err(e) = mc.flush().await {
-                    warn!("metering flush error: {e}");
-                }
-            }
-        })
     });
 
     // Shutdown signal
@@ -456,9 +408,6 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
-        if let Some(ref h) = metering_handle {
-            h.abort();
-        }
         #[cfg(feature = "chat")]
         typing_handle.abort();
 
@@ -508,9 +457,6 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
-        if let Some(ref h) = metering_handle {
-            h.abort();
-        }
         #[cfg(feature = "chat")]
         typing_handle.abort();
 

@@ -83,7 +83,6 @@ impl BenchServer {
             tls: None,
             tenant_limits: Default::default(),
             cors: None,
-            metering: None,
         };
 
         let state = AppState::build(AppStateBuilder {
@@ -92,8 +91,6 @@ impl BenchServer {
             sentry: None,
             courier: None,
             chronicle: None,
-            metering: None,
-            sigil: None,
         });
 
         state.bootstrap_single_tenant().await.unwrap();

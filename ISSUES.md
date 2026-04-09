@@ -76,29 +76,29 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Test: ephemeral event trigger (received but not persisted)
   - [x] CI wiring: tests run in CI pipeline
 
-- [ ] **H-7: Extract metering and signup from Herald** `session:next`
+- [x] **H-7: Extract metering and signup from Herald** `session:next`
   Herald is a transport server. Billing (Meterd), signup (Sigil), and plan enforcement are infrastructure/gateway concerns that were incorrectly embedded in the application. Meterd already has an Envoy ExtProc (`skeptik/meterd/envoy-extproc`) that handles quota checks and usage tracking at the proxy layer. Sigil is a standalone auth service that should remain standalone.
-  - [ ] Remove `metering.rs` — ~644 LOC (MeteringClient, quota checks, circuit breaker, flush loop)
-  - [ ] Remove `signup.rs` — ~515 LOC (SigilHttpClient, signup/login/refresh handlers)
-  - [ ] Remove from `state.rs`: `metering`, `sigil`, `signup_rate_limits`, `plan_limits_cache` fields; `get_plan_limits()`, `get_plan_limits_cached()`, `event_ttl_ms()` methods
-  - [ ] Remove from `AppStateBuilder`: `metering`, `sigil` fields
-  - [ ] Remove from `main.rs`: Meterd client init, Sigil client init, metering flush task, peak connection tracking to Meterd
-  - [ ] Remove from `ws/handler.rs`: `metering.check_quota()` and `metering.track()` calls in `handle_publish`
-  - [ ] Remove from `http/events.rs`: `metering.check_quota()` and `metering.track()` calls in `inject_event`
-  - [ ] Remove from `http/streams.rs`: `get_plan_limits_cached()` call in stream creation
-  - [ ] Remove from `http/mod.rs`: signup routes (`/signup`, `/login`, `/auth/refresh`), `signup_rate_limit_middleware`, plan-limit-based rate limiting in tenant middleware
-  - [ ] Remove from `http/admin.rs`: `plan_limits_cache.remove()` in tenant delete
-  - [ ] Remove from `webhook.rs`: `metering.track("webhooks_sent", ...)` call
-  - [ ] Remove from `ws/connection.rs`: `get_plan_limits_cached()` for connection limit check — revert to config-only `tenant_limits.max_connections_per_tenant`
-  - [ ] Remove `MeteringConfig` and `PlanLimits` from `config.rs`
-  - [ ] Remove `lib.rs` module declarations for `metering` and `signup`
-  - [ ] Add `per_tenant_event_ttl_days: Option<u32>` to tenant config (stored in DB, set via admin API) — replaces Meterd-sourced retention
-  - [ ] `event_ttl_ms()` reads from tenant config field, falls back to global `store.event_ttl_days`
-  - [ ] Connection limits and rate limits remain config-driven (transport self-defense)
-  - [ ] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
-  - [ ] `cargo build --no-default-features` clean
-  - [ ] Live integration tests pass (remove signup/metering test cases)
-  - [ ] Update ARCHITECTURE.md / DOCS.md: document that metering is handled at proxy layer (Envoy + Meterd ExtProc), signup is a separate service (Sigil)
+  - [x] Remove `metering.rs` — ~644 LOC (MeteringClient, quota checks, circuit breaker, flush loop)
+  - [x] Remove `signup.rs` — ~515 LOC (SigilHttpClient, signup/login/refresh handlers)
+  - [x] Remove from `state.rs`: `metering`, `sigil`, `signup_rate_limits`, `plan_limits_cache` fields; `get_plan_limits()`, `get_plan_limits_cached()`, `event_ttl_ms()` methods
+  - [x] Remove from `AppStateBuilder`: `metering`, `sigil` fields
+  - [x] Remove from `main.rs`: Meterd client init, Sigil client init, metering flush task, peak connection tracking to Meterd
+  - [x] Remove from `ws/handler.rs`: `metering.check_quota()` and `metering.track()` calls in `handle_publish`
+  - [x] Remove from `http/events.rs`: `metering.check_quota()` and `metering.track()` calls in `inject_event`
+  - [x] Remove from `http/streams.rs`: `get_plan_limits_cached()` call in stream creation
+  - [x] Remove from `http/mod.rs`: signup routes (`/signup`, `/login`, `/auth/refresh`), `signup_rate_limit_middleware`, plan-limit-based rate limiting in tenant middleware
+  - [x] Remove from `http/admin.rs`: `plan_limits_cache.remove()` in tenant delete
+  - [x] Remove from `webhook.rs`: `metering.track("webhooks_sent", ...)` call
+  - [x] Remove from `ws/connection.rs`: `get_plan_limits_cached()` for connection limit check — revert to config-only `tenant_limits.max_connections_per_tenant`
+  - [x] Remove `MeteringConfig` and `PlanLimits` from `config.rs`
+  - [x] Remove `lib.rs` module declarations for `metering` and `signup`
+  - [x] Add `per_tenant_event_ttl_days: Option<u32>` to tenant config (stored in DB, set via admin API) — replaces Meterd-sourced retention
+  - [x] `event_ttl_ms()` reads from tenant config field, falls back to global `store.event_ttl_days`
+  - [x] Connection limits and rate limits remain config-driven (transport self-defense)
+  - [x] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
+  - [x] `cargo build --no-default-features` clean
+  - [x] Live integration tests pass (remove signup/metering test cases)
+  - [x] Update ARCHITECTURE.md / DOCS.md: document that metering is handled at proxy layer (Envoy + Meterd ExtProc), signup is a separate service (Sigil)
 
 ---
 
@@ -106,7 +106,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 | Session | Items | Scope |
 |---------|-------|-------|
-| `extract-infra` | H-7 | Rip metering + signup out of Herald, revert to transport-only |
+| ~~`extract-infra`~~ | ~~H-7~~ | ~~Rip metering + signup out of Herald, revert to transport-only~~ **(done)** |
 | `e2ee-sdks` | M-3 | E2EE in Go, Python, Ruby + cross-SDK interop tests |
 | `moat-clients` | D-1 | shroudb crate updates for Moat prefix routing + integration tests |
 | `audit-log` | D-2 | Chronicle rip-out, skeptik-audit-log integration, new API endpoints, 4 admin SDKs |
@@ -149,7 +149,7 @@ Work items derived from market analysis and current codebase state. Each item mu
   TTL is global 7-day. Enable per-tenant configuration for tiered pricing.
   - [x] Event insert uses per-tenant TTL via `state.event_ttl_ms(tenant_id)`
   - [x] TTL cleanup job already respects per-event expiry timestamps
-  - [ ] Add `event_ttl_days` field to tenant record (stored in DB, set via admin API) — replaces Meterd-sourced retention after H-7
+  - [x] Add `event_ttl_days` field to tenant record (stored in DB, set via admin API) — replaces Meterd-sourced retention after H-7
   - [ ] Admin API: `PATCH /admin/tenants/{id}` accepts `event_ttl_days`
   - [ ] Integration test: tenant A (7d) events expire, tenant B (30d) events survive
   - [ ] Admin SDK support in all 4 SDKs

@@ -106,6 +106,7 @@ pub struct TenantConfig {
     pub jwt_secret: String,
     pub jwt_issuer: Option<String>,
     pub plan: String,
+    pub event_ttl_days: Option<u32>,
     pub cached_at: std::time::Instant,
 }
 
@@ -139,12 +140,6 @@ pub struct AppState {
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
-    pub metering: Option<Arc<crate::metering::MeteringClient>>,
-    pub sigil: Option<Arc<crate::signup::SigilHttpClient>>,
-    /// Per-IP rate limiter for public signup/login endpoints.
-    pub signup_rate_limits: DashMap<String, Arc<RateLimitEntry>>,
-    /// Cached plan limits per tenant (from Meterd or built-in defaults).
-    pub plan_limits_cache: DashMap<String, (crate::config::PlanLimits, std::time::Instant)>,
     pub metrics: Metrics,
     pub event_bus: Arc<EventBus>,
     webhook_config: Option<Arc<WebhookConfig>>,
@@ -157,8 +152,6 @@ pub struct AppStateBuilder {
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
-    pub metering: Option<Arc<crate::metering::MeteringClient>>,
-    pub sigil: Option<Arc<crate::signup::SigilHttpClient>>,
 }
 
 impl AppState {
@@ -186,10 +179,6 @@ impl AppState {
             sentry: b.sentry,
             courier: b.courier,
             chronicle: b.chronicle,
-            metering: b.metering,
-            sigil: b.sigil,
-            signup_rate_limits: DashMap::new(),
-            plan_limits_cache: DashMap::new(),
             metrics: Metrics::default(),
             event_bus: EventBus::new(),
             webhook_config,
@@ -208,6 +197,11 @@ impl AppState {
                     jwt_secret: t.jwt_secret,
                     jwt_issuer: t.jwt_issuer,
                     plan: t.plan,
+                    event_ttl_days: t
+                        .config
+                        .get("event_ttl_days")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
                     cached_at: std::time::Instant::now(),
                 },
             );
@@ -256,6 +250,7 @@ impl AppState {
                 jwt_secret,
                 jwt_issuer,
                 plan: "self-hosted".to_string(),
+                event_ttl_days: None,
                 cached_at: std::time::Instant::now(),
             },
         );
@@ -307,77 +302,14 @@ impl AppState {
         Ok((tenant_id.clone(), data.claims))
     }
 
-    /// Get plan limits for a tenant.
-    ///
-    /// Two modes:
-    /// - **Metering enabled**: Meterd is the sole authority. Checks local cache
-    ///   (5-min TTL), then fetches from Meterd. If Meterd is down (circuit open),
-    ///   returns last cached value. If no cached value exists, returns global config.
-    /// - **Metering disabled**: Global config limits apply uniformly to all tenants.
-    pub async fn get_plan_limits(&self, tenant_id: &str) -> Option<crate::config::PlanLimits> {
-        let metering = match self.metering {
-            Some(ref m) => m,
-            None => return None, // metering disabled — caller uses global config
-        };
-
-        const CACHE_TTL_SECS: u64 = 300;
-        // Short grace period to prevent stampede: when TTL expires, one thread
-        // extends the entry by 30s so others keep using the stale value.
-        const STAMPEDE_GRACE_SECS: u64 = 30;
-
-        // Check cache
-        if let Some(entry) = self.plan_limits_cache.get(tenant_id) {
-            let age = entry.1.elapsed().as_secs();
-            if age < CACHE_TTL_SECS {
-                return Some(entry.0.clone());
-            }
-            // TTL expired but within grace window — return stale value
-            // (another thread is likely already refreshing)
-            if age < CACHE_TTL_SECS + STAMPEDE_GRACE_SECS {
-                return Some(entry.0.clone());
-            }
-        }
-
-        // Extend the stale entry's timestamp to claim the refresh slot.
-        // Other threads hitting this cache entry in the next 30s will get
-        // the stale value instead of all racing to Meterd.
-        if let Some(mut entry) = self.plan_limits_cache.get_mut(tenant_id) {
-            entry.1 = std::time::Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS);
-        }
-
-        // Fetch from Meterd
-        if let Some(limits) = metering.fetch_plan_limits(tenant_id).await {
-            self.plan_limits_cache.insert(
-                tenant_id.to_string(),
-                (limits.clone(), std::time::Instant::now()),
-            );
-            return Some(limits);
-        }
-
-        // Meterd unreachable — return stale cache if available
-        self.plan_limits_cache
-            .get(tenant_id)
-            .map(|entry| entry.0.clone())
-    }
-
-    /// Synchronous plan limits lookup — cache-only, no Meterd call.
-    /// Used in hot paths (WS connection auth, rate limit middleware) where
-    /// we can't await. Returns `None` when metering is disabled or no
-    /// cached value exists yet (caller falls back to global config).
-    pub fn get_plan_limits_cached(&self, tenant_id: &str) -> Option<crate::config::PlanLimits> {
-        self.metering.as_ref()?;
-        self.plan_limits_cache
-            .get(tenant_id)
-            .map(|entry| entry.0.clone())
-    }
-
     /// Returns the event TTL in milliseconds for a tenant.
-    /// When metering is enabled, uses the cached plan limits from Meterd.
-    /// Otherwise, uses the global config `store.event_ttl_days`.
+    /// Uses per-tenant `event_ttl_days` from tenant config if set,
+    /// otherwise falls back to the global `store.event_ttl_days`.
     pub fn event_ttl_ms(&self, tenant_id: &str) -> i64 {
         let days = self
-            .get_plan_limits_cached(tenant_id)
-            .map(|pl| pl.retention_days)
+            .tenant_cache
+            .get(tenant_id)
+            .and_then(|tc| tc.event_ttl_days)
             .unwrap_or(self.config.store.event_ttl_days);
         days as i64 * 24 * 60 * 60 * 1000
     }
@@ -422,9 +354,6 @@ impl AppState {
             }
             self.event_bus.increment_webhooks();
             self.increment_tenant_webhooks(tenant_id);
-            if let Some(ref metering) = self.metering {
-                metering.track("webhooks_sent", tenant_id, 1.0, None);
-            }
             crate::webhook::deliver(
                 config.clone(),
                 self.webhook_client.clone(),

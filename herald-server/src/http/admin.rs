@@ -32,6 +32,7 @@ pub struct UpdateTenantRequest {
     pub name: Option<String>,
     pub plan: Option<String>,
     pub config: Option<serde_json::Value>,
+    pub event_ttl_days: Option<u32>,
 }
 
 pub async fn create_tenant(
@@ -81,6 +82,7 @@ pub async fn create_tenant(
             jwt_secret: tenant.jwt_secret.clone(),
             jwt_issuer: tenant.jwt_issuer.clone(),
             plan: tenant.plan.clone(),
+            event_ttl_days: None,
             cached_at: std::time::Instant::now(),
         },
     );
@@ -108,6 +110,7 @@ pub async fn get_tenant(
             "plan": t.plan,
             "jwt_issuer": t.jwt_issuer,
             "config": t.config,
+            "event_ttl_days": t.config.get("event_ttl_days").and_then(|v| v.as_u64()),
             "created_at": t.created_at,
         }))
         .into_response(),
@@ -165,12 +168,40 @@ pub async fn update_tenant(
     Path(id): Path<String>,
     Json(req): Json<UpdateTenantRequest>,
 ) -> impl IntoResponse {
+    // Merge event_ttl_days into config JSON if provided
+    let config = if let Some(ttl) = req.event_ttl_days {
+        let mut cfg = req.config.unwrap_or_else(|| {
+            // Start from existing config if no new config provided
+            state
+                .tenant_cache
+                .get(&id)
+                .map(|_| serde_json::json!({}))
+                .unwrap_or_else(|| serde_json::json!({}))
+        });
+        // Read existing config from DB to preserve other fields
+        if let Ok(Some(existing)) = store::tenants::get(&*state.db, &id).await {
+            if let serde_json::Value::Object(ref existing_map) = existing.config {
+                if let serde_json::Value::Object(ref mut new_map) = cfg {
+                    for (k, v) in existing_map {
+                        new_map.entry(k.clone()).or_insert(v.clone());
+                    }
+                }
+            }
+        }
+        if let serde_json::Value::Object(ref mut map) = cfg {
+            map.insert("event_ttl_days".to_string(), serde_json::json!(ttl));
+        }
+        Some(cfg)
+    } else {
+        req.config
+    };
+
     match store::tenants::update(
         &*state.db,
         &id,
         req.name.as_deref(),
         req.plan.as_deref(),
-        req.config.as_ref(),
+        config.as_ref(),
     )
     .await
     {
@@ -184,6 +215,11 @@ pub async fn update_tenant(
                         jwt_secret: t.jwt_secret,
                         jwt_issuer: t.jwt_issuer,
                         plan: t.plan,
+                        event_ttl_days: t
+                            .config
+                            .get("event_ttl_days")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32),
                         cached_at: std::time::Instant::now(),
                     },
                 );
@@ -490,7 +526,6 @@ pub async fn purge_tenant_data(
     // Remove from in-memory caches
     state.tenant_cache.remove(&id);
     state.tenant_metrics.remove(&id);
-    state.plan_limits_cache.remove(&id);
 
     match store::purge::purge_tenant(&*state.db, &id).await {
         Ok(deleted) => {

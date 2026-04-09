@@ -22,9 +22,6 @@ pub struct HeraldConfig {
     pub tenant_limits: TenantLimitsConfig,
     #[serde(default)]
     pub cors: Option<CorsConfig>,
-    /// Metering config is loaded from env vars, not from the TOML file.
-    #[serde(skip)]
-    pub metering: Option<crate::metering::MeteringConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,18 +46,6 @@ fn default_max_connections_per_tenant() -> u32 {
 }
 fn default_max_streams_per_tenant() -> u32 {
     10000
-}
-
-/// Per-tenant plan limits. When metering is enabled, these are fetched from
-/// Meterd's quota snapshot API. When metering is disabled, the global config
-/// values from `TenantLimitsConfig` and `ServerConfig` apply uniformly.
-#[derive(Debug, Clone)]
-pub struct PlanLimits {
-    pub max_connections: u32,
-    pub max_streams: u32,
-    pub api_rate_limit: u32, // requests per 60s
-    pub events_per_month: u64,
-    pub retention_days: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -424,32 +409,17 @@ impl HeraldConfig {
             cors: env("HERALD_CORS_ORIGINS").map(|origins| CorsConfig {
                 allowed_origins: origins.split(',').map(|s| s.trim().to_string()).collect(),
             }),
-            metering: {
-                let mc = crate::metering::MeteringConfig::from_env();
-                if mc.enabled {
-                    Some(mc)
-                } else {
-                    None
-                }
-            },
         })
     }
 
     /// Load from file if it exists, otherwise from env vars.
     pub fn load_or_env(path: &str) -> anyhow::Result<Self> {
-        let mut config = if std::path::Path::new(path).exists() {
-            Self::load(path)?
+        if std::path::Path::new(path).exists() {
+            Self::load(path)
         } else {
             tracing::info!("no config file at {path}, loading from environment variables");
-            Self::from_env()?
-        };
-        if config.metering.is_none() {
-            let mc = crate::metering::MeteringConfig::from_env();
-            if mc.enabled {
-                config.metering = Some(mc);
-            }
+            Self::from_env()
         }
-        Ok(config)
     }
 
     /// Pull secrets from ShroudB Keep and merge into config.

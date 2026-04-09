@@ -76,6 +76,7 @@ async function createTenantAndToken(): Promise<string> {
   const tokenRes = await fetch(`${base}/admin/tenants/contract/tokens`, {
     method: "POST",
     headers,
+    body: JSON.stringify({}),
   });
   if (!tokenRes.ok) {
     throw new Error(`Failed to create API token: ${tokenRes.status} ${await tokenRes.text()}`);

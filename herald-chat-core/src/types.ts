@@ -93,6 +93,25 @@ export type ChatEvent =
   | { type: "event.delivered"; data: EventDelivered }
   | { type: "ephemeral"; data: EventReceived };
 
+/**
+ * Middleware intercepts events in the ChatCore pipeline. Call `next()` to
+ * continue the chain — the store mutation runs at the end of the chain.
+ *
+ * Code **before** `next()` runs before the store is updated.
+ * Code **after** `next()` runs after the store is updated (and after all
+ * downstream middleware has completed).
+ *
+ * ```ts
+ * const logger: Middleware = (event, next) => {
+ *   console.log("before store:", event.type);
+ *   next();
+ *   console.log("after store:", event.type);
+ * };
+ * ```
+ *
+ * Omitting the `next()` call swallows the event — the store will not be
+ * updated and downstream middleware will not run.
+ */
 export type Middleware = (event: ChatEvent, next: () => void) => void;
 
 // ---------------------------------------------------------------------------
@@ -110,6 +129,6 @@ export interface ChatCoreOptions {
   scrollIdleMs?: number;
   /** Number of events to fetch per loadMore() call. Default 50. */
   loadMoreLimit?: number;
-  /** Optional middleware chain for intercepting events before store mutations. */
+  /** Optional middleware chain. Runs before/after store mutations — see {@link Middleware}. */
   middleware?: Middleware[];
 }

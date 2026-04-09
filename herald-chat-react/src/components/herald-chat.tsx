@@ -21,6 +21,8 @@ export interface HeraldChatState {
   scrollToBottom(): void;
 }
 
+const NOOP_SUBSCRIBE = () => () => {};
+
 export function HeraldChat({
   streamId,
   children,
@@ -34,14 +36,14 @@ export function HeraldChat({
   const isAnchoring = useRef(false);
 
   const scrollState = useSyncExternalStore(
-    (cb) => core.subscribe(`scroll:${streamId}`, cb),
-    () => core.getScrollState(streamId),
+    core ? (cb) => core.subscribe(`scroll:${streamId}`, cb) : NOOP_SUBSCRIBE,
+    core ? () => core.getScrollState(streamId) : () => DEFAULT_SCROLL,
     () => DEFAULT_SCROLL,
   );
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (!el || isAnchoring.current) return;
+    if (!el || !core || isAnchoring.current) return;
 
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const atEdge = distFromBottom <= edgeThreshold;

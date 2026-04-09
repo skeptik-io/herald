@@ -25,6 +25,13 @@ function App() {
       userId="alice"
       liveness={{ idleTimeoutMs: 120_000 }}
       scrollIdleMs={1000}
+      middleware={[
+        (event, next) => {
+          // code before next() runs pre-store-mutation
+          next();
+          // code after next() runs post-store-mutation
+        },
+      ]}
     >
       <Chat />
     </HeraldChatProvider>
@@ -33,6 +40,8 @@ function App() {
 ```
 
 ## Hooks
+
+All hooks are null-safe — they return stable defaults (`[]`, `0`, `undefined`) when called outside a `HeraldChatProvider`. This lets you render components before the provider mounts (e.g., while the WebSocket connects) without conditional logic. Write actions (`send`, `edit`, `deleteEvent`) reject with an error if called before the provider is available.
 
 ### useMessages
 
@@ -159,13 +168,14 @@ Scroll coordination: live-edge detection, load-more triggers, scroll anchoring o
 
 ## Direct ChatCore Access
 
-For advanced use cases, access the underlying `ChatCore` instance:
+For advanced use cases, access the underlying `ChatCore` instance. Returns `null` when called outside a `HeraldChatProvider`.
 
 ```typescript
 import { useChatCore } from '@skeptik-io/herald-chat-react';
 
 function CustomComponent() {
   const core = useChatCore();
+  if (!core) return null; // provider not mounted yet
   // Use core.subscribe(), core.getMessages(), etc. directly
 }
 ```

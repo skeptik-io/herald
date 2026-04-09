@@ -6,18 +6,21 @@ export interface UseTypingReturn {
   sendTyping(): void;
 }
 
+const NOOP_SUBSCRIBE = () => () => {};
+const NOOP = () => {};
+
 export function useTyping(streamId: string): UseTypingReturn {
   if (!streamId) throw new Error("useTyping requires a streamId");
   const core = useChatCore();
 
   const typing = useSyncExternalStore(
-    (cb) => core.subscribe(`typing:${streamId}`, cb),
-    () => core.getTypingUsers(streamId),
+    core ? (cb) => core.subscribe(`typing:${streamId}`, cb) : NOOP_SUBSCRIBE,
+    core ? () => core.getTypingUsers(streamId) : () => EMPTY,
     () => EMPTY,
   );
 
   const sendTyping = useCallback(
-    () => core.startTyping(streamId),
+    () => { if (core) core.startTyping(streamId); },
     [core, streamId],
   );
 

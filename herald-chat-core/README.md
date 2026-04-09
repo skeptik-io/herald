@@ -27,10 +27,10 @@ const core = new ChatCore({
   userId: 'alice',
   scrollIdleMs: 1000,     // debounce auto-mark-read (default 1000ms)
   loadMoreLimit: 50,      // events per loadMore() call (default 50)
-  middleware: [            // optional event interception chain
+  middleware: [            // optional — runs before/after store mutations
     (event, next) => {
       console.log(event.type);
-      next(); // call next() to apply store mutation, skip to drop
+      next(); // call next() to proceed; code after next() runs post-mutation
     },
   ],
 });
@@ -94,7 +94,7 @@ When a remote user's cursor advances past a self-sent message's sequence number,
 
 ## Event Middleware
 
-Middleware intercepts events before they reach stores. Each middleware calls `next()` to proceed or skips it to drop the event.
+Middleware intercepts events in the ChatCore pipeline. The chain is synchronous — code before `next()` runs before the store mutation, code after `next()` runs after.
 
 ```typescript
 const core = new ChatCore({
@@ -110,11 +110,19 @@ const core = new ChatCore({
       if (event.type === 'event') event.data.meta = { ...event.data.meta, receivedAt: Date.now() };
       next();
     },
+    // Before/after: run logic on both sides of the store mutation
+    (event, next) => {
+      console.log('before store:', event.type);
+      next();
+      console.log('after store:', event.type);
+    },
   ],
 });
 ```
 
-All 10 event types flow through middleware: `event`, `event.edited`, `event.deleted`, `reaction.changed`, `presence`, `cursor`, `typing`, `member.joined`, `member.left`, `ephemeral`.
+Omitting the `next()` call swallows the event — the store will not be updated and downstream middleware will not run.
+
+All 11 event types flow through middleware: `event`, `event.edited`, `event.deleted`, `reaction.changed`, `presence`, `cursor`, `typing`, `member.joined`, `member.left`, `event.delivered`, `ephemeral`.
 
 ## Ephemeral Events
 

@@ -132,8 +132,8 @@ jobs:
         run: cargo install cargo-audit --locked && cargo audit
         continue-on-error: true
 
-  sdk-check:
-    name: SDK Type Check
+  sdk-check-ts:
+    name: TypeScript SDK Check
     runs-on: ubuntu-latest
 
     steps:
@@ -152,19 +152,57 @@ jobs:
         working-directory: herald-admin-typescript
         run: npm install && npx tsc --noEmit
 
-      - name: Go Admin SDK
-        uses: actions/setup-go@v5
+  sdk-check-go:
+    name: Go SDK Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
         with:
           go-version: "1.21"
-      - run: cd herald-admin-go && go build ./...
+
+      - name: Go Admin SDK
+        run: cd herald-admin-go && go build ./...
+
+  sdk-check-python:
+    name: Python SDK Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Python Admin SDK
         working-directory: herald-admin-python
         run: python3 -c "from herald_admin import HeraldAdmin"
 
+  sdk-check-ruby:
+    name: Ruby SDK Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
       - name: Ruby Admin SDK
         working-directory: herald-admin-ruby
         run: ruby -e "require_relative 'lib/herald_admin'"
+
+  sdk-check-chat:
+    name: Chat SDK Build + Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       # Topological order: herald-sdk → herald-admin → herald-chat-sdk → herald-chat-core → herald-chat-react
       - name: Build TypeScript SDKs
@@ -172,19 +210,23 @@ jobs:
           cd herald-sdk-typescript && npm install && npx tsc && cd ..
           cd herald-admin-typescript && npm install && npx tsc && cd ..
 
-      - name: Chat SDK
+      - name: Chat SDK — build
         working-directory: herald-chat-sdk-typescript
         run: npm install && npx tsc
 
-      - name: Chat Core SDK
+      - name: Chat Core — build
         working-directory: herald-chat-core
         run: npm install && npx tsc
 
-      - name: Chat React SDK
+      - name: Chat React — build
         working-directory: herald-chat-react
         run: npm install && npx tsc --noEmit
 
-      - name: Chat Core unit tests
+      - name: Chat SDK — unit tests
+        working-directory: herald-chat-sdk-typescript
+        run: npx tsx test/client.test.ts
+
+      - name: Chat Core — unit tests
         working-directory: herald-chat-core
         run: |
           npx tsx test/chat-core.test.ts
@@ -193,10 +235,6 @@ jobs:
           npx tsx test/notifier.test.ts
           npx tsx test/liveness.test.ts
 
-      - name: Chat SDK unit tests
-        working-directory: herald-chat-sdk-typescript
-        run: npx tsx test/client.test.ts
-
-      - name: Chat React unit tests
+      - name: Chat React — unit tests
         working-directory: herald-chat-react
         run: npx tsx test/hooks.test.ts

@@ -159,6 +159,36 @@ jobs:
           npx tsc
           npm publish
 
+      - name: Publish herald-chat-sdk (WS chat frame types)
+        working-directory: herald-chat-sdk-typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          jq '.name = "@skeptik-io/herald-chat-sdk" | .version = env.VERSION | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp && mv package.tmp package.json
+          npm install
+          npx tsc
+          npm publish
+
+      - name: Publish herald-chat (ChatCore state machine)
+        working-directory: herald-chat-core
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          jq '.name = "@skeptik-io/herald-chat" | .version = env.VERSION | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp && mv package.tmp package.json
+          npm install
+          npx tsc
+          npm publish
+
+      - name: Publish herald-chat-react (React hooks + components)
+        working-directory: herald-chat-react
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          jq '.name = "@skeptik-io/herald-chat-react" | .version = env.VERSION | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp && mv package.tmp package.json
+          npm install
+          npx tsc
+          npm publish
+
   publish-go:
     name: Tag Go Module
     runs-on: ubuntu-latest

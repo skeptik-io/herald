@@ -142,7 +142,7 @@ jobs:
 
       - name: Chat Core SDK
         working-directory: herald-chat-core
-        run: npm install && npx tsc --noEmit
+        run: npm install && npx tsc
 
       - name: Chat React SDK
         working-directory: herald-chat-react

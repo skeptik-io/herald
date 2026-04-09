@@ -69,3 +69,46 @@ export interface EventPublishResult {
   seq: number;
   sent_at: number;
 }
+
+export interface AuditEvent {
+  id: string;
+  timestamp: number;
+  operation: string;
+  resource_type: string;
+  resource_id: string;
+  actor: string;
+  result: string;
+  tenant_id: string;
+  diff?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AuditQueryResponse {
+  events: AuditEvent[];
+  matched: number;
+}
+
+export interface AuditCountResponse {
+  count: number;
+}
+
+export interface AuditQueryOptions {
+  operation?: string;
+  resource_type?: string;
+  resource_id?: string;
+  actor?: string;
+  result?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}
+
+export interface AuditCountOptions {
+  operation?: string;
+  resource_type?: string;
+  resource_id?: string;
+  actor?: string;
+  result?: string;
+  since?: string;
+  until?: string;
+}

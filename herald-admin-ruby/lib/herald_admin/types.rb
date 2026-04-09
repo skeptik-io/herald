@@ -10,4 +10,7 @@ module HeraldAdmin
   MemberPresenceEntry = Struct.new(:user_id, :status, keyword_init: true)
   Cursor = Struct.new(:user_id, :seq, keyword_init: true)
   HealthResponse = Struct.new(:status, :connections, :streams, :uptime_secs, keyword_init: true)
+  AuditEvent = Struct.new(:id, :timestamp, :operation, :resource_type, :resource_id, :actor, :result, :tenant_id, :diff, :metadata, keyword_init: true)
+  AuditQueryResult = Struct.new(:events, :matched, keyword_init: true)
+  AuditCountResult = Struct.new(:count, keyword_init: true)
 end

@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::admin_events::ErrorCategory;
 use crate::http::validation;
+use crate::integrations::AuditQuery;
 use crate::state::{AppState, TenantConfig};
 use crate::store;
 use crate::store::tenants::Tenant;
@@ -85,6 +86,15 @@ pub async fn create_tenant(
             event_ttl_days: None,
             cached_at: std::time::Instant::now(),
         },
+    );
+
+    state.audit(
+        &tenant.id,
+        "tenant.create",
+        "tenant",
+        &tenant.id,
+        "admin",
+        "success",
     );
 
     (
@@ -224,6 +234,7 @@ pub async fn update_tenant(
                     },
                 );
             }
+            state.audit(&id, "tenant.update", "tenant", &id, "admin", "success");
             StatusCode::OK.into_response()
         }
         Ok(false) => (
@@ -249,6 +260,7 @@ pub async fn delete_tenant(
     match store::tenants::delete(&*state.db, &id).await {
         Ok(true) => {
             state.tenant_cache.remove(&id);
+            state.audit(&id, "tenant.delete", "tenant", &id, "admin", "success");
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (
@@ -311,6 +323,15 @@ pub async fn create_api_token(
             .into_response();
     }
 
+    state.audit(
+        &tenant_id,
+        "token.create",
+        "token",
+        &token,
+        "admin",
+        "success",
+    );
+
     (
         StatusCode::CREATED,
         Json(serde_json::json!({"token": token, "scope": scope})),
@@ -346,7 +367,17 @@ pub async fn delete_api_token(
     Path((tenant_id, token)): Path<(String, String)>,
 ) -> impl IntoResponse {
     match store::tenants::delete_token(&*state.db, &token, &tenant_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            state.audit(
+                &tenant_id,
+                "token.revoke",
+                "token",
+                &token,
+                "admin",
+                "success",
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "token not found"})),
@@ -530,6 +561,7 @@ pub async fn purge_tenant_data(
     match store::purge::purge_tenant(&*state.db, &id).await {
         Ok(deleted) => {
             tracing::info!(tenant = %id, deleted, "GDPR: tenant data purged");
+            state.audit(&id, "tenant.purge", "tenant", &id, "admin", "success");
             Json(serde_json::json!({"deleted": deleted})).into_response()
         }
         Err(e) => {
@@ -540,5 +572,60 @@ pub async fn purge_tenant_data(
             )
                 .into_response()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit log query
+// ---------------------------------------------------------------------------
+
+pub async fn query_audit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(mut query): Query<AuditQuery>,
+) -> impl IntoResponse {
+    let Some(ref chronicle) = state.chronicle else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": "audit logging not configured"})),
+        )
+            .into_response();
+    };
+
+    // Scope query to this tenant
+    query.tenant_id = Some(id.clone());
+
+    match chronicle.query(&query).await {
+        Some(result) => Json(result).into_response(),
+        None => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": "audit query not supported in remote mode"})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn count_audit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(mut query): Query<AuditQuery>,
+) -> impl IntoResponse {
+    let Some(ref chronicle) = state.chronicle else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": "audit logging not configured"})),
+        )
+            .into_response();
+    };
+
+    query.tenant_id = Some(id.clone());
+
+    match chronicle.count(&query).await {
+        Some(result) => Json(result).into_response(),
+        None => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": "audit count not supported in remote mode"})),
+        )
+            .into_response(),
     }
 }

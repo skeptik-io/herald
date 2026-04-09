@@ -7,6 +7,7 @@ from urllib.parse import quote
 from .errors import HeraldError
 from .transport import HttpTransport
 from .types import (
+    AuditEvent, AuditQueryResult,
     Cursor, HealthResponse, Member, MemberPresenceEntry, Event,
     EventList, EventPublishResult, Stream, UserPresence,
 )
@@ -222,6 +223,92 @@ class BlockNamespace:
         return data["blocked"]
 
 
+class AuditNamespace:
+    def __init__(self, t: HttpTransport) -> None:
+        self._t = t
+
+    def _build_params(
+        self,
+        *,
+        operation: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        actor: str | None = None,
+        result: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[str]:
+        params: list[str] = []
+        if operation is not None:
+            params.append(f"operation={quote(operation, safe='')}")
+        if resource_type is not None:
+            params.append(f"resource_type={quote(resource_type, safe='')}")
+        if resource_id is not None:
+            params.append(f"resource_id={quote(resource_id, safe='')}")
+        if actor is not None:
+            params.append(f"actor={quote(actor, safe='')}")
+        if result is not None:
+            params.append(f"result={quote(result, safe='')}")
+        if since is not None:
+            params.append(f"since={quote(since, safe='')}")
+        if until is not None:
+            params.append(f"until={quote(until, safe='')}")
+        return params
+
+    def query(
+        self,
+        tenant_id: str,
+        *,
+        operation: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        actor: str | None = None,
+        result: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int | None = None,
+    ) -> AuditQueryResult:
+        params = self._build_params(
+            operation=operation, resource_type=resource_type,
+            resource_id=resource_id, actor=actor, result=result,
+            since=since, until=until,
+        )
+        if limit is not None:
+            params.append(f"limit={limit}")
+        path = f"/admin/tenants/{quote(tenant_id, safe='')}/audit"
+        if params:
+            path += "?" + "&".join(params)
+        data = self._t.request("GET", path)
+        events = [
+            AuditEvent(**{k: e[k] for k in AuditEvent.__dataclass_fields__ if k in e})
+            for e in data["events"]
+        ]
+        return AuditQueryResult(events=events, matched=data.get("matched", len(events)))
+
+    def count(
+        self,
+        tenant_id: str,
+        *,
+        operation: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        actor: str | None = None,
+        result: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> int:
+        params = self._build_params(
+            operation=operation, resource_type=resource_type,
+            resource_id=resource_id, actor=actor, result=result,
+            since=since, until=until,
+        )
+        path = f"/admin/tenants/{quote(tenant_id, safe='')}/audit/count"
+        if params:
+            path += "?" + "&".join(params)
+        data = self._t.request("GET", path)
+        return data["count"]
+
+
 @dataclass
 class _ChatNamespaces:
     """Chat-specific namespaces (conversational layer)."""
@@ -239,6 +326,7 @@ class HeraldAdmin:
         self.members = MemberNamespace(t)
         self.events = EventNamespace(t)
         self.tenants = TenantNamespace(t)
+        self.audit = AuditNamespace(t)
         # Chat namespaces (conversational layer) — deprecated at top level, use self.chat.*
         self.presence = PresenceNamespace(t)
         self.blocks = BlockNamespace(t)

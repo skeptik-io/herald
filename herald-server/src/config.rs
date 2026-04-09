@@ -59,7 +59,6 @@ pub struct ShroudbConfig {
     pub courier_token: Option<String>,
     pub chronicle_addr: Option<String>,
     pub chronicle_token: Option<String>,
-    pub moat_addr: Option<String>,
     pub auth_token: Option<String>,
 }
 
@@ -408,7 +407,6 @@ impl HeraldConfig {
                     courier_token: env("HERALD_COURIER_TOKEN"),
                     chronicle_addr: env("HERALD_CHRONICLE_ADDR"),
                     chronicle_token: env("HERALD_CHRONICLE_TOKEN"),
-                    moat_addr: env("HERALD_MOAT_ADDR"),
                     auth_token: env("HERALD_MOAT_TOKEN"),
                 })
             } else {

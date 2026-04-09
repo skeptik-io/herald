@@ -134,30 +134,149 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_timeout = config.server.shutdown_timeout_secs;
     let tls_config = config.tls.clone();
 
-    // Initialize ShroudB integrations — Sentry for authorization.
-    // Embedded Sentry is only available in embedded store mode (needs local WAL).
-    let mut sentry: Option<Arc<dyn integrations::SentryOps>> =
-        if let herald_server::store_backend::StoreBackend::Embedded(ref embedded) = *db {
+    // Initialize ShroudB integrations — in-process engines for both store backends.
+    let mut sentry: Option<Arc<dyn integrations::SentryOps>> = match *db {
+        herald_server::store_backend::StoreBackend::Embedded(ref embedded) => {
             let engine = embedded.engine().clone();
             let sentry_store = Arc::new(shroudb_storage::EmbeddedStore::new(engine, "sentry"));
-            match integrations::embedded_sentry::EmbeddedSentryOps::new(sentry_store).await {
+            match integrations::in_process_sentry::InProcessSentryOps::new(sentry_store).await {
                 Ok(s) => {
-                    info!("Sentry engine initialized (embedded)");
+                    info!("Sentry engine initialized (in-process, embedded store)");
                     Some(Arc::new(s) as Arc<dyn integrations::SentryOps>)
                 }
                 Err(e) => {
-                    warn!("embedded Sentry init failed: {e}");
+                    warn!("in-process Sentry init failed: {e}");
                     None
                 }
             }
-        } else {
-            info!("remote store mode — embedded Sentry unavailable, use [shroudb].sentry_addr");
-            None
-        };
-    let mut courier: Option<Arc<dyn integrations::CourierOps>> = None;
-    let mut chronicle: Option<Arc<dyn integrations::ChronicleOps>> = None;
+        }
+        herald_server::store_backend::StoreBackend::Remote(_) => {
+            let addr = config.store.addr.as_deref().unwrap();
+            match shroudb_client::RemoteStore::connect(addr).await {
+                Ok(remote_sentry) => {
+                    let sentry_store = Arc::new(remote_sentry);
+                    match integrations::in_process_sentry::InProcessSentryOps::new(sentry_store)
+                        .await
+                    {
+                        Ok(s) => {
+                            info!("Sentry engine initialized (in-process, remote store)");
+                            Some(Arc::new(s) as Arc<dyn integrations::SentryOps>)
+                        }
+                        Err(e) => {
+                            warn!("in-process Sentry init failed (remote store): {e}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to connect remote store for Sentry: {e}");
+                    None
+                }
+            }
+        }
+    };
+    // Initialize in-process Courier engine.
+    let instance_id = config
+        .cluster
+        .instance_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Remote overrides — if [shroudb] config has addresses, use remote instead of embedded.
+    let mut courier: Option<Arc<dyn integrations::CourierOps>> = match *db {
+        herald_server::store_backend::StoreBackend::Embedded(ref embedded) => {
+            let engine = embedded.engine().clone();
+            let courier_store = Arc::new(shroudb_storage::EmbeddedStore::new(engine, "courier"));
+            match integrations::in_process_courier::InProcessCourierOps::new(
+                courier_store,
+                instance_id.clone(),
+            )
+            .await
+            {
+                Ok(c) => {
+                    info!("Courier engine initialized (in-process, embedded store)");
+                    Some(Arc::new(c) as Arc<dyn integrations::CourierOps>)
+                }
+                Err(e) => {
+                    warn!("in-process Courier init failed: {e}");
+                    None
+                }
+            }
+        }
+        herald_server::store_backend::StoreBackend::Remote(_) => {
+            let addr = config.store.addr.as_deref().unwrap();
+            match shroudb_client::RemoteStore::connect(addr).await {
+                Ok(remote_courier) => {
+                    match integrations::in_process_courier::InProcessCourierOps::new(
+                        Arc::new(remote_courier),
+                        instance_id.clone(),
+                    )
+                    .await
+                    {
+                        Ok(c) => {
+                            info!("Courier engine initialized (in-process, remote store)");
+                            Some(Arc::new(c) as Arc<dyn integrations::CourierOps>)
+                        }
+                        Err(e) => {
+                            warn!("in-process Courier init failed (remote store): {e}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to connect remote store for Courier: {e}");
+                    None
+                }
+            }
+        }
+    };
+
+    // Initialize in-process Chronicle engine.
+    let mut chronicle: Option<Arc<dyn integrations::ChronicleOps>> = match *db {
+        herald_server::store_backend::StoreBackend::Embedded(ref embedded) => {
+            let engine = embedded.engine().clone();
+            let chronicle_store =
+                Arc::new(shroudb_storage::EmbeddedStore::new(engine, "chronicle"));
+            match integrations::in_process_chronicle::InProcessChronicleOps::new(chronicle_store)
+                .await
+            {
+                Ok(c) => {
+                    info!("Chronicle engine initialized (in-process, embedded store)");
+                    Some(Arc::new(c) as Arc<dyn integrations::ChronicleOps>)
+                }
+                Err(e) => {
+                    warn!("in-process Chronicle init failed: {e}");
+                    None
+                }
+            }
+        }
+        herald_server::store_backend::StoreBackend::Remote(_) => {
+            let addr = config.store.addr.as_deref().unwrap();
+            match shroudb_client::RemoteStore::connect(addr).await {
+                Ok(remote_chronicle) => {
+                    match integrations::in_process_chronicle::InProcessChronicleOps::new(Arc::new(
+                        remote_chronicle,
+                    ))
+                    .await
+                    {
+                        Ok(c) => {
+                            info!("Chronicle engine initialized (in-process, remote store)");
+                            Some(Arc::new(c) as Arc<dyn integrations::ChronicleOps>)
+                        }
+                        Err(e) => {
+                            warn!("in-process Chronicle init failed (remote store): {e}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to connect remote store for Chronicle: {e}");
+                    None
+                }
+            }
+        }
+    };
+
+    // Remote overrides — if [shroudb] config has addresses, use remote TCP instead of in-process.
     if let Some(ref shroudb) = config.shroudb {
         use integrations::resilient::*;
 
@@ -212,6 +331,7 @@ async fn main() -> anyhow::Result<()> {
         sentry,
         courier,
         chronicle,
+        instance_id,
     });
 
     // Always hydrate all tenants from Store

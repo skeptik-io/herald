@@ -53,7 +53,7 @@ Herald is a standalone Rust project. It optionally integrates with [ShroudB](htt
   └─────────────────────┘
 ```
 
-Herald and ShroudB are separate services. Herald connects to Moat (or individual ShroudB engines) over TCP using published Rust client crates as regular Cargo dependencies. ShroudB Sentry integration is behind a `shroudb` feature flag — when the feature is disabled or the `[shroudb]` config section is absent, Herald relies on JWT `streams` claim for authorization only.
+Herald runs ShroudB engines (Sentry, Courier, Chronicle) **in-process** using published Rust engine crates. Each engine is generic over `S: Store` and works with both `EmbeddedStore` (local WAL) and `RemoteStore` (shared ShroudB server). Remote TCP overrides are available via `[shroudb]` config for deployments that prefer external engine processes. When no `[shroudb]` config is present and no engines are configured, Herald relies on JWT `streams` claim for authorization only.
 
 ### What Herald Is
 
@@ -1128,14 +1128,14 @@ shroudb = [
 
 ### Degraded Mode
 
-All ShroudB integration is optional. Herald operates in degraded mode when engines are unavailable:
+All ShroudB engines run **in-process** by default (no external Moat process needed). Each engine creates its own namespaces in the active store backend. Remote TCP overrides are still supported via `[shroudb]` config.
 
-| Feature | Without ShroudB | With ShroudB |
-|---------|----------------|--------------|
-| Event storage | Opaque body in WAL | Opaque body in WAL |
-| Stream authorization | JWT `streams` claim only | JWT + Sentry policy eval |
-| Offline notifications | Skipped | Courier delivery |
-| Audit trail | Local structured logs | Chronicle audit events |
+| Feature | Default (in-process) | Remote TCP override |
+|---------|---------------------|---------------------|
+| Event storage | Opaque body in WAL | Same |
+| Stream authorization | In-process Sentry policy eval (fail-open) | Remote Sentry with circuit breaker |
+| Offline notifications | In-process Courier delivery with dedup | Remote Courier with circuit breaker |
+| Audit trail | In-process Chronicle with query API | Remote Chronicle (query not supported) |
 
 ---
 
@@ -1169,10 +1169,12 @@ url = "https://app.example.com/webhooks/herald"
 secret = "webhook-signing-secret"
 retries = 3
 
-# Optional — omit to run without ShroudB
-[shroudb]
-moat_addr = "shroudb-moat.railway.internal:8201"
-auth_token = "herald-service-token"
+# Optional — override in-process engines with remote TCP connections
+# [shroudb]
+# sentry_addr = "tcp://sentry.internal:5200"
+# courier_addr = "tcp://courier.internal:5200"
+# chronicle_addr = "tcp://chronicle.internal:5200"
+# auth_token = "herald-service-token"
 ```
 
 ---
@@ -1184,6 +1186,6 @@ auth_token = "herald-service-token"
 | **1. Skeleton** | `herald-core` types. `herald-server` with axum + WebSocket. Auth, subscribe, send/receive with in-memory state. WAL store. | No |
 | **2. Fan-out + Presence** | ConnectionRegistry, StreamRegistry, PresenceTracker. Multi-connection fan-out. Cursors. Reconnect catch-up via `last_seen_at`. | No |
 | **3. HTTP API + Webhook** | Stream CRUD, member management, event query/inject. Signed webhook delivery with retries. | No |
-| **4. Sentry + Courier + Chronicle** | Optional Sentry policy eval. Courier offline notifications. Chronicle audit trail. | Yes |
+| **4. Sentry + Courier + Chronicle** | In-process Sentry policy eval. In-process Courier notifications. In-process Chronicle audit trail + query API. | In-process (no external dependency) |
 | **5. TypeScript SDK** | `herald-sdk-typescript` — HeraldClient, reconnect with backoff, event dedup, client-side store. | No |
 | **6. Hardening** | Rate limiting. TLS config. Prometheus metrics. Graceful shutdown. Docker image. | No |

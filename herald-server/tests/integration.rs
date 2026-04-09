@@ -101,6 +101,7 @@ impl TestServer {
             sentry: None,
             courier: None,
             chronicle: None,
+            instance_id: uuid::Uuid::new_v4().to_string(),
         });
 
         let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2006,6 +2007,7 @@ async fn test_http_api_rate_limiting() {
         sentry: None,
         courier: None,
         chronicle: None,
+        instance_id: uuid::Uuid::new_v4().to_string(),
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -2087,6 +2089,7 @@ async fn test_ws_sliding_window_rate_limit() {
         sentry: None,
         courier: None,
         chronicle: None,
+        instance_id: uuid::Uuid::new_v4().to_string(),
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -2352,6 +2355,7 @@ async fn test_presence_linger_reconnect_no_offline() {
         sentry: None,
         courier: None,
         chronicle: None,
+        instance_id: uuid::Uuid::new_v4().to_string(),
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -3417,6 +3421,7 @@ async fn test_webhook_event_filtering() {
         sentry: None,
         courier: None,
         chronicle: None,
+        instance_id: uuid::Uuid::new_v4().to_string(),
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -5189,6 +5194,7 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
         sentry: None,
         courier: None,
         chronicle: None,
+        instance_id: uuid::Uuid::new_v4().to_string(),
     });
     state.bootstrap_single_tenant().await.unwrap();
 
@@ -6205,6 +6211,7 @@ async fn test_remote_backend_boots_and_operates() {
         sentry: None,
         courier: None,
         chronicle: None,
+        instance_id: uuid::Uuid::new_v4().to_string(),
     });
 
     // Bootstrap single tenant
@@ -6541,6 +6548,7 @@ impl ClusteredTestServer {
             sentry: None,
             courier: None,
             chronicle: None,
+            instance_id: uuid::Uuid::new_v4().to_string(),
         });
 
         // Spawn backplane consumer

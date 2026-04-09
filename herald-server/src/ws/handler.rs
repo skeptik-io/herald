@@ -581,7 +581,14 @@ async fn handle_publish(
         },
     );
 
-    state.audit(tid, "event.publish", &stream, &ctx.user_id, "success");
+    state.audit(
+        tid,
+        "event.publish",
+        "stream",
+        &stream,
+        &ctx.user_id,
+        "success",
+    );
     state.notify_offline_members(tid, &stream, &ctx.user_id, &body);
 
     state.metrics.event_total.observe_since(total_start);

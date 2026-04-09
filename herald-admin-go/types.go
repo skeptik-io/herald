@@ -85,3 +85,40 @@ type Tenant struct {
 	Plan      string `json:"plan"`
 	CreatedAt int64  `json:"created_at"`
 }
+
+// AuditEvent represents a single audit log entry.
+type AuditEvent struct {
+	ID           string `json:"id"`
+	Timestamp    int64  `json:"timestamp"`
+	Operation    string `json:"operation"`
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
+	Actor        string `json:"actor"`
+	Result       string `json:"result"`
+	TenantID     string `json:"tenant_id"`
+	Diff         any    `json:"diff,omitempty"`
+	Metadata     any    `json:"metadata,omitempty"`
+}
+
+// AuditQueryResult is the response from querying audit events.
+type AuditQueryResult struct {
+	Events  []AuditEvent `json:"events"`
+	Matched int          `json:"matched"`
+}
+
+// AuditCountResult is the response from counting audit events.
+type AuditCountResult struct {
+	Count int `json:"count"`
+}
+
+// AuditQueryOptions are optional filter parameters for audit queries.
+type AuditQueryOptions struct {
+	Operation    *string
+	ResourceType *string
+	ResourceID   *string
+	Actor        *string
+	Result       *string
+	Since        *string
+	Until        *string
+	Limit        *int
+}

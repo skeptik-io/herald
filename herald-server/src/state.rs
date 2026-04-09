@@ -175,6 +175,7 @@ pub struct AppStateBuilder {
     pub sentry: Option<Arc<dyn SentryOps>>,
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
+    pub instance_id: String,
 }
 
 impl AppState {
@@ -187,13 +188,6 @@ impl AppState {
                 events: w.events.clone(),
             })
         });
-
-        let instance_id = b
-            .config
-            .cluster
-            .instance_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         Arc::new(Self {
             config: b.config,
@@ -213,7 +207,7 @@ impl AppState {
             event_bus: EventBus::new(),
             webhook_config,
             webhook_client: reqwest::Client::new(),
-            instance_id,
+            instance_id: b.instance_id,
             local_writes: dashmap::DashSet::new(),
         })
     }
@@ -478,21 +472,35 @@ impl AppState {
         &self,
         tenant_id: &str,
         operation: &str,
-        resource: &str,
+        resource_type: &str,
+        resource_id: &str,
         actor: &str,
         result: &str,
     ) {
         let Some(ref chronicle) = self.chronicle else {
             return;
         };
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert("tenant".to_string(), tenant_id.to_string());
         let event = AuditEvent {
             operation: operation.to_string(),
-            resource: resource.to_string(),
+            resource_type: resource_type.to_string(),
+            resource_id: resource_id.to_string(),
             actor: actor.to_string(),
             result: result.to_string(),
-            metadata,
+            tenant_id: Some(tenant_id.to_string()),
+            diff: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        let chronicle = chronicle.clone();
+        tokio::spawn(async move {
+            if let Err(e) = chronicle.ingest(event).await {
+                tracing::warn!("chronicle ingest failed: {e}");
+            }
+        });
+    }
+
+    pub fn audit_event(&self, event: AuditEvent) {
+        let Some(ref chronicle) = self.chronicle else {
+            return;
         };
         let chronicle = chronicle.clone();
         tokio::spawn(async move {

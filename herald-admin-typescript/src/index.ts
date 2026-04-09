@@ -1,5 +1,6 @@
 export { HeraldAdmin, type HeraldAdminOptions, type AdminEventListOptions, type ErrorListOptions } from "./client.js";
 export { HeraldError } from "./errors.js";
+export { AuditNamespace } from "./namespaces/audit.js";
 export { StreamNamespace } from "./namespaces/rooms.js";
 export { MemberNamespace } from "./namespaces/members.js";
 export { EventNamespace } from "./namespaces/messages.js";
@@ -18,4 +19,9 @@ export type {
   EventPublishResult,
   ReactionSummary,
   BlockList,
+  AuditEvent,
+  AuditQueryResponse,
+  AuditCountResponse,
+  AuditQueryOptions,
+  AuditCountOptions,
 } from "./types.js";

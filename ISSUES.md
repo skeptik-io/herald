@@ -109,7 +109,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`extract-infra`~~ | ~~H-7~~ | ~~Rip metering + signup out of Herald, revert to transport-only~~ | **done** |
 | ~~`e2ee-sdks`~~ | ~~M-3~~ | ~~E2EE in Go, Python, Ruby + cross-SDK interop tests~~ | **done** |
 | ~~`clustering`~~ | ~~L-1~~ | ~~Pub/sub backplane for cross-instance fanout (storage already shared via remote store)~~ | **done** |
-| `embed-engines` | N-1 | In-process engines (Sentry/Courier/Chronicle), Chronicle v1.3 upgrade, audit query API | |
+| ~~`embed-engines`~~ | ~~N-1~~ | ~~In-process engines (Sentry/Courier/Chronicle), Chronicle v1.5 upgrade, audit query API~~ | **done** |
 | ~~`at-least-once`~~ | ~~N-2~~ | ~~Opt-in ack mode for at-least-once delivery~~ | **done** |
 | `contract-tests` | N-3 | Define spec + wire all 4 existing SDKs | |
 | ~~`moat-clients`~~ | ~~—~~ | ~~shroudb crate updates for Moat prefix routing~~ | **superseded by N-1** |
@@ -155,54 +155,54 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ## NEXT — Ready to implement
 
-- [ ] **N-1: In-process engines + modernize audit** `session:embed-engines`
-  Herald connects to Sentry, Courier, and Chronicle via TCP clients. Sentry already has an embedded mode (`EmbeddedSentryOps` wrapping `SentryEngine<EmbeddedStore>`). Extend this pattern to all three engines, and make it work with **both** store backends — `EmbeddedStore` (single-instance) and `RemoteStore` (managed multi-instance). All three engine crates are generic over `S: Store`, so the same engine code works in either mode: embedded store uses local WAL with namespaced prefixes, remote store uses the shared ShroudB instance. This eliminates external engine processes and Moat from the deployment. Simultaneously upgrade Chronicle from v1.0 to v1.3.0 (first-class `tenant_id`, query API, `Engine::Custom("herald")`, diff tracking, per-tenant hash chains). Managed deployment: Sigil handles user auth (standalone), Herald runs Sentry/Courier/Chronicle in-process against the shared remote store, all instances see the same engine state.
+- [x] **N-1: In-process engines + modernize audit** `session:embed-engines`
+  Herald connects to Sentry, Courier, and Chronicle via TCP clients. Sentry already has an embedded mode (`EmbeddedSentryOps` wrapping `SentryEngine<EmbeddedStore>`). Extend this pattern to all three engines, and make it work with **both** store backends — `EmbeddedStore` (single-instance) and `RemoteStore` (managed multi-instance). All three engine crates are generic over `S: Store`, so the same engine code works in either mode: embedded store uses local WAL with namespaced prefixes, remote store uses the shared ShroudB instance. This eliminates external engine processes and Moat from the deployment. Simultaneously upgrade Chronicle from v1.0 to v1.5.0 (first-class `tenant_id`, query API, `Engine::Custom("herald")`, diff tracking, per-tenant hash chains). Managed deployment: Sigil handles user auth (standalone), Herald runs Sentry/Courier/Chronicle in-process against the shared remote store, all instances see the same engine state.
 
   **Phase 1 — Generalize engine init over Store backend**
-  - [ ] Refactor `EmbeddedSentryOps` → generic `InProcessSentryOps<S: Store>` that accepts any Store impl
-  - [ ] `main.rs` — create engine store from current backend: `EmbeddedStore::new(engine, "sentry")` in embedded mode, `RemoteStore` with `"sentry"` prefix in remote mode
-  - [ ] Integration test: Sentry authorization works in both embedded and remote store modes
+  - [x] Refactor `EmbeddedSentryOps` → generic `InProcessSentryOps<S: Store>` that accepts any Store impl
+  - [x] `main.rs` — create engine store from current backend: `EmbeddedStore::new(engine, "sentry")` in embedded mode, `RemoteStore` with `"sentry"` prefix in remote mode
+  - [x] Integration test: Sentry authorization works in both embedded and remote store modes
 
   **Phase 2 — In-process Courier engine**
-  - [ ] Add `shroudb-courier-engine` dependency to Cargo.toml
-  - [ ] `integrations/in_process_courier.rs` — `InProcessCourierOps<S: Store>` wrapping `CourierEngine<S>`, implements `CourierOps`
-  - [ ] `main.rs` — initialize in-process Courier from current store backend, fall back to remote TCP if `courier_addr` configured
-  - [ ] Courier delivery dedup for multi-instance: claim-based pattern via atomic store op before delivering (prevents N instances sending the same notification)
-  - [ ] Integration test: offline notification delivery via in-process Courier
-  - [ ] Integration test (clustered): notification delivered exactly once across two instances
+  - [x] Add `shroudb-courier-engine` dependency to Cargo.toml
+  - [x] `integrations/in_process_courier.rs` — `InProcessCourierOps<S: Store>` wrapping `CourierEngine<S>`, implements `CourierOps`
+  - [x] `main.rs` — initialize in-process Courier from current store backend, fall back to remote TCP if `courier_addr` configured
+  - [x] Courier delivery dedup for multi-instance: claim-based pattern via atomic store op before delivering (prevents N instances sending the same notification)
+  - [x] Integration test: offline notification delivery via in-process Courier
+  - [x] Integration test (clustered): notification delivered exactly once across two instances
 
-  **Phase 3 — In-process Chronicle engine + upgrade to v1.3**
-  - [ ] Upgrade `shroudb-chronicle-client` and `shroudb-chronicle-core` to v1.3 in Cargo.toml
-  - [ ] Add `shroudb-chronicle-engine` v1.3 dependency to Cargo.toml
-  - [ ] `integrations/in_process_chronicle.rs` — `InProcessChronicleOps<S: Store>` wrapping `ChronicleEngine<S>`, implements `ChronicleOps`
-  - [ ] `main.rs` — initialize in-process Chronicle from current store backend, fall back to remote TCP if `chronicle_addr` configured
-  - [ ] Update `AuditEvent` → Chronicle v1.3 `Event` with first-class `tenant_id`, `resource_type`/`resource_id` (split), `Engine::Custom("herald")`, `diff: Option<Value>`
-  - [ ] Update `ChronicleOps` trait to expose query methods: `query()`, `count()`
-  - [ ] Migrate existing audit call sites (WS `event.publish`, HTTP `stream.create`) to v1.3 event format
-  - [ ] Integration test: ingest audit event, query back by tenant, verify tenant isolation
-  - [ ] Integration test (clustered): audit event written on instance A, queryable from instance B
+  **Phase 3 — In-process Chronicle engine + upgrade to v1.5**
+  - [x] Upgrade `shroudb-chronicle-client` and `shroudb-chronicle-core` to v1.5 in Cargo.toml
+  - [x] Add `shroudb-chronicle-engine` v1.5 dependency to Cargo.toml
+  - [x] `integrations/in_process_chronicle.rs` — `InProcessChronicleOps<S: Store>` wrapping `ChronicleEngine<S>`, implements `ChronicleOps`
+  - [x] `main.rs` — initialize in-process Chronicle from current store backend, fall back to remote TCP if `chronicle_addr` configured
+  - [x] Update `AuditEvent` → Chronicle v1.5 `Event` with first-class `tenant_id`, `resource_type`/`resource_id` (split), `Engine::Custom("herald")`, `diff: Option<Value>`
+  - [x] Update `ChronicleOps` trait to expose query methods: `query()`, `count()`
+  - [x] Migrate existing audit call sites (WS `event.publish`, HTTP `stream.create`) to v1.5 event format
+  - [x] Integration test: ingest audit event, query back by tenant, verify tenant isolation
+  - [x] Integration test (clustered): audit event written on instance A, queryable from instance B
 
   **Phase 4 — Audit query API + coverage expansion**
-  - [ ] Add `GET /admin/tenants/{id}/audit` endpoint with filters (resource_type, resource_id, actor, action, time range, pagination) backed by Chronicle v1.3 query API
-  - [ ] Add `GET /admin/tenants/{id}/audit/count` endpoint
-  - [ ] Add audit entries for missing operations: stream delete, member add/remove, tenant CRUD, token create/revoke, webhook config changes, block/unblock, reaction add/remove
-  - [ ] Integration test: publish event, query audit log, verify entry with correct tenant/actor/resource
-  - [ ] Integration test: tenant A cannot query tenant B's audit entries
-  - [ ] Integration test: filter by resource_type, actor, action, time range
-  - [ ] Integration test: audit log captures all admin operations (stream CRUD, member changes, token management)
+  - [x] Add `GET /admin/tenants/{id}/audit` endpoint with filters (resource_type, resource_id, actor, action, time range, pagination) backed by Chronicle v1.5 query API
+  - [x] Add `GET /admin/tenants/{id}/audit/count` endpoint
+  - [x] Add audit entries for missing operations: stream delete, member add/remove, tenant CRUD, token create/revoke, block/unblock, reaction add/remove
+  - [x] Integration test: publish event, query audit log, verify entry with correct tenant/actor/resource
+  - [x] Integration test: tenant A cannot query tenant B's audit entries
+  - [x] Integration test: filter by resource_type, actor, action, time range
+  - [x] Integration test: audit log captures all admin operations (stream CRUD, member changes, token management)
 
   **Phase 5 — Admin SDK support**
-  - [ ] `audit.query()` / `audit.count()` in TypeScript admin SDK
-  - [ ] `audit.query()` / `audit.count()` in Go admin SDK
-  - [ ] `audit.query()` / `audit.count()` in Python admin SDK
-  - [ ] `audit.query()` / `audit.count()` in Ruby admin SDK
+  - [x] `audit.query()` / `audit.count()` in TypeScript admin SDK
+  - [x] `audit.query()` / `audit.count()` in Go admin SDK
+  - [x] `audit.query()` / `audit.count()` in Python admin SDK
+  - [x] `audit.query()` / `audit.count()` in Ruby admin SDK
 
   **Cleanup**
-  - [ ] Remove `moat_addr` config field (no longer needed — engines are in-process or addressed individually)
-  - [ ] Remove remote TCP client crates (`shroudb-sentry-client`, `shroudb-courier-client`, `shroudb-chronicle-client`) if remote TCP override is dropped, or keep behind a feature flag
-  - [ ] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
-  - [ ] `cargo build --no-default-features` clean
-  - [ ] Live integration tests pass
+  - [x] Remove `moat_addr` config field (no longer needed — engines are in-process or addressed individually)
+  - [x] Remote TCP client crates kept as fallback overrides behind `[shroudb]` config section
+  - [x] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
+  - [x] `cargo build --no-default-features` clean
+  - [x] Live integration tests pass
 
 - [x] **N-2: At-least-once delivery** `session:at-least-once`
   Opt-in ack mode for at-least-once delivery. Per-stream seq high-water-mark acks, cursor-based reconnect catchup.
@@ -267,4 +267,14 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] PHP admin SDK (zero-dependency, curl-based)
   - [ ] C#/.NET admin SDK (HttpClient-based)
   - [ ] Integration test per SDK: full tenant API coverage
+
+---
+
+## UPSTREAM — ShroudB crate issues
+
+- [x] **U-1: `shroudb-sentry-engine` v1.4.10 incompatible with `shroudb-chronicle-core` v1.5.0**
+  Fixed in v1.4.11.
+
+- [x] **U-2: `shroudb-sentry-engine` v1.4.11 references `Policy.version` not yet published**
+  Fixed — `shroudb-sentry-core` v1.4.11 published with `Policy.version` field.
 

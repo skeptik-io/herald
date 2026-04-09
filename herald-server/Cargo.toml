@@ -45,13 +45,16 @@ base64 = "0.22"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls-pemfile = "2"
 
-shroudb-sentry-client = { version = "1", registry = "shroudb" }
-shroudb-sentry-engine = { version = "1", registry = "shroudb" }
-shroudb-acl = { version = "0.1", registry = "shroudb" }
-shroudb-courier-client = { version = "1", registry = "shroudb" }
+shroudb-sentry-client = { version = "1.4.11", registry = "shroudb" }
+shroudb-sentry-engine = { version = "1.4.11", registry = "shroudb" }
+shroudb-acl = { version = "0.2", registry = "shroudb" }
+shroudb-courier-client = { version = "1.4.5", registry = "shroudb" }
+shroudb-courier-core = { version = "1.4.5", registry = "shroudb" }
+shroudb-courier-engine = { version = "1.4.5", registry = "shroudb" }
 shroudb-keep-client = { version = "1", registry = "shroudb" }
-shroudb-chronicle-client = { version = "1", registry = "shroudb" }
-shroudb-chronicle-core = { version = "1", registry = "shroudb" }
+shroudb-chronicle-client = { version = "1.5", registry = "shroudb" }
+shroudb-chronicle-core = { version = "1.5", registry = "shroudb" }
+shroudb-chronicle-engine = { version = "1.5", registry = "shroudb" }
 
 [features]
 default = ["chat"]

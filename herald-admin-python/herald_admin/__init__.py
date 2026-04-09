@@ -1,12 +1,14 @@
 from .client import HeraldAdmin, HeraldAdminOptions
 from .errors import HeraldError
 from .types import (
+    AuditEvent, AuditQueryResult,
     Stream, Member, Event, EventList, EventPublishResult,
     UserPresence, MemberPresenceEntry, Cursor, HealthResponse,
 )
 
 __all__ = [
     "HeraldAdmin", "HeraldAdminOptions", "HeraldError",
+    "AuditEvent", "AuditQueryResult",
     "Stream", "Member", "Event", "EventList", "EventPublishResult",
     "UserPresence", "MemberPresenceEntry", "Cursor", "HealthResponse",
 ]

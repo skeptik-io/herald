@@ -1585,6 +1585,102 @@ retries = 1
       assert(!aliceFound, "alice's event should be gone after purge");
     });
 
+    // ── Audit query tests ──────────────────────────────────────
+
+    await test("mt: audit query returns events for tenant operations", async () => {
+      // Create a tenant that will generate audit events
+      await mtAdmin.tenants.create({
+        id: "audit-corp",
+        name: "Audit Corp",
+        jwt_secret: "audit-secret-1234",
+      });
+      const tokenResult = await mtAdmin.tenants.createToken("audit-corp");
+
+      // Perform some operations to generate audit events
+      const auditAdmin = new HeraldAdmin({
+        url: `http://127.0.0.1:${HTTP_PORT2}`,
+        token: tokenResult.token,
+      });
+      await auditAdmin.streams.create("audit-stream", "Audit Stream");
+      await auditAdmin.members.add("audit-stream", "alice");
+
+      // Small delay for async audit ingestion
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Query audit log for this tenant
+      const resp = await fetch(
+        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit`,
+        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+      );
+      assert(resp.ok, `audit query should succeed, got ${resp.status}`);
+      const body = (await resp.json()) as any;
+      assert(Array.isArray(body.events), "response should have events array");
+      assert(body.matched > 0, `should have matched audit events, got ${body.matched}`);
+
+      // Verify events have the expected structure
+      const first = body.events[0];
+      assert(first.id, "audit event should have id");
+      assert(first.timestamp > 0, "audit event should have timestamp");
+      assert(first.operation, "audit event should have operation");
+      assert(first.actor, "audit event should have actor");
+    });
+
+    await test("mt: audit count returns count for tenant", async () => {
+      const resp = await fetch(
+        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit/count`,
+        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+      );
+      assert(resp.ok, `audit count should succeed, got ${resp.status}`);
+      const body = (await resp.json()) as any;
+      assert(typeof body.count === "number", "count should be a number");
+      assert(body.count > 0, `count should be > 0, got ${body.count}`);
+    });
+
+    await test("mt: audit query with operation filter", async () => {
+      const resp = await fetch(
+        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit?operation=stream.create`,
+        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+      );
+      assert(resp.ok, `filtered audit query should succeed, got ${resp.status}`);
+      const body = (await resp.json()) as any;
+      assert(body.matched > 0, "should have stream.create events");
+      for (const e of body.events) {
+        assert(
+          e.operation.toLowerCase() === "stream.create",
+          `expected stream.create, got ${e.operation}`,
+        );
+      }
+    });
+
+    await test("mt: audit query tenant isolation", async () => {
+      // Query audit for a different tenant — should return no audit-corp events
+      const resp = await fetch(
+        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/test-corp/audit`,
+        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+      );
+      assert(resp.ok, `cross-tenant audit query should succeed, got ${resp.status}`);
+      const body = (await resp.json()) as any;
+      // Should not contain audit-corp events
+      const hasCrossLeak = body.events.some(
+        (e: any) => e.tenant_id === "audit-corp",
+      );
+      assert(!hasCrossLeak, "tenant A audit should not contain tenant B events");
+    });
+
+    await test("mt: audit captures all admin operations", async () => {
+      const resp = await fetch(
+        `http://127.0.0.1:${HTTP_PORT2}/admin/tenants/audit-corp/audit?limit=100`,
+        { headers: { Authorization: `Bearer ${SUPER_ADMIN_TOKEN}` } },
+      );
+      assert(resp.ok, `audit query should succeed`);
+      const body = (await resp.json()) as any;
+      const ops = new Set(body.events.map((e: any) => e.operation));
+
+      // Should have captured stream.create and member.add from earlier operations
+      assert(ops.has("stream.create"), "should have stream.create audit entry");
+      assert(ops.has("member.add"), "should have member.add audit entry");
+    });
+
   } finally {
     console.log("\nStopping multi-tenant server...");
     await stopMultiTenantServer();

@@ -1,4 +1,5 @@
 import { HttpTransport } from "./transport.js";
+import { AuditNamespace } from "./namespaces/audit.js";
 import { MemberNamespace } from "./namespaces/members.js";
 import { EventNamespace } from "./namespaces/messages.js";
 import { PresenceNamespace } from "./namespaces/presence.js";
@@ -12,6 +13,8 @@ export interface HeraldAdminOptions {
   url: string;
   /** API bearer token (must match auth.api.tokens in herald.toml) */
   token: string;
+  /** Tenant ID for tenant-scoped namespaces (audit). */
+  tenantId?: string;
 }
 
 export interface AdminEventListOptions {
@@ -35,6 +38,7 @@ export class HeraldAdmin {
   public readonly members: MemberNamespace;
   public readonly events: EventNamespace;
   public readonly tenants: TenantNamespace;
+  public readonly audit: AuditNamespace | undefined;
 
   // --- Chat namespaces (conversational layer) ---
 
@@ -63,6 +67,9 @@ export class HeraldAdmin {
     this.tenants = new TenantNamespace(this.transport);
     this.blocks = new BlockNamespace(this.transport);
     this.chat = { presence: this.presence, blocks: this.blocks };
+    this.audit = options.tenantId
+      ? new AuditNamespace(this.transport, options.tenantId)
+      : undefined;
   }
 
   async health(): Promise<HealthResponse> {

@@ -99,7 +99,14 @@ pub async fn create_stream(
         .streams
         .create_stream(tid, stream.id.as_str(), 0, stream.public);
 
-    state.audit(tid, "stream.create", stream.id.as_str(), "api", "success");
+    state.audit(
+        tid,
+        "stream.create",
+        "stream",
+        stream.id.as_str(),
+        "api",
+        "success",
+    );
 
     (StatusCode::CREATED, Json(stream)).into_response()
 }
@@ -170,6 +177,7 @@ pub async fn update_stream(
             if let Some(archived) = req.archived {
                 state.streams.set_archived(&tenant.0, &id, archived);
             }
+            state.audit(&tenant.0, "stream.update", "stream", &id, "api", "success");
             StatusCode::OK.into_response()
         }
         Ok(false) => (
@@ -201,6 +209,7 @@ pub async fn delete_stream(
             };
             crate::ws::fanout::fanout_to_stream(&state, tid, &id, &msg, None, None).await;
             state.streams.remove_stream(tid, &id);
+            state.audit(tid, "stream.delete", "stream", &id, "api", "success");
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (

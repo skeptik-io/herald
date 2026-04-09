@@ -92,6 +92,7 @@ impl BenchServer {
             sentry: None,
             courier: None,
             chronicle: None,
+            instance_id: uuid::Uuid::new_v4().to_string(),
         });
 
         state.bootstrap_single_tenant().await.unwrap();

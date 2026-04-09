@@ -28,7 +28,17 @@ pub async fn block_user(
         return (*e).into_response();
     }
     match crate::chat::store_blocks::block(&*state.db, tid, &req.user_id, &req.blocked_id).await {
-        Ok(()) => StatusCode::CREATED.into_response(),
+        Ok(()) => {
+            state.audit(
+                tid,
+                "user.block",
+                "user",
+                &req.blocked_id,
+                &req.user_id,
+                "success",
+            );
+            StatusCode::CREATED.into_response()
+        }
         Err(e) => {
             tracing::error!(tenant = tid, "block failed: {e}");
             (
@@ -53,7 +63,17 @@ pub async fn unblock_user(
         return (*e).into_response();
     }
     match crate::chat::store_blocks::unblock(&*state.db, tid, &req.user_id, &req.blocked_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            state.audit(
+                tid,
+                "user.unblock",
+                "user",
+                &req.blocked_id,
+                &req.user_id,
+                "success",
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "block not found"})),

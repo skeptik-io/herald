@@ -13,6 +13,8 @@ type Options struct {
 	URL string
 	// Token is the API bearer token.
 	Token string
+	// TenantID is the tenant ID used for tenant-scoped admin operations (e.g., audit).
+	TenantID string
 }
 
 // ChatNamespaces groups chat-specific (conversational layer) namespaces.
@@ -28,6 +30,7 @@ type HeraldAdmin struct {
 	Members *MemberNamespace
 	Events  *EventNamespace
 	Tenants *TenantNamespace
+	Audit   *AuditNamespace
 
 	// Deprecated: Use Chat.Presence instead.
 	Presence *PresenceNamespace
@@ -51,6 +54,7 @@ func New(opts Options) *HeraldAdmin {
 		Events:    &EventNamespace{t: t},
 		Presence:  presence,
 		Tenants:   &TenantNamespace{t: t},
+		Audit:     &AuditNamespace{t: t, tenantID: opts.TenantID},
 		Blocks:    blocks,
 		Chat:      &ChatNamespaces{Presence: presence, Blocks: blocks},
 		transport: t,
@@ -570,4 +574,107 @@ func (ns *BlockNamespace) List(ctx context.Context, userID string) ([]string, er
 		return nil, err
 	}
 	return resp.Blocked, nil
+}
+
+// AuditNamespace provides audit log query operations.
+type AuditNamespace struct {
+	t        *httpTransport
+	tenantID string
+}
+
+func (ns *AuditNamespace) basePath() string {
+	return "/admin/tenants/" + url.PathEscape(ns.tenantID) + "/audit"
+}
+
+func auditParams(opts *AuditQueryOptions) url.Values {
+	params := url.Values{}
+	if opts == nil {
+		return params
+	}
+	if opts.Operation != nil {
+		params.Set("operation", *opts.Operation)
+	}
+	if opts.ResourceType != nil {
+		params.Set("resource_type", *opts.ResourceType)
+	}
+	if opts.ResourceID != nil {
+		params.Set("resource_id", *opts.ResourceID)
+	}
+	if opts.Actor != nil {
+		params.Set("actor", *opts.Actor)
+	}
+	if opts.Result != nil {
+		params.Set("result", *opts.Result)
+	}
+	if opts.Since != nil {
+		params.Set("since", *opts.Since)
+	}
+	if opts.Until != nil {
+		params.Set("until", *opts.Until)
+	}
+	if opts.Limit != nil {
+		params.Set("limit", fmt.Sprint(*opts.Limit))
+	}
+	return params
+}
+
+// Query returns audit events matching the given filters.
+func (ns *AuditNamespace) Query(ctx context.Context, opts *AuditQueryOptions) (*AuditQueryResult, error) {
+	path := ns.basePath()
+	params := auditParams(opts)
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	data, err := ns.t.request(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var result AuditQueryResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// AuditCountOptions are optional filter parameters for audit count queries.
+// Same as AuditQueryOptions but without Limit.
+type AuditCountOptions struct {
+	Operation    *string
+	ResourceType *string
+	ResourceID   *string
+	Actor        *string
+	Result       *string
+	Since        *string
+	Until        *string
+}
+
+// Count returns the number of audit events matching the given filters.
+func (ns *AuditNamespace) Count(ctx context.Context, opts *AuditCountOptions) (int, error) {
+	path := ns.basePath() + "/count"
+	// Convert to AuditQueryOptions (without Limit) for shared param building.
+	var qopts *AuditQueryOptions
+	if opts != nil {
+		qopts = &AuditQueryOptions{
+			Operation:    opts.Operation,
+			ResourceType: opts.ResourceType,
+			ResourceID:   opts.ResourceID,
+			Actor:        opts.Actor,
+			Result:       opts.Result,
+			Since:        opts.Since,
+			Until:        opts.Until,
+		}
+	}
+	params := auditParams(qopts)
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	data, err := ns.t.request(ctx, "GET", path, nil)
+	if err != nil {
+		return 0, err
+	}
+	var result AuditCountResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, err
+	}
+	return result.Count, nil
 }

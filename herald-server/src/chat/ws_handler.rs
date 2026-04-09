@@ -396,6 +396,12 @@ pub async fn handle_reaction(
                     },
                 },
             };
+            let op = if add {
+                "reaction.add"
+            } else {
+                "reaction.remove"
+            };
+            state.audit(tid, op, "event", &stream, &ctx.user_id, "success");
             fanout_to_stream(state, tid, &stream, &msg, None, Some(&ctx.user_id)).await;
             if let Some(r) = ref_ {
                 let _ = tx.send(ServerMessage::Pong { ref_: Some(r) }).await;

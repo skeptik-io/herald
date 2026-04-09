@@ -1,19 +1,19 @@
-//! Embedded SentryOps — runs SentryEngine in-process, no TCP.
+//! In-process SentryOps — runs SentryEngine in-process against any Store backend.
 
 use std::sync::Arc;
 
 use shroudb_acl::{PolicyEffect, PolicyPrincipal, PolicyRequest, PolicyResource};
 use shroudb_sentry_engine::engine::{SentryConfig, SentryEngine};
-use shroudb_storage::EmbeddedStore;
+use shroudb_store::Store;
 
 use super::{SentryError, SentryOps};
 
-pub struct EmbeddedSentryOps {
-    engine: Arc<SentryEngine<EmbeddedStore>>,
+pub struct InProcessSentryOps<S: Store> {
+    engine: Arc<SentryEngine<S>>,
 }
 
-impl EmbeddedSentryOps {
-    pub async fn new(store: Arc<EmbeddedStore>) -> Result<Self, SentryError> {
+impl<S: Store> InProcessSentryOps<S> {
+    pub async fn new(store: Arc<S>) -> Result<Self, SentryError> {
         let config = SentryConfig::default();
         let engine = SentryEngine::new(store, config, None)
             .await
@@ -23,13 +23,13 @@ impl EmbeddedSentryOps {
         })
     }
 
-    pub fn engine(&self) -> &Arc<SentryEngine<EmbeddedStore>> {
+    pub fn engine(&self) -> &Arc<SentryEngine<S>> {
         &self.engine
     }
 }
 
 #[async_trait::async_trait]
-impl SentryOps for EmbeddedSentryOps {
+impl<S: Store> SentryOps for InProcessSentryOps<S> {
     async fn evaluate(
         &self,
         subject: &str,
@@ -52,7 +52,7 @@ impl SentryOps for EmbeddedSentryOps {
 
         // If no policies are defined, permit by default.
         // Herald's authorization is opt-in — define policies to restrict access.
-        match self.engine.evaluate_request(&request) {
+        match self.engine.evaluate_request(&request).await {
             Ok(signed) => match signed.decision {
                 PolicyEffect::Permit => Ok(()),
                 PolicyEffect::Deny => {

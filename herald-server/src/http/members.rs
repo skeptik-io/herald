@@ -88,6 +88,15 @@ pub async fn add_member(
         },
     );
 
+    state.audit(
+        tid,
+        "member.add",
+        "stream",
+        &member.stream_id,
+        "api",
+        "success",
+    );
+
     (StatusCode::CREATED, Json(member)).into_response()
 }
 
@@ -133,6 +142,8 @@ pub async fn remove_member(
                 },
             };
             fanout_to_stream(&state, tid, &stream_id, &msg, None, None).await;
+
+            state.audit(tid, "member.remove", "stream", &stream_id, "api", "success");
 
             state.fire_webhook(
                 tid,
@@ -186,7 +197,17 @@ pub async fn update_member(
     };
 
     match store::members::update_role(&*state.db, &tenant.0, &stream_id, &user_id, role).await {
-        Ok(true) => StatusCode::OK.into_response(),
+        Ok(true) => {
+            state.audit(
+                &tenant.0,
+                "member.update",
+                "stream",
+                &stream_id,
+                "api",
+                "success",
+            );
+            StatusCode::OK.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "member not found"})),

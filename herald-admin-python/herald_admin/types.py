@@ -72,3 +72,23 @@ class HealthResponse:
     connections: int = 0
     streams: int = 0
     uptime_secs: int = 0
+
+
+@dataclass(frozen=True)
+class AuditEvent:
+    id: str
+    timestamp: int
+    operation: str
+    resource_type: str
+    resource_id: str
+    actor: str
+    result: str
+    tenant_id: str
+    diff: Any = None
+    metadata: Any = None
+
+
+@dataclass(frozen=True)
+class AuditQueryResult:
+    events: list[AuditEvent] = field(default_factory=list)
+    matched: int = 0

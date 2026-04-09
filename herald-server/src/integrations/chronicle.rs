@@ -9,7 +9,7 @@ pub struct RemoteChronicleOps {
 
 impl RemoteChronicleOps {
     pub async fn connect(addr: &str, auth_token: Option<&str>) -> Result<Self, ChronicleError> {
-        let mut client = ChronicleClient::connect(addr)
+        let client = ChronicleClient::connect(addr)
             .await
             .map_err(|e| ChronicleError::Connection(format!("connect failed: {e}")))?;
 
@@ -32,7 +32,7 @@ impl RemoteChronicleOps {
     }
 
     async fn fresh_client(&self) -> Result<ChronicleClient, ChronicleError> {
-        let mut client = ChronicleClient::connect(&self.addr)
+        let client = ChronicleClient::connect(&self.addr)
             .await
             .map_err(|e| ChronicleError::Connection(e.to_string()))?;
         if let Some(ref token) = self.auth_token {
@@ -50,11 +50,12 @@ impl ChronicleOps for RemoteChronicleOps {
     async fn ingest(&self, event: AuditEvent) -> Result<(), ChronicleError> {
         use shroudb_chronicle_core::event::{Engine, Event, EventResult};
 
-        let mut client = self.fresh_client().await?;
+        let client = self.fresh_client().await?;
         let mut chronicle_event = Event::new(
-            Engine::ShrouDB, // Herald uses ShrouDB as the engine identifier
+            Engine::Custom("herald".to_string()),
             event.operation,
-            event.resource,
+            event.resource_type,
+            event.resource_id,
             if event.result == "success" {
                 EventResult::Ok
             } else {
@@ -62,6 +63,10 @@ impl ChronicleOps for RemoteChronicleOps {
             },
             event.actor,
         );
+        if let Some(tid) = event.tenant_id {
+            chronicle_event.tenant_id = Some(tid);
+        }
+        chronicle_event.diff = event.diff;
         chronicle_event.metadata = event.metadata;
 
         client

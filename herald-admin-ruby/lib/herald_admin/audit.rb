@@ -1,0 +1,54 @@
+# frozen_string_literal: true
+
+require "erb"
+
+module HeraldAdmin
+  class AuditNamespace
+    def initialize(transport, tenant_id)
+      @t = transport
+      @tenant_id = tenant_id
+    end
+
+    def query(operation: nil, resource_type: nil, resource_id: nil, actor: nil, result: nil, since: nil, until_time: nil, limit: nil)
+      params = build_params(
+        operation: operation, resource_type: resource_type, resource_id: resource_id,
+        actor: actor, result: result, since: since, until_time: until_time
+      )
+      params << "limit=#{limit}" if limit
+      path = base_path
+      path += "?#{params.join('&')}" unless params.empty?
+      data = @t.request("GET", path)
+      events = data["events"].map { |e| AuditEvent.new(**e.transform_keys(&:to_sym)) }
+      AuditQueryResult.new(events: events, matched: data["matched"])
+    end
+
+    def count(operation: nil, resource_type: nil, resource_id: nil, actor: nil, result: nil, since: nil, until_time: nil)
+      params = build_params(
+        operation: operation, resource_type: resource_type, resource_id: resource_id,
+        actor: actor, result: result, since: since, until_time: until_time
+      )
+      path = "#{base_path}/count"
+      path += "?#{params.join('&')}" unless params.empty?
+      data = @t.request("GET", path)
+      AuditCountResult.new(count: data["count"])
+    end
+
+    private
+
+    def base_path
+      "/admin/tenants/#{ERB::Util.url_encode(@tenant_id)}/audit"
+    end
+
+    def build_params(operation:, resource_type:, resource_id:, actor:, result:, since:, until_time:)
+      params = []
+      params << "operation=#{ERB::Util.url_encode(operation)}" if operation
+      params << "resource_type=#{ERB::Util.url_encode(resource_type)}" if resource_type
+      params << "resource_id=#{ERB::Util.url_encode(resource_id)}" if resource_id
+      params << "actor=#{ERB::Util.url_encode(actor)}" if actor
+      params << "result=#{ERB::Util.url_encode(result)}" if result
+      params << "since=#{ERB::Util.url_encode(since)}" if since
+      params << "until=#{ERB::Util.url_encode(until_time)}" if until_time
+      params
+    end
+  end
+end

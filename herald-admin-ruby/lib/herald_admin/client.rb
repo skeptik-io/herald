@@ -8,7 +8,7 @@ module HeraldAdmin
 
   class Client
     # Core namespaces (event transport)
-    attr_reader :streams, :members, :events, :tenants
+    attr_reader :streams, :members, :events, :tenants, :audit
 
     # @deprecated Use {#chat}.presence instead.
     attr_reader :presence
@@ -19,7 +19,7 @@ module HeraldAdmin
     # Groups presence and block operations that are part of the Herald Chat product.
     attr_reader :chat
 
-    def initialize(url:, token:)
+    def initialize(url:, token:, tenant_id: "default")
       transport = HttpTransport.new(url, token)
       @streams = StreamNamespace.new(transport)
       @members = MemberNamespace.new(transport)
@@ -27,6 +27,7 @@ module HeraldAdmin
       @presence = PresenceNamespace.new(transport)
       @tenants = TenantNamespace.new(transport)
       @blocks = BlockNamespace.new(transport)
+      @audit = AuditNamespace.new(transport, tenant_id)
       @chat = ChatNamespaces.new(presence: @presence, blocks: @blocks)
       @transport = transport
     end

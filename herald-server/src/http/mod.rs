@@ -138,6 +138,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/admin/tenants/{id}/streams",
             get(admin::list_tenant_streams),
         )
+        .route("/admin/tenants/{id}/audit", get(admin::query_audit))
+        .route("/admin/tenants/{id}/audit/count", get(admin::count_audit))
         .route("/admin/connections", get(admin::list_connections))
         .route("/admin/events", get(admin::list_events))
         .route("/admin/events/stream", get(admin::events_stream))

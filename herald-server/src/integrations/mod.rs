@@ -2,7 +2,9 @@ pub mod chronicle;
 pub mod circuit_breaker;
 pub mod courier;
 
-pub mod embedded_sentry;
+pub mod in_process_chronicle;
+pub mod in_process_courier;
+pub mod in_process_sentry;
 pub mod resilient;
 pub mod sentry;
 
@@ -149,9 +151,14 @@ impl std::error::Error for ChronicleError {}
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AuditEvent {
     pub operation: String,
-    pub resource: String,
+    pub resource_type: String,
+    pub resource_id: String,
     pub actor: String,
     pub result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -160,6 +167,66 @@ pub struct AuditEvent {
 pub trait ChronicleOps: Send + Sync {
     /// Ingest an audit event.
     async fn ingest(&self, event: AuditEvent) -> Result<(), ChronicleError>;
+
+    /// Query audit events matching a filter. Returns None if query is not supported
+    /// (e.g. remote TCP mode — only in-process engines support query).
+    async fn query(&self, filter: &AuditQuery) -> Option<AuditQueryResult> {
+        let _ = filter;
+        None
+    }
+
+    /// Count audit events matching a filter.
+    async fn count(&self, filter: &AuditQuery) -> Option<AuditCountResult> {
+        let _ = filter;
+        None
+    }
+}
+
+/// Query parameters for audit log filtering.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct AuditQuery {
+    /// Tenant ID — always set by the HTTP handler from the URL path.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub actor: Option<String>,
+    pub operation: Option<String>,
+    pub result: Option<String>,
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+    pub limit: Option<usize>,
+}
+
+/// Query result with matching audit events.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditQueryResult {
+    pub events: Vec<AuditEventView>,
+    pub matched: usize,
+}
+
+/// Count result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditCountResult {
+    pub count: usize,
+}
+
+/// A serializable view of an audit event for API responses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditEventView {
+    pub id: String,
+    pub timestamp: u64,
+    pub operation: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub actor: String,
+    pub result: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// Mock Chronicle that records events for test assertions.

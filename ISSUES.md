@@ -76,50 +76,60 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Test: ephemeral event trigger (received but not persisted)
   - [x] CI wiring: tests run in CI pipeline
 
+- [ ] **H-7: Extract metering and signup from Herald** `session:next`
+  Herald is a transport server. Billing (Meterd), signup (Sigil), and plan enforcement are infrastructure/gateway concerns that were incorrectly embedded in the application. Meterd already has an Envoy ExtProc (`skeptik/meterd/envoy-extproc`) that handles quota checks and usage tracking at the proxy layer. Sigil is a standalone auth service that should remain standalone.
+  - [ ] Remove `metering.rs` — ~644 LOC (MeteringClient, quota checks, circuit breaker, flush loop)
+  - [ ] Remove `signup.rs` — ~515 LOC (SigilHttpClient, signup/login/refresh handlers)
+  - [ ] Remove from `state.rs`: `metering`, `sigil`, `signup_rate_limits`, `plan_limits_cache` fields; `get_plan_limits()`, `get_plan_limits_cached()`, `event_ttl_ms()` methods
+  - [ ] Remove from `AppStateBuilder`: `metering`, `sigil` fields
+  - [ ] Remove from `main.rs`: Meterd client init, Sigil client init, metering flush task, peak connection tracking to Meterd
+  - [ ] Remove from `ws/handler.rs`: `metering.check_quota()` and `metering.track()` calls in `handle_publish`
+  - [ ] Remove from `http/events.rs`: `metering.check_quota()` and `metering.track()` calls in `inject_event`
+  - [ ] Remove from `http/streams.rs`: `get_plan_limits_cached()` call in stream creation
+  - [ ] Remove from `http/mod.rs`: signup routes (`/signup`, `/login`, `/auth/refresh`), `signup_rate_limit_middleware`, plan-limit-based rate limiting in tenant middleware
+  - [ ] Remove from `http/admin.rs`: `plan_limits_cache.remove()` in tenant delete
+  - [ ] Remove from `webhook.rs`: `metering.track("webhooks_sent", ...)` call
+  - [ ] Remove from `ws/connection.rs`: `get_plan_limits_cached()` for connection limit check — revert to config-only `tenant_limits.max_connections_per_tenant`
+  - [ ] Remove `MeteringConfig` and `PlanLimits` from `config.rs`
+  - [ ] Remove `lib.rs` module declarations for `metering` and `signup`
+  - [ ] Add `per_tenant_event_ttl_days: Option<u32>` to tenant config (stored in DB, set via admin API) — replaces Meterd-sourced retention
+  - [ ] `event_ttl_ms()` reads from tenant config field, falls back to global `store.event_ttl_days`
+  - [ ] Connection limits and rate limits remain config-driven (transport self-defense)
+  - [ ] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
+  - [ ] `cargo build --no-default-features` clean
+  - [ ] Live integration tests pass (remove signup/metering test cases)
+  - [ ] Update ARCHITECTURE.md / DOCS.md: document that metering is handled at proxy layer (Envoy + Meterd ExtProc), signup is a separate service (Sigil)
+
+---
+
+## Session Plan (remaining work)
+
+| Session | Items | Scope |
+|---------|-------|-------|
+| `extract-infra` | H-7 | Rip metering + signup out of Herald, revert to transport-only |
+| `e2ee-sdks` | M-3 | E2EE in Go, Python, Ruby + cross-SDK interop tests |
+| `moat-clients` | D-1 | shroudb crate updates for Moat prefix routing + integration tests |
+| `audit-log` | D-2 | Chronicle rip-out, skeptik-audit-log integration, new API endpoints, 4 admin SDKs |
+| `clustering` | L-1 | Pub/sub backplane for cross-instance fanout (storage already shared via remote store) |
+| `mobile-swift` | L-2 (Swift) | Swift WebSocket client SDK |
+| `mobile-kotlin` | L-2 (Kotlin) | Kotlin WebSocket client SDK |
+| `mobile-dart` | L-2 (Dart) | Dart/Flutter WebSocket client SDK |
+| `admin-sdks-2` | L-3 | PHP + .NET admin SDKs together |
+| `at-least-once` | L-4 | Fanout layer redesign for delivery guarantees |
+| `contract-tests` | L-6 | Define spec + wire all 4 existing SDKs |
+
 ---
 
 ## MEDIUM — Competitive differentiation & monetization readiness
 
-- [ ] **M-1: Per-plan limit enforcement**
-  Plan limits are defined in Meterd. When metering is enabled, Meterd is the sole authority. When disabled, global config applies uniformly.
-  - [x] Enforce connection limit per plan at WS auth (Meterd-cached or global config)
-  - [x] Enforce rate limit per plan at HTTP middleware (Meterd-cached or global config)
-  - [x] Enforce stream count per plan at stream creation (Meterd-cached or global config)
-  - [x] Meterd quota check at WS and HTTP publish (check_quota with circuit breaker, fail-open)
-  - [x] Plan limits cached per-tenant with 5-min TTL from Meterd quota snapshot
-  - [x] Block filtering enforced in event delivery (blocked user's messages not delivered)
-  - [ ] Integration test: plan-based limits with running Meterd (requires Rust SDK + Meterd instance)
-
-- [ ] **M-2: Billing/metering integration (Meterd)**
-  Wire per-tenant usage counters to Meterd for MAU tracking and Stripe billing.
-  - [x] Meterd client integration in Herald server (hand-rolled HTTP, pending Rust SDK)
-  - [x] Report `events_published` per tenant per billing period
-  - [x] Report `webhooks_sent` per tenant per billing period
-  - [x] Report peak concurrent connections per tenant (every 60s in stats loop)
-  - [x] Wire check_quota() to enforcement points (WS + HTTP publish)
-  - [x] Circuit breaker on Meterd remote calls (5 failures → open, 30s cooldown)
-  - [x] Events re-buffered on flush failure (not lost)
-  - [x] fetch_plan_limits validates all expected meters present, warns on missing
-  - [x] Overage handling: soft quota warnings before hard cutoff
-  - [ ] Integration test: usage events flow to Meterd (requires Rust SDK + Meterd instance)
-  - [ ] Replace hand-rolled HTTP client with Meterd Rust SDK
-
-- [x] **M-3: Catchup pagination**
+- [x] **M-1: Catchup pagination**
   200-event catchup cap with `has_more` but no follow-up mechanism. Clients can lose events.
   - [x] Add cursor-based pagination to reconnect catchup (WS `EventsFetch` with `after` cursor)
   - [x] Client SDK: automatic paginated catchup on reconnect until fully caught up
   - [x] Integration test: publish 250 events, paginate with fetch({after}), verify all received
   - [x] Integration test: verify ordering preserved across pages
 
-- [ ] **M-4: E2EE in non-TypeScript SDKs**
-  E2EE is browser-only. Expand to server-side SDKs.
-  - [ ] E2EE module for Go admin SDK (x25519 + AES-256-GCM)
-  - [ ] E2EE module for Python admin SDK
-  - [ ] E2EE module for Ruby admin SDK
-  - [ ] Integration test: encrypt in Go, decrypt in TypeScript (cross-SDK interop)
-  - [ ] Integration test: blind token search works across SDK implementations
-
-- [x] **M-5: OpenTelemetry / distributed tracing**
+- [x] **M-2: OpenTelemetry / distributed tracing**
   Replace `X-Request-Id` with proper trace propagation for enterprise observability.
   - [x] Add `tracing-opentelemetry` crate with OTLP exporter (opt-in `otel` feature)
   - [x] Propagate W3C `traceparent` header on HTTP requests
@@ -127,55 +137,65 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Integration test: verify traceparent present and propagated
   - [x] `/metrics` endpoint continues to work alongside OTLP export
 
-- [ ] **M-6: Per-tenant retention tiers**
-  TTL is global 7-day. Enable per-tenant configuration for premium pricing.
-  - [x] `retention_days` field in PlanLimits — read from Meterd, falls back to global config
-  - [x] Event insert uses per-tenant TTL via state.event_ttl_ms(tenant_id)
-  - [x] TTL cleanup job already respects per-event expiry timestamps (no changes needed)
-  - [x] Retention per tenant managed via Meterd plan configuration
-  - [ ] Integration test: tenant A (7d) events expire, tenant B (30d) events survive (requires Meterd)
-  - [ ] Integration test: changing retention applies to future expiry only (requires Meterd)
+- [x] **M-3: E2EE in non-TypeScript SDKs** `session:e2ee-sdks`
+  E2EE is browser-only. Expand to server-side SDKs.
+  - [x] E2EE module for Go admin SDK (x25519 + AES-256-GCM)
+  - [x] E2EE module for Python admin SDK
+  - [x] E2EE module for Ruby admin SDK
+  - [x] Integration test: encrypt in Go, decrypt in TypeScript (cross-SDK interop)
+  - [x] Integration test: blind token search works across SDK implementations
 
-- [x] **M-7: Self-serve tenant provisioning**
-  Tenant creation is admin-API-only. Enable product-led growth.
-  - [x] POST /signup — Sigil user + Herald tenant + API token + JWT session
-  - [x] POST /login — email-based auth via Moat Sigil (Veil blind index + Argon2id)
-  - [x] POST /auth/refresh — Sigil session refresh with family-based rotation
-  - [x] SigilHttpClient talks to Moat HTTP API (/v1/sigil)
-  - [x] Auto-provision tenant with default "free" plan
-  - [x] Generate initial API token on signup
-  - [x] Integration test: signup → receive token → create stream → publish event (tested against live Moat)
-  - [x] Integration test: login, wrong password, refresh token rotation, duplicate email
-  - [x] Integration test: signup rate limiting (10 req/60s per IP, tested with 15 rapid requests)
+- [ ] **M-4: Per-tenant retention tiers**
+  TTL is global 7-day. Enable per-tenant configuration for tiered pricing.
+  - [x] Event insert uses per-tenant TTL via `state.event_ttl_ms(tenant_id)`
+  - [x] TTL cleanup job already respects per-event expiry timestamps
+  - [ ] Add `event_ttl_days` field to tenant record (stored in DB, set via admin API) — replaces Meterd-sourced retention after H-7
+  - [ ] Admin API: `PATCH /admin/tenants/{id}` accepts `event_ttl_days`
+  - [ ] Integration test: tenant A (7d) events expire, tenant B (30d) events survive
+  - [ ] Admin SDK support in all 4 SDKs
 
 ---
 
 ## DEFERRED — Blocked on external changes
 
-- [ ] **D-1: Sentry/Courier/Chronicle integration tests against Moat**
-  Herald's TCP clients (SentryClient, CourierClient, ChronicleClient) send raw engine commands. Moat's RESP3 port expects engine-prefixed commands (e.g., `SENTRY EVALUATE ...`). TCP clients need updates in shroudb crates to support Moat prefix routing.
+- [ ] **D-1: Sentry/Courier integration tests against Moat** `session:moat-clients` *(blocked on shroudb crate changes)*
+  Herald's TCP clients (SentryClient, CourierClient) send raw engine commands. Moat's RESP3 port expects engine-prefixed commands (e.g., `SENTRY EVALUATE ...`). TCP clients need updates in shroudb crates to support Moat prefix routing.
   - [ ] Update shroudb-sentry-client to prefix commands for Moat compatibility
   - [ ] Update shroudb-courier-client to prefix commands for Moat compatibility
-  - [ ] Update shroudb-chronicle-client to prefix commands for Moat compatibility
   - [ ] Integration test: Sentry policy evaluation against Moat
   - [ ] Integration test: Courier notification delivery against Moat
-  - [ ] Integration test: Chronicle audit event storage against Moat
   - [ ] Herald `moat_addr` config resolves to individual engine addresses automatically
+
+- [ ] **D-2: Replace Chronicle with skeptik-audit-log** `session:audit-log` *(largest single item — trait swap, new endpoints, SDK support)*
+  Chronicle is the wrong audit backend for Herald. It stores events in an in-memory hash chain on a remote ShrouDB instance — no tenant isolation (tenant_id is stuffed in a metadata HashMap), no queryability from Herald, hardcoded `Engine::ShrouDB` enum that doesn't represent Herald, and requires a running ShrouDB/Moat instance for a feature nobody can read back. Replace with `skeptik-audit-log` which provides tenant-isolated Postgres-backed audit with typed actions, JSONB diffs, and indexed queries.
+  - [ ] Add `skeptik-audit-log` crate dependency (with `serde` + `postgres` features)
+  - [ ] Replace `ChronicleOps` trait with `AuditStore` trait integration in `AppState`
+  - [ ] Replace `AuditEvent` (flat strings) with `AuditEntry` (typed action, resource_type/resource_id, JSONB diff, actor, tenant_id as first-class field)
+  - [ ] Migrate existing audit call sites (`event.publish` in WS handler, `stream.create` in HTTP) to new audit entries
+  - [ ] Add audit entries for missing operations: stream delete, member add/remove, tenant CRUD, token create/revoke, webhook config changes, room archive/unarchive, message delete/redact, block/unblock, reaction add/remove
+  - [ ] Add admin API endpoints for querying audit log: `GET /admin/tenants/{id}/audit` with filters (resource_type, actor, action, time range, pagination)
+  - [ ] Remove `shroudb-chronicle-client` dependency, `integrations/chronicle.rs`, `ChronicleOps` trait, `MockChronicleOps`, and all Chronicle config (`chronicle_addr`, `chronicle_token`)
+  - [ ] Postgres connection config for audit store (optional — audit disabled when not configured)
+  - [ ] Integration test: publish event, query audit log, verify entry with correct tenant/actor/resource
+  - [ ] Integration test: tenant A cannot query tenant B's audit entries
+  - [ ] Integration test: filter by resource_type, actor, action, time range
+  - [ ] Integration test: audit log captures all admin operations (stream CRUD, member changes, token management)
+  - [ ] Admin SDK support: `audit.list()` / `audit.query()` in all 4 admin SDKs (TS, Go, Python, Ruby)
 
 ---
 
 ## LOW — Important but not blocking near-term goals
 
-- [ ] **L-1: Clustering / HA**
-  Single-node is a production liability. Requires fundamental rearchitecture.
-  - [ ] Design doc: state distribution strategy (sharding by tenant vs. shared-nothing with replication)
-  - [ ] Cluster membership discovery (DNS, gossip, or static config)
-  - [ ] Event replication across nodes
-  - [ ] Connection routing / rebalancing on node failure
-  - [ ] Integration test: kill node, verify clients reconnect to surviving node
-  - [ ] Integration test: events published on node A received by subscribers on node B
+- [ ] **L-1: Cross-instance fanout** `session:clustering`
+  Remote store mode (H-4) enables shared persistence across Herald instances. The remaining gap is in-memory fanout: a subscriber on instance A won't receive events published on instance B. Add a pub/sub backplane.
+  - [ ] Design doc: backplane options (Redis Pub/Sub, NATS, ShroudB subscriptions)
+  - [ ] Backplane integration in fanout layer (publish to backplane after local fanout)
+  - [ ] Backplane consumer delivers remote events to local subscribers
+  - [ ] Sequence counters move to shared store (currently AtomicU64 per-process)
+  - [ ] Integration test: publish on instance A, receive on instance B
+  - [ ] Integration test: instance A dies, subscribers reconnect to B, no event loss within TTL
 
-- [ ] **L-2: Mobile SDKs (Swift, Kotlin, Dart)**
+- [ ] **L-2: Mobile SDKs (Swift, Kotlin, Dart)** `session:one-per-sdk` *(3 sessions — one per language)*
   Blocks native mobile adoption.
   - [ ] Swift WebSocket client SDK with reconnect, presence, cursors
   - [ ] Kotlin WebSocket client SDK with reconnect, presence, cursors
@@ -183,13 +203,13 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [ ] E2EE support in each mobile SDK
   - [ ] Integration test per SDK: connect, publish, receive, reconnect catchup
 
-- [ ] **L-3: PHP / .NET admin SDKs**
+- [ ] **L-3: PHP / .NET admin SDKs** `session:together`
   Expands addressable market to Laravel/WordPress and enterprise .NET.
   - [ ] PHP admin SDK (zero-dependency, curl-based)
   - [ ] C#/.NET admin SDK (HttpClient-based)
   - [ ] Integration test per SDK: full tenant API coverage
 
-- [ ] **L-4: At-least-once delivery**
+- [ ] **L-4: At-least-once delivery** `session:own` *(fanout layer redesign)*
   Requires ack tracking, redelivery queues, per-subscriber state. Redesign of fanout layer.
   - [ ] Design doc: delivery guarantee upgrade path
   - [ ] Per-subscriber ack tracking (seq-based)
@@ -213,7 +233,7 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Integration test: send frame exceeding limit, verify rejection
   - [x] Integration test: send frame at limit, verify acceptance
 
-- [ ] **L-7: SDK contract tests**
+- [ ] **L-7: SDK contract tests** `session:together`
   No shared wire-protocol compliance tests. Risk of SDK drift.
   - [ ] Define contract test spec (JSON fixtures for each API endpoint + WS frame type)
   - [ ] TypeScript admin SDK passes contract tests

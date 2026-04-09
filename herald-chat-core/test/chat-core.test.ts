@@ -1044,6 +1044,43 @@ await test("leaveStream clears lastEphemeral", async () => {
   core.destroy();
 });
 
+await test("getLastEphemeral with eventType filters by type", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event.received", { stream: "s1", event: "custom.ping", sender: "alice", data: { x: 1 } });
+  client.emit("event.received", { stream: "s1", event: "custom.session", sender: "bob", data: { y: 2 } });
+
+  const ping = core.getLastEphemeral("s1", "custom.ping");
+  const session = core.getLastEphemeral("s1", "custom.session");
+  const latest = core.getLastEphemeral("s1");
+  const missing = core.getLastEphemeral("s1", "nonexistent");
+
+  assert(ping !== undefined, "ping found");
+  assert(ping!.sender === "alice", "ping sender");
+  assert(session !== undefined, "session found");
+  assert(session!.sender === "bob", "session sender");
+  assert(latest !== undefined, "latest found");
+  assert(latest!.event === "custom.session", "latest is most recent");
+  assert(missing === undefined, "nonexistent type returns undefined");
+  core.destroy();
+});
+
+await test("getLastEphemeral per-type: later event of same type overwrites", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event.received", { stream: "s1", event: "custom.ping", sender: "alice", data: { v: 1 } });
+  client.emit("event.received", { stream: "s1", event: "custom.ping", sender: "bob", data: { v: 2 } });
+
+  const ping = core.getLastEphemeral("s1", "custom.ping");
+  assert(ping!.sender === "bob", "latest ping from bob");
+  assert((ping!.data as { v: number }).v === 2, "latest data");
+  core.destroy();
+});
+
 // ── Middleware (N-5) ──────────────────────────────────────────────
 
 await test("middleware: passthrough (calling next) preserves normal behavior", async () => {

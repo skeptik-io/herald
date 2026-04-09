@@ -111,7 +111,7 @@ Unsubscribes a lightweight stream. Clears ephemeral state.
 | `getTotalUnreadCount()` | `number` — sum across all streams |
 | `getScrollState(streamId)` | `ScrollStateSnapshot` — `{atLiveEdge, pendingCount, isLoadingMore}` |
 | `getLivenessState()` | `"active" \| "idle" \| "hidden"` |
-| `getLastEphemeral(streamId)` | `EventReceived \| undefined` — last ephemeral event on this stream |
+| `getLastEphemeral(streamId, eventType?)` | `EventReceived \| undefined` — last ephemeral event on this stream, optionally filtered by event type |
 | `getRemoteCursors(streamId)` | `Map<string, number>` — remote user cursor positions (userId → seq) |
 
 All array-returning methods produce new references on mutation (required for `useSyncExternalStore`).
@@ -160,7 +160,7 @@ HeraldClient event → middleware chain → next() → store mutation → Notifi
 | `typing` | `handleTyping` | `typing.setTyping()` — skips own events, TTL 12s |
 | `member.joined` | `handleMemberJoined` | `members.addMember()` — idempotent, presence=online |
 | `member.left` | `handleMemberLeft` | `members.removeMember()` |
-| `event.received` | `handleEphemeral` | Stores in `lastEphemeral` map, emits `ephemeral:{streamId}` |
+| `event.received` | `handleEphemeral` | Stores per event type in `lastEphemeral` map, emits `ephemeral:{streamId}` |
 | `connected` | `handleConnected` | Documents that SDK re-subscribes automatically |
 | `disconnected` | `handleDisconnected` | `typing.clearAll()` + restart expiry timer |
 
@@ -311,7 +311,7 @@ All hooks use `useSyncExternalStore` subscribing to Notifier slices.
 | `useTotalUnreadCount()` | `unread:total` | `number` |
 | `useLiveness()` | `liveness` | `"active" \| "idle" \| "hidden"` |
 | `usePresence()` | `liveness` | `"online" \| "away"` (derived) |
-| `useEphemeral(streamId)` | `ephemeral:{streamId}` | `EventReceived \| undefined` |
+| `useEphemeral(streamId, eventType?)` | `ephemeral:{streamId}` | `EventReceived \| undefined` |
 
 ### Components (Headless, Render-Prop)
 

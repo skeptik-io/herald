@@ -31,7 +31,7 @@ export class ChatCore {
   private readTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private attached = false;
   private listenOnly = new Set<string>();
-  private lastEphemeral = new Map<string, EventReceived>();
+  private lastEphemeral = new Map<string, Map<string, EventReceived>>();
 
   // Track pending optimistic sends for retry/cancel
   private pendingSends = new Map<string, { streamId: string; body: string; meta?: unknown; parentId?: string }>();
@@ -295,8 +295,14 @@ export class ChatCore {
     return this.livenessState;
   }
 
-  getLastEphemeral(streamId: string): EventReceived | undefined {
-    return this.lastEphemeral.get(streamId);
+  getLastEphemeral(streamId: string, eventType?: string): EventReceived | undefined {
+    const byType = this.lastEphemeral.get(streamId);
+    if (!byType) return undefined;
+    if (eventType) return byType.get(eventType);
+    // No type filter — return the most recently stored (last entry in insertion-order Map)
+    let last: EventReceived | undefined;
+    for (const ev of byType.values()) last = ev;
+    return last;
   }
 
   getRemoteCursors(streamId: string): Map<string, number> {
@@ -444,7 +450,12 @@ export class ChatCore {
 
   private handleEphemeral(event: EventReceived): void {
     this.runMiddleware({ type: "ephemeral", data: event }, () => {
-      this.lastEphemeral.set(event.stream, event);
+      let byType = this.lastEphemeral.get(event.stream);
+      if (!byType) {
+        byType = new Map();
+        this.lastEphemeral.set(event.stream, byType);
+      }
+      byType.set(event.event, event);
       this.notifier.notify(`ephemeral:${event.stream}`);
     });
   }

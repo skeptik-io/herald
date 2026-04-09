@@ -289,6 +289,8 @@ ChatCore's role during reconnection:
 
 **Idempotency:** All event handlers are idempotent. `appendEvent` returns false for duplicates. `applyEdit`, `applyDelete`, `applyReaction` operate on existing messages by ID — applying the same edit twice is harmless. Cursor MAX semantics prevent regression.
 
+**Presence on reconnect:** Presence is ephemeral state, not event-sourced — it is not included in cursor-based catchup. When the SDK re-subscribes after a reconnect, the server's `subscribed` payload includes the current member list with each member's current presence status. ChatCore's `joinStream` calls `members.setMembers()` with this payload, which overwrites the stale local state. For listen-only streams (`listen()`), member state is not tracked, so presence changes during disconnection are not visible. If the app needs authoritative presence after a gap, it should re-join the stream or query presence via the admin API.
+
 ---
 
 ## Cross-Stream Ordering
@@ -411,6 +413,8 @@ cancelSend(localId)
 
 **Race condition:** If `event` (from server broadcast) arrives before the publish ack, `appendEvent` inserts the server event. When `reconcile` runs, it finds the event ID already in `byId` and simply removes the optimistic duplicate.
 
+**E2EE:** Encryption and decryption are handled transparently at the Herald SDK transport layer, not in ChatCore. When `e2eeManager` is set on `HeraldClient`, `publish()` encrypts the body before sending and incoming `event` payloads are decrypted before the event handler fires. ChatCore's `handleEvent` always sees plaintext. `HeraldChatClient.editEvent()` also encrypts via the same path. ChatCore has no E2EE awareness — it operates on plaintext bodies throughout.
+
 `send()` returns `PendingMessage`:
 ```typescript
 interface PendingMessage {
@@ -453,14 +457,21 @@ interface Message {
   stream: string;
   sender: string;
   body: string;
-  meta?: unknown;
-  parentId?: string;
+  meta?: unknown;              // app-specific payload (see note below)
+  parentId?: string;           // threading parent (see note below)
   sentAt: number;
   editedAt?: number;
   deleted: boolean;
   status: MessageStatus;
   reactions: Map<string, Set<string>>;   // emoji → set of userIds
 }
+```
+
+**`meta?: unknown`** — Opaque app-specific payload. Herald stores and delivers it as-is (Herald is a transport layer — event body and meta are opaque). Consumers use this for attachments, embeds, structured content, link previews, or any domain-specific data. Typed as `unknown` because ChatCore imposes no schema — consumers cast to their app's shape. If you want type safety across your app, define your own `MyMeta` interface and cast at the boundary (`msg.meta as MyMeta`).
+
+**`parentId?: string`** — Threading parent event ID. Passed through to the server on `publish()` and stored on the message, but ChatCore provides no threading behavior: no "get replies to X" query, no threaded message grouping, no reply-count aggregation. It is a data field for consumers to build threading on top of — filter `getMessages()` by `parentId`, group in the UI, etc. ChatCore treats it as opaque metadata.
+
+```typescript
 
 interface PendingMessage {          // Returned by send()
   localId: string;

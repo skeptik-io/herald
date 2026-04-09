@@ -502,18 +502,16 @@ async function run(): Promise<void> {
       // Bob blocks alice — bob should not receive alice's events
       await tenantAdmin.chat.blocks.block("bob", "alice");
 
+      // Set up listener BEFORE publishing to avoid race
+      let bobReceivedBlocked = false;
+      bob.on("event", (() => {
+        bobReceivedBlocked = true;
+      }) as any);
+
       // Alice publishes — bob should NOT receive it
       await alice.publish("general", "bob should not see this");
-      let bobReceivedBlocked = false;
-      const blockedTimeout = new Promise<void>((resolve) => {
-        const timer = setTimeout(() => resolve(), 500);
-        bob.on("event", (() => {
-          bobReceivedBlocked = true;
-          clearTimeout(timer);
-          resolve();
-        }) as any);
-      });
-      await blockedTimeout;
+      // Wait long enough for fanout to complete (if it were going to)
+      await new Promise((r) => setTimeout(r, 1000));
       assert(!bobReceivedBlocked, "bob should NOT receive event while blocked");
 
       // Unblock alice

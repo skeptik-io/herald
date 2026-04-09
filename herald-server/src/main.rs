@@ -245,6 +245,20 @@ async fn main() -> anyhow::Result<()> {
             state.streams.set_archived(tid, stream.id.as_str(), true);
         }
 
+        // In clustered mode, advance the store-backed sequence counter
+        // to match existing events (one-time migration per stream).
+        if state.config.cluster.enabled && latest_seq > 0 {
+            if let Err(e) =
+                store::sequences::advance_to(&*state.db, tid, stream.id.as_str(), latest_seq).await
+            {
+                warn!(
+                    tenant = tid,
+                    stream = stream.id.as_str(),
+                    "failed to advance sequence counter: {e}"
+                );
+            }
+        }
+
         if let Ok(members) =
             store::members::list_by_stream(&*state.db, tid, stream.id.as_str()).await
         {
@@ -294,6 +308,17 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    // Backplane: cross-instance fanout via ShroudB subscriptions
+    let backplane_handle = if state.config.cluster.enabled {
+        info!(
+            instance_id = %state.instance_id,
+            "cluster mode enabled — starting backplane consumer"
+        );
+        Some(herald_server::backplane::spawn(state.clone()))
+    } else {
+        None
+    };
 
     // Typing TTL expiry — every 5 seconds (chat feature only)
     #[cfg(feature = "chat")]
@@ -408,6 +433,9 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        if let Some(ref h) = backplane_handle {
+            h.abort();
+        }
         #[cfg(feature = "chat")]
         typing_handle.abort();
 
@@ -457,6 +485,9 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         cleanup_handle.abort();
         stats_handle.abort();
+        if let Some(ref h) = backplane_handle {
+            h.abort();
+        }
         #[cfg(feature = "chat")]
         typing_handle.abort();
 

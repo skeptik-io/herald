@@ -22,6 +22,8 @@ pub struct HeraldConfig {
     pub tenant_limits: TenantLimitsConfig,
     #[serde(default)]
     pub cors: Option<CorsConfig>,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +187,17 @@ pub struct TlsConfig {
     pub key_path: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ClusterConfig {
+    /// Enable cross-instance fanout via ShroudB store subscriptions.
+    /// Requires `store.mode = "remote"`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Unique identifier for this instance. Auto-generated UUID if omitted.
+    #[serde(default)]
+    pub instance_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct CorsConfig {
@@ -289,6 +302,13 @@ impl HeraldConfig {
             if !std::path::Path::new(&tls.key_path).exists() {
                 anyhow::bail!("tls.key_path '{}' does not exist", tls.key_path);
             }
+        }
+
+        // Cluster config
+        if self.cluster.enabled && self.store.mode != "remote" {
+            anyhow::bail!(
+                "cluster.enabled requires store.mode = \"remote\" (shared storage for cross-instance coordination)"
+            );
         }
 
         // Webhook config
@@ -409,6 +429,12 @@ impl HeraldConfig {
             cors: env("HERALD_CORS_ORIGINS").map(|origins| CorsConfig {
                 allowed_origins: origins.split(',').map(|s| s.trim().to_string()).collect(),
             }),
+            cluster: ClusterConfig {
+                enabled: env("HERALD_CLUSTER_ENABLED")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false),
+                instance_id: env("HERALD_CLUSTER_INSTANCE_ID"),
+            },
         })
     }
 

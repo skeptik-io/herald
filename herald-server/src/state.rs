@@ -144,6 +144,11 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     webhook_config: Option<Arc<WebhookConfig>>,
     webhook_client: reqwest::Client,
+    /// Unique identifier for this instance (used for cluster dedup).
+    pub instance_id: String,
+    /// Set of recently-written event keys (primary keys in NS_EVENTS).
+    /// Used by the backplane consumer to skip locally-originated events.
+    pub local_writes: dashmap::DashSet<Vec<u8>>,
 }
 
 pub struct AppStateBuilder {
@@ -165,6 +170,13 @@ impl AppState {
             })
         });
 
+        let instance_id = b
+            .config
+            .cluster
+            .instance_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         Arc::new(Self {
             config: b.config,
             db: b.db,
@@ -183,6 +195,8 @@ impl AppState {
             event_bus: EventBus::new(),
             webhook_config,
             webhook_client: reqwest::Client::new(),
+            instance_id,
+            local_writes: dashmap::DashSet::new(),
         })
     }
 
@@ -312,6 +326,37 @@ impl AppState {
             .and_then(|tc| tc.event_ttl_days)
             .unwrap_or(self.config.store.event_ttl_days);
         days as i64 * 24 * 60 * 60 * 1000
+    }
+
+    /// Allocate the next sequence number for a stream.
+    /// In clustered mode, uses the shared store for coordination.
+    /// In non-clustered mode, uses the per-process AtomicU64.
+    pub async fn allocate_seq(
+        &self,
+        tenant_id: &str,
+        stream_id: &str,
+    ) -> Result<u64, anyhow::Error> {
+        if self.config.cluster.enabled {
+            store::sequences::allocate(&*self.db, tenant_id, stream_id).await
+        } else {
+            Ok(self.streams.next_seq(tenant_id, stream_id))
+        }
+    }
+
+    /// Record a locally-written event key for backplane dedup.
+    pub fn record_local_write(&self, key: Vec<u8>) {
+        // Bounded: if the set grows too large, clear it (ring buffer semantics).
+        // In practice this set is consumed quickly by the backplane consumer.
+        if self.local_writes.len() > 100_000 {
+            self.local_writes.clear();
+        }
+        self.local_writes.insert(key);
+    }
+
+    /// Check and remove a key from the local writes set.
+    /// Returns true if the key was locally originated.
+    pub fn consume_local_write(&self, key: &[u8]) -> bool {
+        self.local_writes.remove(key).is_some()
     }
 
     pub fn increment_tenant_events(&self, tenant_id: &str) {

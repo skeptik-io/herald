@@ -76,7 +76,17 @@ pub async fn inject_event(
     }
 
     // See ws/handler.rs handle_publish for why seq gaps on storage failure are accepted.
-    let seq = state.streams.next_seq(tid, &stream_id);
+    let seq = match state.allocate_seq(tid, &stream_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(tenant = tid, stream = %stream_id, "failed to allocate sequence: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response();
+        }
+    };
     let now = now_millis();
     let event_id = uuid::Uuid::new_v4().to_string();
 
@@ -91,6 +101,14 @@ pub async fn inject_event(
         edited_at: None,
         sent_at: now,
     };
+
+    // Record in local writes set BEFORE store write — the store subscription
+    // fires synchronously during the write, so the backplane consumer on this
+    // instance must see the key in the set before it processes the event.
+    if state.config.cluster.enabled {
+        let event_key = format!("{tid}/{stream_id}/{seq:020}").into_bytes();
+        state.record_local_write(event_key);
+    }
 
     let ttl = state.event_ttl_ms(tid);
     if let Err(e) = store::events::insert(&*state.db, tid, &event, now + ttl).await {

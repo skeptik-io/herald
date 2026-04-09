@@ -83,6 +83,7 @@ impl BenchServer {
             tls: None,
             tenant_limits: Default::default(),
             cors: None,
+            cluster: ClusterConfig::default(),
         };
 
         let state = AppState::build(AppStateBuilder {

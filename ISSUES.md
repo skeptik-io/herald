@@ -110,7 +110,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | `e2ee-sdks` | M-3 | E2EE in Go, Python, Ruby + cross-SDK interop tests |
 | `moat-clients` | D-1 | shroudb crate updates for Moat prefix routing + integration tests |
 | `audit-log` | D-2 | Chronicle rip-out, skeptik-audit-log integration, new API endpoints, 4 admin SDKs |
-| `clustering` | L-1 | Pub/sub backplane for cross-instance fanout (storage already shared via remote store) |
+| ~~`clustering`~~ | ~~L-1~~ | ~~Pub/sub backplane for cross-instance fanout (storage already shared via remote store)~~ **(done)** |
 | `mobile-swift` | L-2 (Swift) | Swift WebSocket client SDK |
 | `mobile-kotlin` | L-2 (Kotlin) | Kotlin WebSocket client SDK |
 | `mobile-dart` | L-2 (Dart) | Dart/Flutter WebSocket client SDK |
@@ -186,14 +186,14 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ## LOW — Important but not blocking near-term goals
 
-- [ ] **L-1: Cross-instance fanout** `session:clustering`
+- [x] **L-1: Cross-instance fanout** `session:clustering`
   Remote store mode (H-4) enables shared persistence across Herald instances. The remaining gap is in-memory fanout: a subscriber on instance A won't receive events published on instance B. Add a pub/sub backplane.
-  - [ ] Design doc: backplane options (Redis Pub/Sub, NATS, ShroudB subscriptions)
-  - [ ] Backplane integration in fanout layer (publish to backplane after local fanout)
-  - [ ] Backplane consumer delivers remote events to local subscribers
-  - [ ] Sequence counters move to shared store (currently AtomicU64 per-process)
-  - [ ] Integration test: publish on instance A, receive on instance B
-  - [ ] Integration test: instance A dies, subscribers reconnect to B, no event loss within TTL
+  - [x] Design doc: backplane options (Redis Pub/Sub, NATS, ShroudB subscriptions)
+  - [x] Backplane integration in fanout layer (publish to backplane after local fanout)
+  - [x] Backplane consumer delivers remote events to local subscribers
+  - [x] Sequence counters move to shared store (currently AtomicU64 per-process)
+  - [x] Integration test: publish on instance A, receive on instance B
+  - [x] Integration test: instance A dies, subscribers reconnect to B, no event loss within TTL
 
 - [ ] **L-2: Mobile SDKs (Swift, Kotlin, Dart)** `session:one-per-sdk` *(3 sessions — one per language)*
   Blocks native mobile adoption.

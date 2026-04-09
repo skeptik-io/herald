@@ -1,4 +1,5 @@
 pub mod admin_events;
+pub mod backplane;
 #[cfg(feature = "chat")]
 pub mod chat;
 pub mod config;

@@ -48,7 +48,10 @@ pub async fn fanout_to_stream(
             }
         }
         #[cfg(not(feature = "chat"))]
-        let _ = sender;
+        {
+            let _ = sender;
+            let _ = &user_id;
+        }
 
         for conn_id in conn_ids {
             if Some(conn_id) == exclude_conn {

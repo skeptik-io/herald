@@ -452,7 +452,23 @@ async fn handle_publish(
     // handle gaps correctly, and the gap is harmless to consumers. Avoiding
     // it would require post-write seq assignment which complicates the key
     // construction (event_key needs the seq).
-    let seq = state.streams.next_seq(tid, &stream);
+    //
+    // In clustered mode, allocation goes through the shared store to ensure
+    // unique sequences across instances.
+    let seq = match state.allocate_seq(tid, &stream).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to allocate sequence: {e}");
+            let _ = tx
+                .send(ServerMessage::error(
+                    ref_,
+                    ErrorCode::Internal,
+                    "sequence allocation error",
+                ))
+                .await;
+            return;
+        }
+    };
     let now = now_millis();
     let event_id = uuid::Uuid::new_v4().to_string();
 
@@ -467,6 +483,14 @@ async fn handle_publish(
         edited_at: None,
         sent_at: now,
     };
+
+    // Record in local writes set BEFORE store write — the store subscription
+    // fires synchronously during the write, so the backplane consumer on this
+    // instance must see the key in the set before it processes the event.
+    if state.config.cluster.enabled {
+        let event_key = format!("{tid}/{stream}/{seq:020}").into_bytes();
+        state.record_local_write(event_key);
+    }
 
     // Store
     let store_start = std::time::Instant::now();

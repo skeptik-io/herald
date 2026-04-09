@@ -21,6 +21,36 @@ fn seq_from_key(key: &[u8]) -> Option<u64> {
     s.rsplit('/').next()?.parse().ok()
 }
 
+/// Parse a raw event key into (tenant_id, stream_id, seq).
+/// Key format: "{tenant_id}/{stream_id}/{seq:020}"
+pub fn parse_event_key(key: &[u8]) -> Option<(String, String, u64)> {
+    let s = std::str::from_utf8(key).ok()?;
+    // Skip ID index keys
+    if s.contains("/id/") {
+        return None;
+    }
+    let mut parts = s.splitn(3, '/');
+    let tenant_id = parts.next()?.to_string();
+    let stream_id = parts.next()?.to_string();
+    let seq: u64 = parts.next()?.parse().ok()?;
+    Some((tenant_id, stream_id, seq))
+}
+
+/// Read an event by its raw primary key (the store key, not the event ID).
+pub async fn get_by_raw_key<S: Store>(
+    store: &S,
+    key: &[u8],
+) -> Result<Option<Event>, anyhow::Error> {
+    match store.get(NS_EVENTS, key, None).await {
+        Ok(entry) => {
+            let stored: StoredEvent = serde_json::from_slice(&entry.value)?;
+            Ok(Some(stored.event))
+        }
+        Err(shroudb_store::StoreError::NotFound) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredEvent {
     #[serde(flatten)]

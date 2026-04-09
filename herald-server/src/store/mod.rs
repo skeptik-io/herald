@@ -7,6 +7,7 @@ pub mod members;
 pub mod purge;
 #[cfg(not(feature = "chat"))]
 pub mod reactions;
+pub mod sequences;
 pub mod streams;
 pub mod tenants;
 
@@ -20,6 +21,7 @@ pub const NS_EVENTS: &str = "herald.events";
 pub const NS_CURSORS: &str = "herald.cursors";
 pub const NS_REACTIONS: &str = "herald.reactions";
 pub const NS_BLOCKS: &str = "herald.blocks";
+pub const NS_SEQUENCES: &str = "herald.sequences";
 
 /// Initialize all namespaces on startup.
 #[cfg(test)]
@@ -51,6 +53,7 @@ pub async fn init_namespaces<S: Store>(store: &S) -> Result<(), shroudb_store::S
         NS_CURSORS,
         NS_REACTIONS,
         NS_BLOCKS,
+        NS_SEQUENCES,
     ] {
         match store.namespace_create(ns, config.clone()).await {
             Ok(()) => {}

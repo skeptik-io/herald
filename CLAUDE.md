@@ -18,7 +18,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-All must pass before any push.
+All must pass before any push. Also run `cargo build --no-default-features` and `cargo clippy --no-default-features -- -D warnings` — both must be clean. Fix any issue encountered during checks, even if pre-existing.
 
 ## Rules
 

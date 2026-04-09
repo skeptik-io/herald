@@ -27,6 +27,7 @@ pub struct ConnContext {
     pub user_id: String,
     pub streams_claim: Vec<String>,
     pub watchlist: Vec<String>,
+    pub ack_mode: bool,
 }
 
 pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
@@ -49,7 +50,12 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     )
     .await;
 
-    let (token, auth_ref, last_seen_at) = match auth_data {
+    let AuthData {
+        token,
+        ref_: auth_ref,
+        last_seen_at,
+        ack_mode,
+    } = match auth_data {
         Ok(Some(data)) => data,
         Ok(None) => {
             debug!(conn = %conn_id, "closed before auth");
@@ -127,9 +133,13 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
-    state
-        .connections
-        .register(conn_id, tenant_id.clone(), user_id.clone(), msg_tx.clone());
+    state.connections.register(
+        conn_id,
+        tenant_id.clone(),
+        user_id.clone(),
+        msg_tx.clone(),
+        ack_mode,
+    );
     let _gen = state.connections.increment_generation(&tenant_id, &user_id);
 
     let _ = msg_tx
@@ -207,7 +217,17 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     // channel is full (256 msgs) when fanout fires, that event could be missed.
     // This requires simultaneous store-write latency and channel backpressure
     // and is accepted as at-most-once delivery semantics.
-    if let Some(since) = last_seen_at {
+    if ack_mode {
+        reconnect_catchup_ack(
+            &state,
+            conn_id,
+            &tenant_id,
+            &user_id,
+            &streams_claim,
+            &msg_tx,
+        )
+        .await;
+    } else if let Some(since) = last_seen_at {
         reconnect_catchup(
             &state,
             conn_id,
@@ -226,6 +246,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         user_id: user_id.clone(),
         streams_claim,
         watchlist: claims.watchlist.clone(),
+        ack_mode,
     };
 
     let max_msg_per_sec = state.config.server.max_messages_per_sec;
@@ -323,6 +344,40 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             "user_id": &user_id,
         }),
     );
+
+    // Flush acked seqs to cursor store before unregistering (at-least-once delivery).
+    // This persists the high-water-mark so reconnect catchup (even to a different
+    // instance in clustered mode) replays from the correct position.
+    if let Some(acked_seqs) = state.connections.drain_acked_seqs(conn_id) {
+        let now = now_millis();
+        for (stream_id, seq) in &acked_seqs {
+            debug!(
+                conn = %conn_id,
+                stream = %stream_id,
+                seq,
+                "flushing ack cursor on disconnect"
+            );
+        }
+        for (stream_id, seq) in acked_seqs {
+            #[cfg(feature = "chat")]
+            let result = crate::chat::store_cursors::upsert(
+                &*state.db, &tenant_id, &stream_id, &user_id, seq, now,
+            )
+            .await;
+            #[cfg(not(feature = "chat"))]
+            let result =
+                store::cursors::upsert(&*state.db, &tenant_id, &stream_id, &user_id, seq, now)
+                    .await;
+            if let Err(e) = result {
+                tracing::warn!(
+                    conn = %conn_id,
+                    stream = %stream_id,
+                    seq,
+                    "failed to flush ack cursor: {e}"
+                );
+            }
+        }
+    }
 
     let affected_streams = state
         .streams
@@ -521,9 +576,17 @@ async fn reconnect_catchup(
     }
 }
 
+/// Auth data extracted from the initial auth frame.
+struct AuthData {
+    token: String,
+    ref_: Option<String>,
+    last_seen_at: Option<i64>,
+    ack_mode: bool,
+}
+
 async fn wait_for_auth(
     ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
-) -> Option<(String, Option<String>, Option<i64>)> {
+) -> Option<AuthData> {
     while let Some(Ok(frame)) = ws_rx.next().await {
         if let Message::Text(text) = frame {
             if let Ok(raw) = serde_json::from_str::<RawFrame>(&text) {
@@ -532,15 +595,172 @@ async fn wait_for_auth(
                         ref_,
                         token,
                         last_seen_at,
+                        ack_mode,
                     }) = ClientMessage::from_raw(raw)
                     {
-                        return Some((token, ref_, last_seen_at));
+                        return Some(AuthData {
+                            token,
+                            ref_,
+                            last_seen_at,
+                            ack_mode,
+                        });
                     }
                 }
             }
         }
     }
     None
+}
+
+/// Seq-based reconnect catchup for ack-mode connections.
+/// Reads the last-acked cursor per stream from the store and replays events
+/// with seq > acked_seq. This is the at-least-once delivery path.
+async fn reconnect_catchup_ack(
+    state: &Arc<AppState>,
+    conn_id: ConnId,
+    tenant_id: &str,
+    user_id: &str,
+    streams_claim: &[String],
+    tx: &mpsc::Sender<ServerMessage>,
+) {
+    for stream_id in streams_claim {
+        if state.streams.is_public(tenant_id, stream_id) {
+            if !state.streams.is_member(tenant_id, stream_id, user_id) {
+                state.streams.add_member(tenant_id, stream_id, user_id);
+                let member = herald_core::member::Member {
+                    stream_id: stream_id.clone(),
+                    user_id: user_id.to_string(),
+                    role: herald_core::member::Role::Member,
+                    joined_at: now_millis(),
+                };
+                let _ = store::members::insert(&*state.db, tenant_id, &member).await;
+            }
+        } else if !state.streams.is_member(tenant_id, stream_id, user_id) {
+            continue;
+        }
+
+        state
+            .streams
+            .subscribe(tenant_id, stream_id, user_id, conn_id);
+        state
+            .connections
+            .add_stream_subscription(conn_id, stream_id);
+
+        let members = state.streams.get_members(tenant_id, stream_id);
+        let mut member_presence = Vec::new();
+        for uid in &members {
+            if let Ok(Some(member)) =
+                store::members::get(&*state.db, tenant_id, stream_id, uid).await
+            {
+                let presence = state.presence.resolve(
+                    tenant_id,
+                    uid,
+                    &state.connections,
+                    state.config.presence.manual_override_ttl_secs,
+                );
+                member_presence.push(MemberPresence {
+                    user_id: uid.clone(),
+                    role: member.role,
+                    presence,
+                });
+            }
+        }
+
+        #[cfg(feature = "chat")]
+        let cursor = crate::chat::store_cursors::get(&*state.db, tenant_id, stream_id, user_id)
+            .await
+            .unwrap_or(0);
+        #[cfg(not(feature = "chat"))]
+        let cursor = store::cursors::get(&*state.db, tenant_id, stream_id, user_id)
+            .await
+            .unwrap_or(0);
+        let latest_seq = state.streams.current_seq(tenant_id, stream_id);
+
+        let _ = tx
+            .send(ServerMessage::Subscribed {
+                ref_: None,
+                payload: SubscribedPayload {
+                    stream: stream_id.clone(),
+                    members: member_presence,
+                    cursor,
+                    latest_seq,
+                },
+            })
+            .await;
+
+        // Read the last-acked seq from the cursor store.
+        // The cursor store is shared across instances in clustered mode.
+        // (cursor module differs between chat and non-chat features)
+        #[cfg(feature = "chat")]
+        let acked_seq = crate::chat::store_cursors::get(&*state.db, tenant_id, stream_id, user_id)
+            .await
+            .unwrap_or(0);
+        #[cfg(not(feature = "chat"))]
+        let acked_seq = store::cursors::get(&*state.db, tenant_id, stream_id, user_id)
+            .await
+            .unwrap_or(0);
+
+        if acked_seq == 0 {
+            // No prior ack — treat as fresh subscriber, no catchup
+            continue;
+        }
+
+        let events = store::events::list_after(
+            &*state.db,
+            tenant_id,
+            stream_id,
+            acked_seq,
+            CATCHUP_LIMIT + 1,
+        )
+        .await
+        .unwrap_or_default();
+
+        if !events.is_empty() {
+            let has_more = events.len() > CATCHUP_LIMIT as usize;
+            let event_count = events.len().min(CATCHUP_LIMIT as usize);
+            let batch: Vec<EventNewPayload> = events
+                .into_iter()
+                .take(CATCHUP_LIMIT as usize)
+                .map(|m| EventNewPayload {
+                    stream: m.stream_id,
+                    id: m.id.0,
+                    seq: m.seq,
+                    sender: m.sender,
+                    body: m.body,
+                    meta: m.meta,
+                    parent_id: m.parent_id,
+                    sent_at: m.sent_at,
+                })
+                .collect();
+
+            state
+                .metrics
+                .events_redelivered
+                .fetch_add(event_count as u64, std::sync::atomic::Ordering::Relaxed);
+
+            info!(
+                conn = %conn_id,
+                tenant = %tenant_id,
+                user = %user_id,
+                stream = %stream_id,
+                events = batch.len(),
+                has_more,
+                acked_seq,
+                "ack-mode catch-up replay"
+            );
+
+            let _ = tx
+                .send(ServerMessage::EventsBatch {
+                    ref_: None,
+                    payload: EventsBatchPayload {
+                        stream: stream_id.clone(),
+                        events: batch,
+                        has_more,
+                    },
+                })
+                .await;
+        }
+    }
 }
 
 pub async fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, user_id: &str) {

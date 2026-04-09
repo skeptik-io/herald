@@ -102,21 +102,18 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ---
 
-## Session Plan (remaining work)
+## Session Plan
 
-| Session | Items | Scope |
-|---------|-------|-------|
-| ~~`extract-infra`~~ | ~~H-7~~ | ~~Rip metering + signup out of Herald, revert to transport-only~~ **(done)** |
-| `e2ee-sdks` | M-3 | E2EE in Go, Python, Ruby + cross-SDK interop tests |
-| `moat-clients` | D-1 | shroudb crate updates for Moat prefix routing + integration tests |
-| `audit-log` | D-2 | Chronicle rip-out, skeptik-audit-log integration, new API endpoints, 4 admin SDKs |
-| ~~`clustering`~~ | ~~L-1~~ | ~~Pub/sub backplane for cross-instance fanout (storage already shared via remote store)~~ **(done)** |
-| `mobile-swift` | L-2 (Swift) | Swift WebSocket client SDK |
-| `mobile-kotlin` | L-2 (Kotlin) | Kotlin WebSocket client SDK |
-| `mobile-dart` | L-2 (Dart) | Dart/Flutter WebSocket client SDK |
-| `admin-sdks-2` | L-3 | PHP + .NET admin SDKs together |
-| `at-least-once` | L-4 | Fanout layer redesign for delivery guarantees |
-| `contract-tests` | L-6 | Define spec + wire all 4 existing SDKs |
+| Session | Items | Scope | Status |
+|---------|-------|-------|--------|
+| ~~`extract-infra`~~ | ~~H-7~~ | ~~Rip metering + signup out of Herald, revert to transport-only~~ | **done** |
+| ~~`e2ee-sdks`~~ | ~~M-3~~ | ~~E2EE in Go, Python, Ruby + cross-SDK interop tests~~ | **done** |
+| ~~`clustering`~~ | ~~L-1~~ | ~~Pub/sub backplane for cross-instance fanout (storage already shared via remote store)~~ | **done** |
+| `embed-engines` | N-1 | In-process engines (Sentry/Courier/Chronicle), Chronicle v1.3 upgrade, audit query API | |
+| ~~`at-least-once`~~ | ~~N-2~~ | ~~Opt-in ack mode for at-least-once delivery~~ | **done** |
+| `contract-tests` | N-3 | Define spec + wire all 4 existing SDKs | |
+| ~~`moat-clients`~~ | ~~—~~ | ~~shroudb crate updates for Moat prefix routing~~ | **superseded by N-1** |
+| ~~`audit-log`~~ | ~~—~~ | ~~Chronicle rip-out, skeptik-audit-log integration~~ | **superseded by N-1** |
 
 ---
 
@@ -156,35 +153,78 @@ Work items derived from market analysis and current codebase state. Each item mu
 
 ---
 
-## DEFERRED — Blocked on external changes
+## NEXT — Ready to implement
 
-- [ ] **D-1: Sentry/Courier integration tests against Moat** `session:moat-clients` *(blocked on shroudb crate changes)*
-  Herald's TCP clients (SentryClient, CourierClient) send raw engine commands. Moat's RESP3 port expects engine-prefixed commands (e.g., `SENTRY EVALUATE ...`). TCP clients need updates in shroudb crates to support Moat prefix routing.
-  - [ ] Update shroudb-sentry-client to prefix commands for Moat compatibility
-  - [ ] Update shroudb-courier-client to prefix commands for Moat compatibility
-  - [ ] Integration test: Sentry policy evaluation against Moat
-  - [ ] Integration test: Courier notification delivery against Moat
-  - [ ] Herald `moat_addr` config resolves to individual engine addresses automatically
+- [ ] **N-1: In-process engines + modernize audit** `session:embed-engines`
+  Herald connects to Sentry, Courier, and Chronicle via TCP clients. Sentry already has an embedded mode (`EmbeddedSentryOps` wrapping `SentryEngine<EmbeddedStore>`). Extend this pattern to all three engines, and make it work with **both** store backends — `EmbeddedStore` (single-instance) and `RemoteStore` (managed multi-instance). All three engine crates are generic over `S: Store`, so the same engine code works in either mode: embedded store uses local WAL with namespaced prefixes, remote store uses the shared ShroudB instance. This eliminates external engine processes and Moat from the deployment. Simultaneously upgrade Chronicle from v1.0 to v1.3.0 (first-class `tenant_id`, query API, `Engine::Custom("herald")`, diff tracking, per-tenant hash chains). Managed deployment: Sigil handles user auth (standalone), Herald runs Sentry/Courier/Chronicle in-process against the shared remote store, all instances see the same engine state.
 
-- [ ] **D-2: Replace Chronicle with skeptik-audit-log** `session:audit-log` *(largest single item — trait swap, new endpoints, SDK support)*
-  Chronicle is the wrong audit backend for Herald. It stores events in an in-memory hash chain on a remote ShrouDB instance — no tenant isolation (tenant_id is stuffed in a metadata HashMap), no queryability from Herald, hardcoded `Engine::ShrouDB` enum that doesn't represent Herald, and requires a running ShrouDB/Moat instance for a feature nobody can read back. Replace with `skeptik-audit-log` which provides tenant-isolated Postgres-backed audit with typed actions, JSONB diffs, and indexed queries.
-  - [ ] Add `skeptik-audit-log` crate dependency (with `serde` + `postgres` features)
-  - [ ] Replace `ChronicleOps` trait with `AuditStore` trait integration in `AppState`
-  - [ ] Replace `AuditEvent` (flat strings) with `AuditEntry` (typed action, resource_type/resource_id, JSONB diff, actor, tenant_id as first-class field)
-  - [ ] Migrate existing audit call sites (`event.publish` in WS handler, `stream.create` in HTTP) to new audit entries
-  - [ ] Add audit entries for missing operations: stream delete, member add/remove, tenant CRUD, token create/revoke, webhook config changes, room archive/unarchive, message delete/redact, block/unblock, reaction add/remove
-  - [ ] Add admin API endpoints for querying audit log: `GET /admin/tenants/{id}/audit` with filters (resource_type, actor, action, time range, pagination)
-  - [ ] Remove `shroudb-chronicle-client` dependency, `integrations/chronicle.rs`, `ChronicleOps` trait, `MockChronicleOps`, and all Chronicle config (`chronicle_addr`, `chronicle_token`)
-  - [ ] Postgres connection config for audit store (optional — audit disabled when not configured)
+  **Phase 1 — Generalize engine init over Store backend**
+  - [ ] Refactor `EmbeddedSentryOps` → generic `InProcessSentryOps<S: Store>` that accepts any Store impl
+  - [ ] `main.rs` — create engine store from current backend: `EmbeddedStore::new(engine, "sentry")` in embedded mode, `RemoteStore` with `"sentry"` prefix in remote mode
+  - [ ] Integration test: Sentry authorization works in both embedded and remote store modes
+
+  **Phase 2 — In-process Courier engine**
+  - [ ] Add `shroudb-courier-engine` dependency to Cargo.toml
+  - [ ] `integrations/in_process_courier.rs` — `InProcessCourierOps<S: Store>` wrapping `CourierEngine<S>`, implements `CourierOps`
+  - [ ] `main.rs` — initialize in-process Courier from current store backend, fall back to remote TCP if `courier_addr` configured
+  - [ ] Courier delivery dedup for multi-instance: claim-based pattern via atomic store op before delivering (prevents N instances sending the same notification)
+  - [ ] Integration test: offline notification delivery via in-process Courier
+  - [ ] Integration test (clustered): notification delivered exactly once across two instances
+
+  **Phase 3 — In-process Chronicle engine + upgrade to v1.3**
+  - [ ] Upgrade `shroudb-chronicle-client` and `shroudb-chronicle-core` to v1.3 in Cargo.toml
+  - [ ] Add `shroudb-chronicle-engine` v1.3 dependency to Cargo.toml
+  - [ ] `integrations/in_process_chronicle.rs` — `InProcessChronicleOps<S: Store>` wrapping `ChronicleEngine<S>`, implements `ChronicleOps`
+  - [ ] `main.rs` — initialize in-process Chronicle from current store backend, fall back to remote TCP if `chronicle_addr` configured
+  - [ ] Update `AuditEvent` → Chronicle v1.3 `Event` with first-class `tenant_id`, `resource_type`/`resource_id` (split), `Engine::Custom("herald")`, `diff: Option<Value>`
+  - [ ] Update `ChronicleOps` trait to expose query methods: `query()`, `count()`
+  - [ ] Migrate existing audit call sites (WS `event.publish`, HTTP `stream.create`) to v1.3 event format
+  - [ ] Integration test: ingest audit event, query back by tenant, verify tenant isolation
+  - [ ] Integration test (clustered): audit event written on instance A, queryable from instance B
+
+  **Phase 4 — Audit query API + coverage expansion**
+  - [ ] Add `GET /admin/tenants/{id}/audit` endpoint with filters (resource_type, resource_id, actor, action, time range, pagination) backed by Chronicle v1.3 query API
+  - [ ] Add `GET /admin/tenants/{id}/audit/count` endpoint
+  - [ ] Add audit entries for missing operations: stream delete, member add/remove, tenant CRUD, token create/revoke, webhook config changes, block/unblock, reaction add/remove
   - [ ] Integration test: publish event, query audit log, verify entry with correct tenant/actor/resource
   - [ ] Integration test: tenant A cannot query tenant B's audit entries
   - [ ] Integration test: filter by resource_type, actor, action, time range
   - [ ] Integration test: audit log captures all admin operations (stream CRUD, member changes, token management)
-  - [ ] Admin SDK support: `audit.list()` / `audit.query()` in all 4 admin SDKs (TS, Go, Python, Ruby)
+
+  **Phase 5 — Admin SDK support**
+  - [ ] `audit.query()` / `audit.count()` in TypeScript admin SDK
+  - [ ] `audit.query()` / `audit.count()` in Go admin SDK
+  - [ ] `audit.query()` / `audit.count()` in Python admin SDK
+  - [ ] `audit.query()` / `audit.count()` in Ruby admin SDK
+
+  **Cleanup**
+  - [ ] Remove `moat_addr` config field (no longer needed — engines are in-process or addressed individually)
+  - [ ] Remove remote TCP client crates (`shroudb-sentry-client`, `shroudb-courier-client`, `shroudb-chronicle-client`) if remote TCP override is dropped, or keep behind a feature flag
+  - [ ] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
+  - [ ] `cargo build --no-default-features` clean
+  - [ ] Live integration tests pass
+
+- [x] **N-2: At-least-once delivery** `session:at-least-once`
+  Opt-in ack mode for at-least-once delivery. Per-stream seq high-water-mark acks, cursor-based reconnect catchup.
+  - [x] Design doc: delivery guarantee upgrade path
+  - [x] Per-subscriber ack tracking (seq-based)
+  - [x] Redelivery queue for unacked events
+  - [x] Client SDK: ack mechanism (opt-in, backwards compatible)
+  - [x] Integration test: kill subscriber mid-delivery, verify redelivery on reconnect
+  - [x] Integration test: verify no duplicate delivery under normal conditions
+
+- [ ] **N-3: SDK contract tests** `session:contract-tests`
+  No shared wire-protocol compliance tests. Risk of SDK drift.
+  - [ ] Define contract test spec (JSON fixtures for each API endpoint + WS frame type)
+  - [ ] TypeScript admin SDK passes contract tests
+  - [ ] Go admin SDK passes contract tests
+  - [ ] Python admin SDK passes contract tests
+  - [ ] Ruby admin SDK passes contract tests
+  - [ ] CI: contract tests run on SDK changes
 
 ---
 
-## LOW — Important but not blocking near-term goals
+## COMPLETED
 
 - [x] **L-1: Cross-instance fanout** `session:clustering`
   Remote store mode (H-4) enables shared persistence across Herald instances. The remaining gap is in-memory fanout: a subscriber on instance A won't receive events published on instance B. Add a pub/sub backplane.
@@ -194,29 +234,6 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Sequence counters move to shared store (currently AtomicU64 per-process)
   - [x] Integration test: publish on instance A, receive on instance B
   - [x] Integration test: instance A dies, subscribers reconnect to B, no event loss within TTL
-
-- [ ] **L-2: Mobile SDKs (Swift, Kotlin, Dart)** `session:one-per-sdk` *(3 sessions — one per language)*
-  Blocks native mobile adoption.
-  - [ ] Swift WebSocket client SDK with reconnect, presence, cursors
-  - [ ] Kotlin WebSocket client SDK with reconnect, presence, cursors
-  - [ ] Dart/Flutter WebSocket client SDK with reconnect, presence, cursors
-  - [ ] E2EE support in each mobile SDK
-  - [ ] Integration test per SDK: connect, publish, receive, reconnect catchup
-
-- [ ] **L-3: PHP / .NET admin SDKs** `session:together`
-  Expands addressable market to Laravel/WordPress and enterprise .NET.
-  - [ ] PHP admin SDK (zero-dependency, curl-based)
-  - [ ] C#/.NET admin SDK (HttpClient-based)
-  - [ ] Integration test per SDK: full tenant API coverage
-
-- [ ] **L-4: At-least-once delivery** `session:own` *(fanout layer redesign)*
-  Requires ack tracking, redelivery queues, per-subscriber state. Redesign of fanout layer.
-  - [ ] Design doc: delivery guarantee upgrade path
-  - [ ] Per-subscriber ack tracking (seq-based)
-  - [ ] Redelivery queue for unacked events
-  - [ ] Client SDK: ack mechanism (opt-in, backwards compatible)
-  - [ ] Integration test: kill subscriber mid-delivery, verify redelivery on reconnect
-  - [ ] Integration test: verify no duplicate delivery under normal conditions
 
 - [x] **L-5: GDPR data deletion API**
   Required for EU compliance. No per-tenant or per-user data purge exists.
@@ -233,11 +250,21 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Integration test: send frame exceeding limit, verify rejection
   - [x] Integration test: send frame at limit, verify acceptance
 
-- [ ] **L-7: SDK contract tests** `session:together`
-  No shared wire-protocol compliance tests. Risk of SDK drift.
-  - [ ] Define contract test spec (JSON fixtures for each API endpoint + WS frame type)
-  - [ ] TypeScript admin SDK passes contract tests
-  - [ ] Go admin SDK passes contract tests
-  - [ ] Python admin SDK passes contract tests
-  - [ ] Ruby admin SDK passes contract tests
-  - [ ] CI: contract tests run on SDK changes
+---
+
+## DEFERRED — SDK expansion (not progressing Herald core)
+
+- [ ] **D-3: Mobile SDKs (Swift, Kotlin, Dart)** `session:one-per-sdk`
+  Blocks native mobile adoption.
+  - [ ] Swift WebSocket client SDK with reconnect, presence, cursors
+  - [ ] Kotlin WebSocket client SDK with reconnect, presence, cursors
+  - [ ] Dart/Flutter WebSocket client SDK with reconnect, presence, cursors
+  - [ ] E2EE support in each mobile SDK
+  - [ ] Integration test per SDK: connect, publish, receive, reconnect catchup
+
+- [ ] **D-4: PHP / .NET admin SDKs** `session:together`
+  Expands addressable market to Laravel/WordPress and enterprise .NET.
+  - [ ] PHP admin SDK (zero-dependency, curl-based)
+  - [ ] C#/.NET admin SDK (HttpClient-based)
+  - [ ] Integration test per SDK: full tenant API coverage
+

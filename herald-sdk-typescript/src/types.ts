@@ -16,6 +16,13 @@ export interface HeraldClientOptions {
   };
   /** Enable E2EE. Events are encrypted/decrypted transparently per-stream. */
   e2ee?: boolean;
+  /**
+   * Enable at-least-once delivery. When true, the client sends `event.ack`
+   * frames to the server with per-stream sequence high-water-marks. On
+   * reconnect, the server replays from the last acked sequence instead of
+   * using timestamp-based catchup.
+   */
+  ackMode?: boolean;
 }
 
 // ---------------------------------------------------------------------------

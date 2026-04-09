@@ -136,7 +136,25 @@ Must be the first event after connection. Connection is closed if not received w
 ```
 
 - `token` — JWT minted by the app backend (see [JWT Claims](#jwt-claims))
-- `last_seen_at` — Optional. Millisecond timestamp of last received event. If provided, Herald replays missed events for all streams in the JWT `streams` claim.
+- `last_seen_at` — Optional. Millisecond timestamp of last received event. If provided, Herald replays missed events for all streams in the JWT `streams` claim. Ignored when `ack_mode` is true.
+- `ack_mode` — Optional boolean. When true, enables at-least-once delivery. Server uses cursor-based catchup instead of timestamp-based. See [At-Least-Once Delivery](#at-least-once-delivery-ack-mode).
+
+#### `event.ack`
+
+Acknowledge processing of events up to a sequence number. Fire-and-forget (no server response). Only meaningful for ack-mode connections.
+
+```json
+{
+  "type": "event.ack",
+  "payload": {
+    "stream": "stream_a",
+    "seq": 42
+  }
+}
+```
+
+- `stream` — Stream ID
+- `seq` — Highest processed sequence number (high-water-mark)
 
 #### `auth.refresh`
 
@@ -718,6 +736,39 @@ CONNECTING → AUTHENTICATING → ACTIVE → CLOSING → CLOSED
 5. Client applies catch-up events, deduplicating by event `id`
 
 The `last_seen_at` approach is deliberately coarse. It may deliver some duplicate events. The client deduplicates by `id`. This is simpler and more reliable than tracking per-stream sequence numbers across reconnections.
+
+### At-Least-Once Delivery (Ack Mode)
+
+Opt-in ack mode upgrades delivery from at-most-once to at-least-once. When a client connects with `ack_mode: true` in the auth payload, the server uses seq-based catchup instead of timestamp-based.
+
+**Protocol:**
+
+1. Client sends `auth` with `ack_mode: true` (no `last_seen_at`)
+2. Server subscribes client to all JWT streams, reads cursor (last acked seq) from store
+3. Server replays events with `seq > cursor` as `events.batch`
+4. Client sends `event.ack` frames with per-stream seq high-water-marks:
+   ```json
+   {"type": "event.ack", "payload": {"stream": "s1", "seq": 42}}
+   ```
+   Meaning: "I have processed all events up to and including seq 42."
+5. Server records acks in-memory on the connection handle (MAX semantics)
+6. On disconnect, server flushes acked seqs to cursor store (WAL)
+7. On reconnect, server reads cursor and replays from last acked position
+
+**Guarantees:**
+
+- Events are redelivered if unacked before disconnect
+- Client-side dedup set provides defense-in-depth against duplicates during catchup overlap
+- No timer-based redelivery during active connections — backpressure drops are caught by the ack gap on reconnect
+- In clustered mode, cursors are stored in the shared store so reconnecting to a different instance works correctly
+
+**SDK usage:**
+
+```typescript
+const client = new HeraldClient({ url, token, ackMode: true });
+```
+
+The SDK handles ack sending transparently with 100ms debounce.
 
 ### Token Refresh
 

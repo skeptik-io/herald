@@ -2195,7 +2195,7 @@ async fn test_backpressure_increments_dropped_metric() {
     server
         .state
         .connections
-        .register(conn_id, "acme".to_string(), "alice".to_string(), tx);
+        .register(conn_id, "acme".to_string(), "alice".to_string(), tx, false);
     server
         .state
         .connections

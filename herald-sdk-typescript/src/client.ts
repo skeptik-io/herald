@@ -73,6 +73,11 @@ export class HeraldClient {
   // E2EE — null when e2ee option is not set (zero overhead)
   private e2ee: E2EEManager | null = null;
 
+  // Ack mode — per-stream high-water-mark tracking
+  private pendingAcks = new Map<string, number>();
+  private ackTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly ACK_DEBOUNCE_MS = 100;
+
   constructor(options: HeraldClientOptions) {
     this.options = options;
     this.token = options.token;
@@ -110,6 +115,7 @@ export class HeraldClient {
     this._initialConnectDone = false;
     this.subscribedStreams.clear();
     this.e2ee?.clear();
+    this.flushAcks();
     this.connection.close();
     this.pending.clear();
     this.pendingSubscribes.clear();
@@ -282,7 +288,11 @@ export class HeraldClient {
   private async authenticate(): Promise<void> {
     const ref = nextRef();
     const payload: Record<string, unknown> = { token: this.token };
-    if (this.lastSeenAt !== null) {
+    if (this.options.ackMode) {
+      payload.ack_mode = true;
+      // In ack mode, do NOT send last_seen_at — the server uses cursor-based
+      // catchup from the last acked sequence instead.
+    } else if (this.lastSeenAt !== null) {
       payload.last_seen_at = this.lastSeenAt;
     }
 
@@ -352,6 +362,10 @@ export class HeraldClient {
           msg.meta = result.meta;
         }
         this.emit("event", msg);
+        // At-least-once: ack the event
+        if (this.options.ackMode) {
+          this.scheduleAck(msg.stream, msg.seq);
+        }
         break;
       }
 
@@ -378,13 +392,19 @@ export class HeraldClient {
           this.pending.delete(ref);
         } else if (batch) {
           // Server-pushed catchup batch (reconnect) — emit each event
+          let highestSeq = 0;
           for (const evt of batch.events) {
             if (this.seenMessageIds.has(evt.id)) continue;
             this.seenMessageIds.add(evt.id);
             if (evt.sent_at && evt.sent_at > (this.lastSeenAt ?? 0)) {
               this.lastSeenAt = evt.sent_at;
             }
+            if (evt.seq > highestSeq) highestSeq = evt.seq;
             this.emit("event", evt as unknown as EventNew);
+          }
+          // At-least-once: ack the highest seq in the batch
+          if (this.options.ackMode && highestSeq > 0) {
+            this.scheduleAck(batch.stream, highestSeq);
           }
           // Auto-paginate: if server has more events, fetch the next page
           if (batch.has_more && batch.events.length > 0) {
@@ -538,6 +558,35 @@ export class HeraldClient {
       // triggering another reconnect attempt. Don't emit error here to
       // avoid confusing the consumer; the connection state machine handles it.
     }
+  }
+
+  /** Buffer an ack for a stream and schedule a debounced flush. */
+  private scheduleAck(stream: string, seq: number): void {
+    const current = this.pendingAcks.get(stream) ?? 0;
+    if (seq > current) {
+      this.pendingAcks.set(stream, seq);
+    }
+    if (this.ackTimer === null) {
+      this.ackTimer = setTimeout(() => {
+        this.ackTimer = null;
+        this.flushAcks();
+      }, this.ACK_DEBOUNCE_MS);
+    }
+  }
+
+  /** Send all buffered acks immediately. */
+  private flushAcks(): void {
+    if (this.ackTimer !== null) {
+      clearTimeout(this.ackTimer);
+      this.ackTimer = null;
+    }
+    for (const [stream, seq] of this.pendingAcks) {
+      this.connection.send({
+        type: "event.ack",
+        payload: { stream, seq },
+      });
+    }
+    this.pendingAcks.clear();
   }
 
   private async handleTokenExpiring(): Promise<void> {

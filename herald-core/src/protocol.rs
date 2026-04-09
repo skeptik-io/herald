@@ -30,6 +30,7 @@ pub enum ClientMessage {
         ref_: Option<String>,
         token: String,
         last_seen_at: Option<i64>,
+        ack_mode: bool,
     },
     AuthRefresh {
         ref_: Option<String>,
@@ -103,6 +104,13 @@ pub enum ClientMessage {
         event_id: String,
         emoji: String,
     },
+    /// Client acknowledges processing of events up to `seq` on `stream`.
+    /// Used for at-least-once delivery: the server replays from last acked
+    /// seq on reconnect instead of using timestamp-based catchup.
+    EventAckDelivery {
+        stream: String,
+        seq: Sequence,
+    },
 }
 
 impl ClientMessage {
@@ -125,6 +133,7 @@ impl ClientMessage {
             Self::Ping { .. } => "ping",
             Self::ReactionAdd { .. } => "reaction.add",
             Self::ReactionRemove { .. } => "reaction.remove",
+            Self::EventAckDelivery { .. } => "event.ack",
         }
     }
 
@@ -135,6 +144,7 @@ impl ClientMessage {
                 ref_: raw.ref_,
                 token: str_field(p, "token")?,
                 last_seen_at: p.get("last_seen_at").and_then(|v| v.as_i64()),
+                ack_mode: p.get("ack_mode").and_then(|v| v.as_bool()).unwrap_or(false),
             }),
             "auth.refresh" => Ok(Self::AuthRefresh {
                 ref_: raw.ref_,
@@ -217,6 +227,19 @@ impl ClientMessage {
                 event_id: str_field(p, "event_id")?,
                 emoji: str_field(p, "emoji")?,
             }),
+            "event.ack" => {
+                // Distinguish from server's event.ack (publish ack) by checking
+                // for "stream" field — delivery acks have stream+seq, publish
+                // acks come from the server and are never parsed here.
+                if p.get("stream").is_some() {
+                    Ok(Self::EventAckDelivery {
+                        stream: str_field(p, "stream")?,
+                        seq: u64_field(p, "seq")?,
+                    })
+                } else {
+                    Err("event.ack requires 'stream' and 'seq' fields".to_string())
+                }
+            }
             other => Err(format!("unknown message type: {other}")),
         }
     }

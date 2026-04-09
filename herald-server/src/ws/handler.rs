@@ -197,6 +197,9 @@ pub async fn handle_message(
                     .await;
             }
         }
+        ClientMessage::EventAckDelivery { stream, seq } => {
+            handle_event_ack_delivery(state, ctx, stream, seq);
+        }
         ClientMessage::Ping { ref_ } => {
             let _ = tx.send(ServerMessage::Pong { ref_ }).await;
         }
@@ -313,9 +316,15 @@ async fn handle_subscribe(
         };
         fanout_to_stream(state, tid, &stream_id_ref, &count_msg, None, None).await;
 
-        // Cache channel: deliver last event to new subscriber
-        if let Some(cached) = state.streams.get_last_event(tid, &stream_id_ref) {
-            let _ = tx.send(cached).await;
+        // Cache channel: deliver last event to new subscriber.
+        // Skip for ack-mode connections — they get seq-based catchup via
+        // reconnect_catchup_ack which handles replay correctly. Sending the
+        // cached event here would bypass cursor-based dedup and cause
+        // duplicate delivery of the last event.
+        if !ctx.ack_mode {
+            if let Some(cached) = state.streams.get_last_event(tid, &stream_id_ref) {
+                let _ = tx.send(cached).await;
+            }
         }
     }
 }
@@ -643,6 +652,19 @@ async fn handle_fetch(
             },
         })
         .await;
+}
+
+fn handle_event_ack_delivery(state: &Arc<AppState>, ctx: &ConnContext, stream: String, seq: u64) {
+    tracing::debug!(
+        conn = %ctx.conn_id,
+        user = %ctx.user_id,
+        stream = %stream,
+        seq,
+        "delivery ack received"
+    );
+    if state.connections.record_ack(ctx.conn_id, &stream, seq) {
+        state.metrics.events_acked.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 async fn handle_ephemeral_trigger(

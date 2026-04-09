@@ -56,6 +56,7 @@ http_bind = "127.0.0.1:${HTTP_PORT}"
 log_level = "error"
 shutdown_timeout_secs = 1
 api_rate_limit = 10000
+max_messages_per_sec = 1000
 ws_max_message_size = 65536
 
 [store]
@@ -1043,6 +1044,223 @@ async function run(): Promise<void> {
 
       alice.disconnect();
       bob.disconnect();
+    });
+
+    // ── At-least-once delivery ──────────────────────────────────────
+
+    await test("admin: create ack-test stream", async () => {
+      await admin.streams.create("ack-test", "Ack Test Stream");
+      await admin.members.add("ack-test", "alice");
+      await admin.members.add("ack-test", "bob");
+    });
+
+    await test("ack-mode: basic connect and subscribe", async () => {
+      const token = mintJwt("alice", ["ack-test"]);
+      const client = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token,
+        reconnect: { enabled: false },
+        ackMode: true,
+      });
+      await client.connect();
+      assert(client.connected, "ack-mode client connected");
+      const payloads = await client.subscribe(["ack-test"]);
+      assert(payloads.length === 1, `got ${payloads.length} payloads`);
+      assert(payloads[0].stream === "ack-test", `stream: ${payloads[0].stream}`);
+
+      // Publish and receive
+      const evtPromise = waitForEvent<any>(client, "event");
+      const ack = await client.publish("ack-test", "ack-test-msg");
+      assert(ack.seq > 0, "publish got seq");
+      const evt = await evtPromise;
+      assert(evt.body === "ack-test-msg", `body: ${evt.body}`);
+
+      client.disconnect();
+    });
+
+    await test("ack-mode: redelivery on reconnect after partial ack", async () => {
+      const aliceToken = mintJwt("alice", ["ack-test"]);
+      const bobToken = mintJwt("bob", ["ack-test"]);
+
+      const alice = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      await alice.connect();
+      await alice.subscribe(["ack-test"]);
+
+      let bob = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: bobToken,
+        reconnect: { enabled: false },
+        ackMode: true,
+      });
+      await bob.connect();
+      await bob.subscribe(["ack-test"]);
+
+      // Set up listener BEFORE publishing
+      const bobEvents: any[] = [];
+      const allReceived = new Promise<void>((resolve) => {
+        bob.on("event", (evt: any) => {
+          bobEvents.push(evt);
+          if (bobEvents.length >= 10) resolve();
+        });
+        setTimeout(resolve, 5000);
+      });
+
+      // Publish 10 events
+      for (let i = 0; i < 10; i++) {
+        await alice.publish("ack-test", `redelivery-${i}`);
+      }
+
+      await allReceived;
+      assert(bobEvents.length === 10, `bob should receive 10 events, got ${bobEvents.length}`);
+
+      // Wait for ack debounce to flush + server processing
+      await new Promise((r) => setTimeout(r, 300));
+
+      // Disconnect bob — flushes acked seqs to cursor store
+      bob.disconnect();
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Publish 5 more events while bob is offline
+      for (let i = 10; i < 15; i++) {
+        const ack = await alice.publish("ack-test", `redelivery-${i}`);
+      }
+
+      // Bob reconnects with ack_mode.
+      bob = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: bobToken,
+        reconnect: { enabled: false },
+        ackMode: true,
+      });
+
+      const reconnectEvents: any[] = [];
+      bob.on("event", (evt: any) => {
+        reconnectEvents.push(evt);
+      });
+      bob.on("error", (err: any) => {
+        console.error("    [debug] bob error:", err);
+      });
+
+      await bob.connect();
+      await bob.subscribe(["ack-test"]);
+
+      // Wait for catchup events to arrive
+      await new Promise((r) => setTimeout(r, 1000));
+
+      // Should have received the 5 events published while offline
+      assert(
+        reconnectEvents.length === 5,
+        `expected 5 redelivered events, got ${reconnectEvents.length}: ${reconnectEvents.map(e => e.body).join(", ")}`,
+      );
+      for (let i = 0; i < 5; i++) {
+        assert(
+          reconnectEvents[i].body === `redelivery-${i + 10}`,
+          `expected redelivery-${i + 10}, got ${reconnectEvents[i].body}`,
+        );
+      }
+
+      alice.disconnect();
+      bob.disconnect();
+    });
+
+    await test("ack-mode: no duplicate delivery when all events acked", async () => {
+      // Use a dedicated stream to avoid interference from previous test
+      await admin.streams.create("ack-nodup", "Ack No-Dup Test");
+      await admin.members.add("ack-nodup", "alice");
+      await admin.members.add("ack-nodup", "bob");
+
+      const aliceToken = mintJwt("alice", ["ack-nodup"]);
+      const bobToken = mintJwt("bob", ["ack-nodup"]);
+
+      const alice = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: aliceToken,
+        reconnect: { enabled: false },
+      });
+      await alice.connect();
+      await alice.subscribe(["ack-nodup"]);
+
+      let bob = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: bobToken,
+        reconnect: { enabled: false },
+        ackMode: true,
+      });
+      await bob.connect();
+      await bob.subscribe(["ack-nodup"]);
+
+      // Set up listener BEFORE publishing
+      const received: any[] = [];
+      const allReceived = new Promise<void>((resolve) => {
+        bob.on("event", (evt: any) => {
+          received.push(evt);
+          if (received.length >= 20) resolve();
+        });
+        setTimeout(resolve, 5000);
+      });
+
+      // Publish 20 events
+      for (let i = 0; i < 20; i++) {
+        await alice.publish("ack-nodup", `nodup-${i}`);
+      }
+
+      await allReceived;
+      assert(received.length === 20, `bob should receive 20, got ${received.length}`);
+
+      // Wait for ack debounce to flush
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Disconnect and give server time to flush cursor to WAL
+      bob.disconnect();
+      await new Promise((r) => setTimeout(r, 1000));
+
+      bob = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token: bobToken,
+        reconnect: { enabled: false },
+        ackMode: true,
+      });
+
+      const reconnectEvents: any[] = [];
+      bob.on("event", (evt: any) => {
+        reconnectEvents.push(evt);
+      });
+
+      await bob.connect();
+      await bob.subscribe(["ack-nodup"]);
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Should receive 0 events — everything was acked
+      assert(
+        reconnectEvents.length === 0,
+        `expected 0 events on reconnect, got ${reconnectEvents.length}: ${reconnectEvents.map(e => e.body).join(", ")}`,
+      );
+
+      alice.disconnect();
+      bob.disconnect();
+    });
+
+    await test("ack-mode: backwards compatible — non-ack client still works", async () => {
+      const token = mintJwt("alice", ["ack-test"]);
+
+      // Connect WITHOUT ack_mode (legacy timestamp-based catchup)
+      const client = new HeraldClient({
+        url: `ws://127.0.0.1:${HTTP_PORT}/ws`,
+        token,
+        reconnect: { enabled: false },
+      });
+      await client.connect();
+      await client.subscribe(["ack-test"]);
+
+      // Fetch history should work normally
+      const batch = await client.fetch("ack-test");
+      assert(batch.events.length > 0, "non-ack client can fetch events");
+
+      client.disconnect();
     });
 
   } finally {

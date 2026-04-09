@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
@@ -29,6 +29,9 @@ pub struct ConnectionHandle {
     pub user_id: String,
     pub tx: mpsc::Sender<ServerMessage>,
     pub streams: HashSet<String>,
+    pub ack_enabled: bool,
+    /// Per-stream last-acked sequence number (high-water-mark).
+    pub acked_seqs: HashMap<String, u64>,
 }
 
 /// Key for per-tenant user tracking: (tenant_id, user_id)
@@ -58,6 +61,7 @@ impl ConnectionRegistry {
         tenant_id: String,
         user_id: String,
         tx: mpsc::Sender<ServerMessage>,
+        ack_enabled: bool,
     ) {
         self.by_conn.insert(
             conn_id,
@@ -67,6 +71,8 @@ impl ConnectionRegistry {
                 user_id: user_id.clone(),
                 tx,
                 streams: HashSet::new(),
+                ack_enabled,
+                acked_seqs: HashMap::new(),
             },
         );
         self.by_user
@@ -200,6 +206,54 @@ impl ConnectionRegistry {
                 }
             }
         }
+    }
+
+    /// Record an ack for a connection. Uses MAX semantics — only advances forward.
+    /// Returns true if the ack was recorded (connection exists and ack_enabled).
+    pub fn record_ack(&self, conn_id: ConnId, stream_id: &str, seq: u64) -> bool {
+        if let Some(mut handle) = self.by_conn.get_mut(&conn_id) {
+            if !handle.ack_enabled {
+                return false;
+            }
+            let entry = handle.acked_seqs.entry(stream_id.to_string()).or_insert(0);
+            if seq > *entry {
+                *entry = seq;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get current acked seq for a stream on a connection (for debugging).
+    #[cfg(test)]
+    pub fn get_acked_seq(&self, conn_id: ConnId, stream_id: &str) -> Option<u64> {
+        self.by_conn
+            .get(&conn_id)
+            .and_then(|h| h.acked_seqs.get(stream_id).copied())
+    }
+
+    /// Drain all acked seqs from a connection (for flush on disconnect).
+    /// Returns None if the connection is not ack-enabled or not found.
+    pub fn drain_acked_seqs(&self, conn_id: ConnId) -> Option<HashMap<String, u64>> {
+        if let Some(mut handle) = self.by_conn.get_mut(&conn_id) {
+            if handle.ack_enabled && !handle.acked_seqs.is_empty() {
+                let seqs = std::mem::take(&mut handle.acked_seqs);
+                Some(seqs)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Check if a connection has ack mode enabled.
+    pub fn is_ack_enabled(&self, conn_id: ConnId) -> bool {
+        self.by_conn
+            .get(&conn_id)
+            .map(|h| h.ack_enabled)
+            .unwrap_or(false)
     }
 
     /// Send a message to all connections of a given user.

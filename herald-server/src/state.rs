@@ -18,6 +18,8 @@ use crate::webhook::WebhookEvent;
 pub struct Metrics {
     pub events_published: AtomicU64,
     pub events_dropped: AtomicU64,
+    pub events_acked: AtomicU64,
+    pub events_redelivered: AtomicU64,
     pub ws_auth_failures: AtomicU64,
     // Latency histograms
     pub event_total: Histogram,
@@ -30,6 +32,8 @@ impl Default for Metrics {
         Self {
             events_published: AtomicU64::new(0),
             events_dropped: AtomicU64::new(0),
+            events_acked: AtomicU64::new(0),
+            events_redelivered: AtomicU64::new(0),
             ws_auth_failures: AtomicU64::new(0),
             event_total: Histogram::new(
                 "herald_event_total_seconds",
@@ -67,6 +71,20 @@ impl Metrics {
         out.push_str(&format!(
             "herald_events_dropped_total {}\n",
             self.events_dropped.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP herald_events_acked_total Delivery acks received from clients\n");
+        out.push_str("# TYPE herald_events_acked_total counter\n");
+        out.push_str(&format!(
+            "herald_events_acked_total {}\n",
+            self.events_acked.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP herald_events_redelivered_total Events redelivered during ack-mode catchup\n",
+        );
+        out.push_str("# TYPE herald_events_redelivered_total counter\n");
+        out.push_str(&format!(
+            "herald_events_redelivered_total {}\n",
+            self.events_redelivered.load(Ordering::Relaxed)
         ));
         out.push_str("# HELP herald_ws_auth_failures_total Failed WebSocket auth attempts\n");
         out.push_str("# TYPE herald_ws_auth_failures_total counter\n");

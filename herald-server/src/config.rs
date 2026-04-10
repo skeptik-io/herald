@@ -77,6 +77,10 @@ pub struct ServerConfig {
     /// Maximum WebSocket message size in bytes. Default: 1MB (1048576).
     #[serde(default = "default_ws_max_message_size")]
     pub ws_max_message_size: usize,
+    /// WebSocket heartbeat interval in seconds. Clients should ping at this
+    /// rate; connections idle for 2× this value are closed. Default: 30.
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -88,12 +92,17 @@ impl Default for ServerConfig {
             api_rate_limit: default_api_rate_limit(),
             shutdown_timeout_secs: default_shutdown_timeout(),
             ws_max_message_size: default_ws_max_message_size(),
+            heartbeat_interval_secs: default_heartbeat_interval(),
         }
     }
 }
 
 fn default_ws_max_message_size() -> usize {
     1_048_576 // 1MB
+}
+
+fn default_heartbeat_interval() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,6 +349,9 @@ impl HeraldConfig {
                 ws_max_message_size: env("HERALD_WS_MAX_MESSAGE_SIZE")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1_048_576),
+                heartbeat_interval_secs: env("HERALD_HEARTBEAT_INTERVAL")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30),
             },
             store: StoreConfig {
                 mode: env_or("HERALD_STORE_MODE", "embedded"),

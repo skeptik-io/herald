@@ -72,6 +72,9 @@ export class HeraldClient {
   // E2EE — null when e2ee option is not set (zero overhead)
   private e2ee: E2EEManager | null = null;
 
+  // Heartbeat — keeps connection alive through proxies
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
   // Ack mode — per-stream high-water-mark tracking
   private pendingAcks = new Map<string, number>();
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -144,12 +147,29 @@ export class HeraldClient {
 
   disconnect(): void {
     this._initialConnectDone = false;
+    this.stopHeartbeat();
     this.subscribedStreams.clear();
     this.e2ee?.clear();
     this.flushAcks();
     this.connection.close();
     this.pending.clear();
     this.pendingSubscribes.clear();
+  }
+
+  // ── Heartbeat ─────────────────────────────────────────────────────
+
+  private startHeartbeat(intervalMs: number): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      this.connection.send({ type: "ping", ref: nextRef() });
+    }, intervalMs);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   // ── E2EE ──────────────────────────────────────────────────────────
@@ -323,6 +343,7 @@ export class HeraldClient {
     switch (frame.type) {
       case "auth_ok":
         this._connectionId = (p as any)?.connection_id ?? null;
+        this.startHeartbeat((p as any)?.heartbeat_interval ?? 30000);
         // Resolve the connect() promise — auth happened on upgrade, no ref
         if (this.pending.has("__auth__")) {
           this.pending.get("__auth__")!.resolve(p);
@@ -536,6 +557,7 @@ export class HeraldClient {
         break;
       case "disconnected":
         this._connectionId = null;
+        this.stopHeartbeat();
         // Clear pending requests — they'll never resolve on a dead connection
         for (const [, p] of this.pending) {
           p.reject(new HeraldError("DISCONNECTED", "connection lost"));
@@ -546,6 +568,7 @@ export class HeraldClient {
         break;
       case "connecting":
       case "unavailable":
+        this.stopHeartbeat();
         this.emit("reconnecting", undefined as never);
         break;
     }

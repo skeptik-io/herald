@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -75,7 +76,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
                 user_id: user_id.clone(),
                 connection_id: conn_id.0,
                 server_time: now_millis(),
-                heartbeat_interval: 30000,
+                heartbeat_interval: (state.config.server.heartbeat_interval_secs * 1000) as u32,
             },
         })
         .await;
@@ -179,7 +180,20 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
     let mut tokens: f64 = max_msg_per_sec as f64;
     let mut last_refill = std::time::Instant::now();
 
-    while let Some(Ok(frame)) = ws_rx.next().await {
+    // Close connection if no frames received within 2× heartbeat interval
+    let idle_timeout = Duration::from_secs(state.config.server.heartbeat_interval_secs * 2);
+
+    loop {
+        let frame = match tokio::time::timeout(idle_timeout, ws_rx.next()).await {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(Some(Err(_))) => break,   // WebSocket error
+            Ok(None) => break,           // Stream ended
+            Err(_) => {
+                // Idle timeout — client missed heartbeat
+                debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "idle timeout");
+                break;
+            }
+        };
         match frame {
             Message::Text(text) => {
                 // Token bucket rate limiting (no window boundary exploit)

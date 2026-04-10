@@ -1,7 +1,6 @@
 import { Connection, type ConnectionState } from "./connection.js";
 import { HeraldError } from "./errors.js";
 import { E2EEManager } from "./e2ee.js";
-import { initE2EE } from "./crypto.js";
 import type {
   CursorMoved,
   EventDelivered,
@@ -127,6 +126,7 @@ export class HeraldClient {
 
   async connect(): Promise<void> {
     if (this.e2ee) {
+      const { initE2EE } = await import("./crypto.js");
       await initE2EE();
     }
     await this.connection.connect();

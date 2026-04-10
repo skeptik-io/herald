@@ -45,7 +45,8 @@ Herald supports optional client-side end-to-end encryption. When enabled, event 
 ### Setup
 
 ```typescript
-import { HeraldClient, initE2EE, generateKeyPair, deriveSharedSecret, createSession } from '@skeptik-io/herald-sdk';
+import { HeraldClient } from '@skeptik-io/herald-sdk';
+import { initE2EE, generateKeyPair, deriveSharedSecret, createSession } from '@skeptik-io/herald-sdk/e2ee';
 
 const client = new HeraldClient({
   url: 'wss://herald.example.com/ws',
@@ -104,7 +105,7 @@ const { cipherKey, veilKey } = session.exportKeys();
 // Store cipherKey and veilKey securely
 
 // Later, restore the session
-import { restoreSession } from '@skeptik-io/herald-sdk';
+import { restoreSession } from '@skeptik-io/herald-sdk/e2ee';
 const restored = restoreSession(savedCipherKey, savedVeilKey);
 client.setE2EESession('private-stream', restored);
 ```

@@ -1,14 +1,6 @@
 export { HeraldClient, nextRef } from "./client.js";
 export { HeraldError, ErrorCode } from "./errors.js";
-export {
-  initE2EE,
-  generateKeyPair,
-  deriveSharedSecret,
-  createSession,
-  restoreSession,
-} from "./crypto.js";
 export type { ConnectionState, StateChangeEvent } from "./connection.js";
-export type { E2EEKeyPair, E2EESession } from "./crypto.js";
 export type {
   HeraldClientOptions,
   SubscribedPayload,

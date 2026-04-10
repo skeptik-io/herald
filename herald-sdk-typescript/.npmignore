@@ -1,0 +1,4 @@
+src/
+wasm/
+tsconfig.json
+*.tsbuildinfo

@@ -125,10 +125,6 @@ export class HeraldClient {
   }
 
   async connect(): Promise<void> {
-    if (this.e2ee) {
-      const { initE2EE } = await import("./crypto.js");
-      await initE2EE();
-    }
     await this.connection.connect();
     // Auth happens on upgrade — wait for auth_ok from server
     await new Promise<void>((resolve, reject) => {

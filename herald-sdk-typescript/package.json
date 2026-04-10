@@ -21,7 +21,7 @@
   ],
   "scripts": {
     "build:wasm": "cd wasm && ./build.sh",
-    "build:ts": "tsc && cp -r src/wasm-pkg dist/wasm-pkg",
+    "build:ts": "tsc && cp -r src/wasm-pkg dist/wasm-pkg && rm -f dist/wasm-pkg/package.json dist/wasm-pkg/.gitignore",
     "build": "npm run build:wasm && npm run build:ts",
     "check": "tsc --noEmit"
   },

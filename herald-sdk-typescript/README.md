@@ -54,9 +54,11 @@ const client = new HeraldClient({
   token: hmacToken,
   userId: 'alice',
   streams: ['private-stream'],
-  e2ee: true, // enables WASM crypto module
+  e2ee: true,
 });
 
+// Load the WASM crypto module before connecting
+await initE2EE();
 await client.connect();
 ```
 

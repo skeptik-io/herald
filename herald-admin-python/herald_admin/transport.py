@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import urllib.request
 import urllib.error
@@ -10,9 +11,23 @@ from .errors import HeraldError
 
 
 class HttpTransport:
-    def __init__(self, base_url: str, token: str, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str | None = None,
+        key: str | None = None,
+        secret: str | None = None,
+        timeout: int = 30,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._token = token
+        if key and secret:
+            encoded = base64.b64encode(f"{key}:{secret}".encode()).decode()
+            self._auth_header = f"Basic {encoded}"
+        elif token:
+            self._auth_header = f"Bearer {token}"
+        else:
+            raise ValueError("Provide either token or key+secret")
         self._timeout = timeout
 
     def request(self, method: str, path: str, body: Any = None) -> Any:
@@ -20,7 +35,7 @@ class HttpTransport:
         data = json.dumps(body).encode() if body is not None else None
 
         req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Authorization", self._auth_header)
         if data is not None:
             req.add_header("Content-Type", "application/json")
 

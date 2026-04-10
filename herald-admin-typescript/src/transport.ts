@@ -13,18 +13,20 @@ const HTTP_ERROR_CODES: Record<number, string> = {
 
 export class HttpTransport {
   private baseUrl: string;
-  private token: string;
+  private authHeader: string;
   private timeoutMs: number;
 
-  constructor(baseUrl: string, token: string, timeoutMs?: number) {
+  constructor(baseUrl: string, auth: { token: string } | { key: string; secret: string }, timeoutMs?: number) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.token = token;
+    this.authHeader = "token" in auth
+      ? `Bearer ${auth.token}`
+      : `Basic ${btoa(`${auth.key}:${auth.secret}`)}`;
     this.timeoutMs = timeoutMs ?? 30_000;
   }
 
   async request<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.token}`,
+      Authorization: this.authHeader,
     };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";

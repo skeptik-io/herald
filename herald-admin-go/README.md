@@ -20,10 +20,18 @@ import (
 )
 
 func main() {
+    // With key + secret (Basic auth)
     client := herald.New(herald.Options{
-        URL:   "https://herald.example.com",
-        Token: "your-api-token",
+        URL:    "https://herald.example.com",
+        Key:    "your-tenant-key",
+        Secret: "your-tenant-secret",
     })
+
+    // Or with an API token (Bearer auth)
+    // client := herald.New(herald.Options{
+    //     URL:   "https://herald.example.com",
+    //     Token: "your-api-token",
+    // })
 
     ctx := context.Background()
 

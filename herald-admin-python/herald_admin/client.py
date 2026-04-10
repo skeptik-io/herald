@@ -16,7 +16,9 @@ from .types import (
 @dataclass
 class HeraldAdminOptions:
     url: str
-    token: str
+    token: str | None = None
+    key: str | None = None
+    secret: str | None = None
 
 
 class StreamNamespace:
@@ -307,8 +309,16 @@ class _ChatNamespaces:
 class HeraldAdmin:
     """Herald HTTP admin client for Python backends."""
 
-    def __init__(self, url: str, token: str, *, timeout: int = 30) -> None:
-        t = HttpTransport(url, token, timeout=timeout)
+    def __init__(
+        self,
+        url: str,
+        token: str | None = None,
+        *,
+        key: str | None = None,
+        secret: str | None = None,
+        timeout: int = 30,
+    ) -> None:
+        t = HttpTransport(url, token=token, key=key, secret=secret, timeout=timeout)
         # Core namespaces (event transport)
         self.streams = StreamNamespace(t)
         self.members = MemberNamespace(t)
@@ -330,7 +340,7 @@ class HeraldAdmin:
 
     @classmethod
     def from_options(cls, opts: HeraldAdminOptions) -> "HeraldAdmin":
-        return cls(opts.url, opts.token)
+        return cls(opts.url, opts.token, key=opts.key, secret=opts.secret)
 
     def health(self) -> HealthResponse:
         data = self._transport.request("GET", "/health")

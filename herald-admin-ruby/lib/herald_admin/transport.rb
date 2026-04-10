@@ -6,9 +6,15 @@ require "uri"
 
 module HeraldAdmin
   class HttpTransport
-    def initialize(base_url, token)
+    def initialize(base_url, token: nil, key: nil, secret: nil)
       @base_url = base_url.chomp("/")
-      @token = token
+      @auth_header = if key && secret
+                       "Basic #{["#{key}:#{secret}"].pack("m0")}"
+                     elsif token
+                       "Bearer #{token}"
+                     else
+                       raise ArgumentError, "provide either token or key+secret"
+                     end
     end
 
     def request(method, path, body = nil)
@@ -21,7 +27,7 @@ module HeraldAdmin
             else raise ArgumentError, "unknown method: #{method}"
             end
 
-      req["Authorization"] = "Bearer #{@token}"
+      req["Authorization"] = @auth_header
       if body
         req["Content-Type"] = "application/json"
         req.body = JSON.generate(body)

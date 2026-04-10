@@ -13,10 +13,18 @@ gem install herald-admin --source https://rubygems.pkg.github.com/skeptik-io
 ```ruby
 require 'herald_admin'
 
+# With key + secret (Basic auth)
 client = HeraldAdmin::Client.new(
   url: 'https://herald.example.com',
-  token: 'your-api-token'
+  key: 'your-tenant-key',
+  secret: 'your-tenant-secret'
 )
+
+# Or with an API token (Bearer auth)
+# client = HeraldAdmin::Client.new(
+#   url: 'https://herald.example.com',
+#   token: 'your-api-token'
+# )
 
 # Streams
 client.streams.create('general', 'General Chat')

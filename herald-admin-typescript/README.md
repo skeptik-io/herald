@@ -13,6 +13,14 @@ npm install @skeptik-io/herald-admin --registry=https://npm.pkg.github.com
 ```typescript
 import { HeraldAdmin } from '@skeptik-io/herald-admin';
 
+// With key + secret (Basic auth)
+const admin = new HeraldAdmin({
+  url: 'https://herald.example.com',
+  key: 'your-tenant-key',
+  secret: 'your-tenant-secret',
+});
+
+// Or with an API token (Bearer auth)
 const admin = new HeraldAdmin({
   url: 'https://herald.example.com',
   token: 'your-api-token',

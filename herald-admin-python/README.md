@@ -11,7 +11,11 @@ Download from GitHub Releases.
 ```python
 from herald_admin import HeraldAdmin
 
-admin = HeraldAdmin("https://herald.example.com", "your-api-token")
+# With key + secret (Basic auth)
+admin = HeraldAdmin("https://herald.example.com", key="your-tenant-key", secret="your-tenant-secret")
+
+# Or with an API token (Bearer auth)
+# admin = HeraldAdmin("https://herald.example.com", "your-api-token")
 
 # Streams
 admin.streams.create("general", "General Chat")

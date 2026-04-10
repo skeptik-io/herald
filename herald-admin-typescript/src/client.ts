@@ -15,16 +15,17 @@ import type {
   TenantStats,
 } from "./types.js";
 
-export interface HeraldAdminOptions {
+export type HeraldAdminOptions = {
   /** Herald HTTP API URL, e.g. http://localhost:6201 */
   url: string;
-  /** API bearer token (must match auth.api.tokens in herald.toml) */
-  token: string;
   /** Tenant ID for tenant-scoped namespaces (audit). */
   tenantId?: string;
   /** Request timeout in milliseconds. Default 30000. */
   timeoutMs?: number;
-}
+} & (
+  | { /** API bearer token. */ token: string; key?: never; secret?: never }
+  | { /** Tenant key for Basic auth. */ key: string; /** Tenant secret for Basic auth. */ secret: string; token?: never }
+);
 
 export interface AdminEventListOptions {
   limit?: number;
@@ -61,7 +62,10 @@ export class HeraldAdmin {
   private transport: HttpTransport;
 
   constructor(options: HeraldAdminOptions) {
-    this.transport = new HttpTransport(options.url, options.token, options.timeoutMs);
+    const auth = options.token
+      ? { token: options.token }
+      : { key: options.key!, secret: options.secret! };
+    this.transport = new HttpTransport(options.url, auth, options.timeoutMs);
     this.streams = new StreamNamespace(this.transport);
     this.members = new MemberNamespace(this.transport);
     this.events = new EventNamespace(this.transport);

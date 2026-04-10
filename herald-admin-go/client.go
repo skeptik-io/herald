@@ -8,11 +8,16 @@ import (
 )
 
 // Options configures the Herald admin client.
+// Authenticate with either Token (bearer) or Key+Secret (basic).
 type Options struct {
 	// URL is the Herald HTTP API URL (e.g., http://localhost:6201).
 	URL string
-	// Token is the API bearer token.
+	// Token is the API bearer token. Mutually exclusive with Key/Secret.
 	Token string
+	// Key is the tenant key for Basic auth. Must be paired with Secret.
+	Key string
+	// Secret is the tenant secret for Basic auth. Must be paired with Key.
+	Secret string
 	// TenantID is the tenant ID used for tenant-scoped admin operations (e.g., audit).
 	TenantID string
 }
@@ -45,7 +50,7 @@ type HeraldAdmin struct {
 
 // New creates a new Herald admin client.
 func New(opts Options) *HeraldAdmin {
-	t := newTransport(opts.URL, opts.Token)
+	t := newTransport(opts.URL, opts)
 	presence := &PresenceNamespace{t: t}
 	blocks := &BlockNamespace{t: t}
 	return &HeraldAdmin{

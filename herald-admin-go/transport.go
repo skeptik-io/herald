@@ -3,6 +3,7 @@ package herald
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,16 +12,22 @@ import (
 )
 
 type httpTransport struct {
-	baseURL string
-	token   string
-	client  *http.Client
+	baseURL    string
+	authHeader string
+	client     *http.Client
 }
 
-func newTransport(baseURL, token string) *httpTransport {
+func newTransport(baseURL string, opts Options) *httpTransport {
+	var authHeader string
+	if opts.Key != "" {
+		authHeader = "Basic " + base64.StdEncoding.EncodeToString([]byte(opts.Key+":"+opts.Secret))
+	} else {
+		authHeader = "Bearer " + opts.Token
+	}
 	return &httpTransport{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		client:  &http.Client{},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		authHeader: authHeader,
+		client:     &http.Client{},
 	}
 }
 
@@ -39,7 +46,7 @@ func (t *httpTransport) request(ctx context.Context, method, path string, body a
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+t.token)
+	req.Header.Set("Authorization", t.authHeader)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

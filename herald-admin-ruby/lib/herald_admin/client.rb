@@ -19,8 +19,8 @@ module HeraldAdmin
     # Groups presence and block operations that are part of the Herald Chat product.
     attr_reader :chat
 
-    def initialize(url:, token:, tenant_id: "default")
-      transport = HttpTransport.new(url, token)
+    def initialize(url:, token: nil, key: nil, secret: nil, tenant_id: "default")
+      transport = HttpTransport.new(url, token: token, key: key, secret: secret)
       @streams = StreamNamespace.new(transport)
       @members = MemberNamespace.new(transport)
       @events = EventNamespace.new(transport)

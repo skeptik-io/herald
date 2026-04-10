@@ -32,11 +32,34 @@ export function HeraldChatProvider({
     coreRef.current = new ChatCore({ client, chat, userId, liveness, scrollIdleMs, loadMoreLimit, middleware });
   }
 
+  const mountedRef = useRef(false);
+  const disconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     const core = coreRef.current!;
+    mountedRef.current = true;
+
+    // Cancel any pending disconnect from a prior strict-mode unmount
+    if (disconnectTimer.current) {
+      clearTimeout(disconnectTimer.current);
+      disconnectTimer.current = null;
+    }
+
     core.attach();
+    if (!client.connected) {
+      client.connect().catch(() => {
+        // Connection errors surface via state change events
+      });
+    }
+
     return () => {
+      mountedRef.current = false;
       core.detach();
+      // Defer disconnect so React strict mode's unmount→remount cycle
+      // can cancel it before it fires
+      disconnectTimer.current = setTimeout(() => {
+        if (!mountedRef.current) client.disconnect();
+      }, 50);
     };
   }, []);
 

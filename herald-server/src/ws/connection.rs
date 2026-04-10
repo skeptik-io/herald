@@ -186,8 +186,8 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
     loop {
         let frame = match tokio::time::timeout(idle_timeout, ws_rx.next()).await {
             Ok(Some(Ok(frame))) => frame,
-            Ok(Some(Err(_))) => break,   // WebSocket error
-            Ok(None) => break,           // Stream ended
+            Ok(Some(Err(_))) => break, // WebSocket error
+            Ok(None) => break,         // Stream ended
             Err(_) => {
                 // Idle timeout — client missed heartbeat
                 debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "idle timeout");

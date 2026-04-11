@@ -10,12 +10,19 @@ use crate::http::TenantId;
 use crate::state::AppState;
 use crate::store;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct BlockRequest {
     pub user_id: String,
     pub blocked_id: String,
 }
 
+#[utoipa::path(
+    post, path = "/blocks",
+    tag = "blocks",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = BlockRequest,
+    responses((status = 201, description = "User blocked")),
+)]
 pub async fn block_user(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -35,6 +42,16 @@ pub async fn block_user(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/blocks",
+    tag = "blocks",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = BlockRequest,
+    responses(
+        (status = 204, description = "User unblocked"),
+        (status = 404, description = "Block not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn unblock_user(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -59,6 +76,13 @@ pub async fn unblock_user(
     }
 }
 
+#[utoipa::path(
+    get, path = "/blocks/{user_id}",
+    tag = "blocks",
+    params(("user_id" = String, Path, description = "User ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses((status = 200, description = "Blocked users", body = crate::http::openapi::BlockListResponse)),
+)]
 pub async fn list_blocked(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

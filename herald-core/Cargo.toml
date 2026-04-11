@@ -8,3 +8,8 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+utoipa = { version = "5", optional = true }
+
+[features]
+default = []
+openapi = ["utoipa"]

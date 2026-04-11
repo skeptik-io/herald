@@ -17,14 +17,14 @@ use crate::store;
 use crate::store::tenants::Tenant;
 use crate::ws::connection::now_millis;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateTenantRequest {
     pub name: String,
     #[serde(default)]
     pub plan: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateTenantRequest {
     pub name: Option<String>,
     pub plan: Option<String>,
@@ -32,6 +32,17 @@ pub struct UpdateTenantRequest {
     pub event_ttl_days: Option<u32>,
 }
 
+#[utoipa::path(
+    post, path = "/admin/tenants",
+    tag = "admin",
+    security(("admin_auth" = [])),
+    request_body = CreateTenantRequest,
+    responses(
+        (status = 201, description = "Tenant created", body = crate::http::openapi::TenantCreateResponse),
+        (status = 400, description = "Validation error", body = crate::http::openapi::ErrorResponse),
+        (status = 409, description = "Tenant creation conflict", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn create_tenant(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTenantRequest>,
@@ -100,6 +111,16 @@ pub async fn create_tenant(
         .into_response()
 }
 
+#[utoipa::path(
+    get, path = "/admin/tenants/{id}",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID")),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Tenant details", body = crate::http::openapi::TenantGetResponse),
+        (status = 404, description = "Tenant not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn get_tenant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -131,6 +152,15 @@ pub async fn get_tenant(
     }
 }
 
+#[utoipa::path(
+    get, path = "/admin/tenants",
+    tag = "admin",
+    params(crate::http::validation::PaginationQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "List of tenants", body = crate::http::openapi::TenantListResponse),
+    ),
+)]
 pub async fn list_tenants(
     State(state): State<Arc<AppState>>,
     Query(page): Query<crate::http::validation::PaginationQuery>,
@@ -164,6 +194,17 @@ pub async fn list_tenants(
     }
 }
 
+#[utoipa::path(
+    patch, path = "/admin/tenants/{id}",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID")),
+    security(("admin_auth" = [])),
+    request_body = UpdateTenantRequest,
+    responses(
+        (status = 200, description = "Tenant updated"),
+        (status = 404, description = "Tenant not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn update_tenant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -244,6 +285,16 @@ pub async fn update_tenant(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/admin/tenants/{id}",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID")),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 204, description = "Tenant deleted"),
+        (status = 404, description = "Tenant not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn delete_tenant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -275,12 +326,23 @@ pub async fn delete_tenant(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateTokenRequest {
     #[serde(default)]
     pub scope: Option<String>,
 }
 
+#[utoipa::path(
+    post, path = "/admin/tenants/{id}/tokens",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID")),
+    security(("admin_auth" = [])),
+    request_body(content = CreateTokenRequest, description = "Optional token scope"),
+    responses(
+        (status = 201, description = "API token created", body = crate::http::openapi::TokenCreateResponse),
+        (status = 404, description = "Tenant not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn create_api_token(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
@@ -335,6 +397,15 @@ pub async fn create_api_token(
         .into_response()
 }
 
+#[utoipa::path(
+    get, path = "/admin/tenants/{id}/tokens",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID"), crate::http::validation::PaginationQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "List of API tokens", body = crate::http::openapi::TokenListResponse),
+    ),
+)]
 pub async fn list_api_tokens(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
@@ -358,6 +429,19 @@ pub async fn list_api_tokens(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/admin/tenants/{id}/tokens/{token}",
+    tag = "admin",
+    params(
+        ("id" = String, Path, description = "Tenant ID"),
+        ("token" = String, Path, description = "API token"),
+    ),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 204, description = "Token deleted"),
+        (status = 404, description = "Token not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn delete_api_token(
     State(state): State<Arc<AppState>>,
     Path((tenant_id, token)): Path<(String, String)>,
@@ -391,6 +475,15 @@ pub async fn delete_api_token(
 }
 
 /// List streams for a specific tenant (admin view).
+#[utoipa::path(
+    get, path = "/admin/tenants/{id}/streams",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID"), crate::http::validation::PaginationQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Tenant streams", body = crate::http::openapi::StreamListResponse),
+    ),
+)]
 pub async fn list_tenant_streams(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
@@ -415,6 +508,14 @@ pub async fn list_tenant_streams(
 }
 
 /// List active connections.
+#[utoipa::path(
+    get, path = "/admin/connections",
+    tag = "admin",
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Active connections", body = crate::http::openapi::ConnectionListResponse),
+    ),
+)]
 pub async fn list_connections(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut connections = Vec::new();
     let total = state.connections.total_connections();
@@ -437,13 +538,22 @@ pub async fn list_connections(State(state): State<Arc<AppState>>) -> impl IntoRe
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct EventsQuery {
     pub limit: Option<usize>,
     pub after_id: Option<u64>,
 }
 
 /// List recent admin events.
+#[utoipa::path(
+    get, path = "/admin/events",
+    tag = "admin",
+    params(EventsQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Recent admin events", body = crate::http::openapi::AdminEventListResponse),
+    ),
+)]
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
     Query(q): Query<EventsQuery>,
@@ -454,6 +564,14 @@ pub async fn list_events(
 }
 
 /// SSE stream of admin events.
+#[utoipa::path(
+    get, path = "/admin/events/stream",
+    tag = "admin",
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "SSE event stream", content_type = "text/event-stream"),
+    ),
+)]
 pub async fn events_stream(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -476,13 +594,22 @@ pub async fn events_stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct ErrorsQuery {
     pub category: Option<String>,
     pub limit: Option<usize>,
 }
 
 /// List recent errors.
+#[utoipa::path(
+    get, path = "/admin/errors",
+    tag = "admin",
+    params(ErrorsQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Recent errors", body = crate::http::openapi::ErrorListResponse),
+    ),
+)]
 pub async fn list_errors(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ErrorsQuery>,
@@ -498,13 +625,22 @@ pub async fn list_errors(
     Json(serde_json::json!({"errors": errors}))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct StatsQuery {
     pub from: Option<i64>,
     pub to: Option<i64>,
 }
 
 /// Get stats snapshots and today's summary.
+#[utoipa::path(
+    get, path = "/admin/stats",
+    tag = "admin",
+    params(StatsQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Stats snapshots", body = crate::http::openapi::AdminStatsResponse),
+    ),
+)]
 pub async fn get_stats(
     State(state): State<Arc<AppState>>,
     Query(q): Query<StatsQuery>,
@@ -526,6 +662,16 @@ pub async fn get_stats(
 }
 
 /// GDPR: Purge ALL data for a tenant from all namespaces.
+#[utoipa::path(
+    delete, path = "/admin/tenants/{id}/data",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID")),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Tenant data purged", body = crate::http::openapi::PurgeResponse),
+        (status = 404, description = "Tenant not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn purge_tenant_data(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -577,6 +723,16 @@ pub async fn purge_tenant_data(
 // Audit log query
 // ---------------------------------------------------------------------------
 
+#[utoipa::path(
+    get, path = "/admin/tenants/{id}/audit",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID"), AuditQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Audit log entries", body = crate::http::openapi::AuditQueryResponse),
+        (status = 501, description = "Audit not configured", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn query_audit(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -603,6 +759,16 @@ pub async fn query_audit(
     }
 }
 
+#[utoipa::path(
+    get, path = "/admin/tenants/{id}/audit/count",
+    tag = "admin",
+    params(("id" = String, Path, description = "Tenant ID"), AuditQuery),
+    security(("admin_auth" = [])),
+    responses(
+        (status = 200, description = "Audit event count", body = crate::http::openapi::AuditCountResponse),
+        (status = 501, description = "Audit not configured", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn count_audit(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

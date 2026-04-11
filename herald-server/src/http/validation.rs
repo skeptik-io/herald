@@ -70,7 +70,7 @@ pub fn validate_meta(meta: &Option<serde_json::Value>) -> Result<(), ValidationE
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::IntoParams)]
 pub struct PaginationQuery {
     pub limit: Option<usize>,
     pub offset: Option<usize>,

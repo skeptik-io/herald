@@ -14,7 +14,7 @@ use crate::state::AppState;
 use crate::store;
 use crate::ws::connection::now_millis;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateStreamRequest {
     pub id: String,
     pub name: String,
@@ -24,13 +24,25 @@ pub struct CreateStreamRequest {
     pub public: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateStreamRequest {
     pub name: Option<String>,
     pub meta: Option<serde_json::Value>,
     pub archived: Option<bool>,
 }
 
+#[utoipa::path(
+    post, path = "/streams",
+    tag = "streams",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = CreateStreamRequest,
+    responses(
+        (status = 201, description = "Stream created", body = herald_core::stream::Stream),
+        (status = 400, description = "Validation error", body = crate::http::openapi::ErrorResponse),
+        (status = 403, description = "Stream limit reached", body = crate::http::openapi::ErrorResponse),
+        (status = 409, description = "Stream already exists", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn create_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -111,6 +123,15 @@ pub async fn create_stream(
     (StatusCode::CREATED, Json(stream)).into_response()
 }
 
+#[utoipa::path(
+    get, path = "/streams",
+    tag = "streams",
+    params(crate::http::validation::PaginationQuery),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of streams", body = crate::http::openapi::StreamListResponse),
+    ),
+)]
 pub async fn list_streams(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -134,6 +155,16 @@ pub async fn list_streams(
     }
 }
 
+#[utoipa::path(
+    get, path = "/streams/{id}",
+    tag = "streams",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Stream details", body = herald_core::stream::Stream),
+        (status = 404, description = "Stream not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn get_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -157,6 +188,17 @@ pub async fn get_stream(
     }
 }
 
+#[utoipa::path(
+    patch, path = "/streams/{id}",
+    tag = "streams",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = UpdateStreamRequest,
+    responses(
+        (status = 200, description = "Stream updated"),
+        (status = 404, description = "Stream not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn update_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -196,6 +238,16 @@ pub async fn update_stream(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/streams/{id}",
+    tag = "streams",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Stream deleted"),
+        (status = 404, description = "Stream not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn delete_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

@@ -16,7 +16,7 @@ use crate::store;
 use crate::ws::connection::now_millis;
 use crate::ws::fanout::fanout_to_stream;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct InjectEventRequest {
     pub sender: String,
     pub body: String,
@@ -28,7 +28,7 @@ pub struct InjectEventRequest {
     pub parent_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct ListEventsQuery {
     pub before: Option<u64>,
     pub after: Option<u64>,
@@ -38,6 +38,18 @@ pub struct ListEventsQuery {
 
 const MAX_LIMIT: u32 = 100;
 
+#[utoipa::path(
+    post, path = "/streams/{id}/events",
+    tag = "events",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = InjectEventRequest,
+    responses(
+        (status = 201, description = "Event published", body = crate::http::openapi::EventPublishResponse),
+        (status = 400, description = "Validation error", body = crate::http::openapi::ErrorResponse),
+        (status = 404, description = "Stream not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn inject_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -173,6 +185,15 @@ pub async fn inject_event(
         .into_response()
 }
 
+#[utoipa::path(
+    get, path = "/streams/{id}/events",
+    tag = "events",
+    params(("id" = String, Path, description = "Stream ID"), ListEventsQuery),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of events", body = crate::http::openapi::EventListResponse),
+    ),
+)]
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -234,6 +255,15 @@ pub async fn list_events(
 }
 
 #[cfg(not(feature = "chat"))]
+#[utoipa::path(
+    get, path = "/streams/{id}/cursors",
+    tag = "cursors",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of cursors", body = crate::http::openapi::CursorListResponse),
+    ),
+)]
 pub async fn list_cursors(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -264,12 +294,26 @@ pub async fn list_cursors(
 }
 
 #[cfg(not(feature = "chat"))]
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct EditEventRequest {
     pub body: String,
 }
 
 #[cfg(not(feature = "chat"))]
+#[utoipa::path(
+    patch, path = "/streams/{id}/events/{event_id}",
+    tag = "events",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("event_id" = String, Path, description = "Event ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = EditEventRequest,
+    responses(
+        (status = 200, description = "Event edited"),
+        (status = 404, description = "Event not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn edit_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -314,6 +358,18 @@ pub async fn edit_event(
 }
 
 #[cfg(not(feature = "chat"))]
+#[utoipa::path(
+    get, path = "/streams/{id}/events/{event_id}/reactions",
+    tag = "events",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("event_id" = String, Path, description = "Event ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Reactions for event", body = crate::http::openapi::ReactionListResponse),
+    ),
+)]
 pub async fn get_reactions(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -333,7 +389,7 @@ pub async fn get_reactions(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct TriggerEphemeralRequest {
     pub event: String,
     #[serde(default)]
@@ -342,6 +398,17 @@ pub struct TriggerEphemeralRequest {
     pub exclude_connection: Option<u64>,
 }
 
+#[utoipa::path(
+    post, path = "/streams/{id}/trigger",
+    tag = "events",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = TriggerEphemeralRequest,
+    responses(
+        (status = 204, description = "Ephemeral event triggered"),
+        (status = 404, description = "Stream not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn trigger_ephemeral(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -376,6 +443,19 @@ pub async fn trigger_ephemeral(
 }
 
 #[cfg(not(feature = "chat"))]
+#[utoipa::path(
+    delete, path = "/streams/{id}/events/{event_id}",
+    tag = "events",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("event_id" = String, Path, description = "Event ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Event deleted"),
+        (status = 404, description = "Event not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn delete_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -413,11 +493,21 @@ pub async fn delete_event(
 
 /// GDPR: Purge all events by a user in a stream, plus their cursors,
 /// reactions, and blocks.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct PurgeUserQuery {
     pub user_id: String,
 }
 
+#[utoipa::path(
+    delete, path = "/streams/{id}/events",
+    tag = "events",
+    params(("id" = String, Path, description = "Stream ID"), PurgeUserQuery),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "User events purged", body = crate::http::openapi::PurgeResponse),
+        (status = 400, description = "Validation error", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn purge_user_events(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

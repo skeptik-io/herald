@@ -16,6 +16,14 @@ use crate::store;
 use axum::Extension;
 
 /// GET /self/connections — tenant's active connection count.
+#[utoipa::path(
+    get, path = "/self/connections",
+    tag = "self-service",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Tenant connection count", body = crate::http::openapi::SelfConnectionResponse),
+    ),
+)]
 pub async fn list_connections(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,
@@ -27,13 +35,22 @@ pub async fn list_connections(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct EventsQuery {
     pub limit: Option<usize>,
     pub after_id: Option<u64>,
 }
 
 /// GET /self/events — tenant's recent admin events.
+#[utoipa::path(
+    get, path = "/self/events",
+    tag = "self-service",
+    params(EventsQuery),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Tenant admin events", body = crate::http::openapi::AdminEventListResponse),
+    ),
+)]
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,
@@ -47,6 +64,14 @@ pub async fn list_events(
 }
 
 /// GET /self/events/stream — SSE stream of tenant's events.
+#[utoipa::path(
+    get, path = "/self/events/stream",
+    tag = "self-service",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "SSE event stream", content_type = "text/event-stream"),
+    ),
+)]
 pub async fn events_stream(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,
@@ -73,13 +98,22 @@ pub async fn events_stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct ErrorsQuery {
     pub category: Option<String>,
     pub limit: Option<usize>,
 }
 
 /// GET /self/errors — tenant's recent errors.
+#[utoipa::path(
+    get, path = "/self/errors",
+    tag = "self-service",
+    params(ErrorsQuery),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Tenant errors", body = crate::http::openapi::ErrorListResponse),
+    ),
+)]
 pub async fn list_errors(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,
@@ -99,6 +133,15 @@ pub async fn list_errors(
 }
 
 /// POST /self/secret/rotate — rotate the tenant's secret, return new credentials.
+#[utoipa::path(
+    post, path = "/self/secret/rotate",
+    tag = "self-service",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Secret rotated", body = crate::http::openapi::RotateSecretResponse),
+        (status = 404, description = "Tenant not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn rotate_secret(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,
@@ -142,13 +185,22 @@ pub async fn rotate_secret(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateTokenRequest {
     #[serde(default)]
     pub scope: Option<String>,
 }
 
 /// POST /self/tokens — create an API token for the authenticated tenant.
+#[utoipa::path(
+    post, path = "/self/tokens",
+    tag = "self-service",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = CreateTokenRequest,
+    responses(
+        (status = 201, description = "Token created", body = crate::http::openapi::TokenCreateResponse),
+    ),
+)]
 pub async fn create_token(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,
@@ -184,6 +236,14 @@ pub async fn create_token(
 }
 
 /// GET /self/tokens — list API tokens for the authenticated tenant.
+#[utoipa::path(
+    get, path = "/self/tokens",
+    tag = "self-service",
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of tokens", body = crate::http::openapi::SelfTokenListResponse),
+    ),
+)]
 pub async fn list_tokens(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,
@@ -202,6 +262,16 @@ pub async fn list_tokens(
 }
 
 /// DELETE /self/tokens/{token} — revoke an API token for the authenticated tenant.
+#[utoipa::path(
+    delete, path = "/self/tokens/{token}",
+    tag = "self-service",
+    params(("token" = String, Path, description = "API token to revoke")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Token revoked"),
+        (status = 404, description = "Token not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn delete_token(
     State(state): State<Arc<AppState>>,
     Extension(tenant_id): Extension<TenantId>,

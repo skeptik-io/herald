@@ -7,6 +7,15 @@ use axum::Json;
 use crate::http::TenantId;
 use crate::state::AppState;
 
+#[utoipa::path(
+    get, path = "/presence/{user_id}",
+    tag = "presence",
+    params(("user_id" = String, Path, description = "User ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "User presence status", body = crate::http::openapi::UserPresenceResponse),
+    ),
+)]
 pub async fn user_presence(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -28,6 +37,15 @@ pub async fn user_presence(
     }))
 }
 
+#[utoipa::path(
+    get, path = "/streams/{id}/presence",
+    tag = "presence",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Presence for stream members", body = crate::http::openapi::StreamPresenceResponse),
+    ),
+)]
 pub async fn stream_presence(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

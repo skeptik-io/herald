@@ -14,11 +14,26 @@ use crate::state::AppState;
 use crate::ws::connection::now_millis;
 use crate::ws::fanout::fanout_to_stream;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct EditEventRequest {
     pub body: String,
 }
 
+#[utoipa::path(
+    patch, path = "/streams/{id}/events/{event_id}",
+    tag = "events",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("event_id" = String, Path, description = "Event ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = EditEventRequest,
+    responses(
+        (status = 200, description = "Event edited"),
+        (status = 400, description = "Validation error", body = crate::http::openapi::ErrorResponse),
+        (status = 404, description = "Event not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn edit_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -62,6 +77,19 @@ pub async fn edit_event(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/streams/{id}/events/{event_id}",
+    tag = "events",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("event_id" = String, Path, description = "Event ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Event deleted"),
+        (status = 404, description = "Event not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn delete_event(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -97,6 +125,18 @@ pub async fn delete_event(
     }
 }
 
+#[utoipa::path(
+    get, path = "/streams/{id}/events/{event_id}/reactions",
+    tag = "events",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("event_id" = String, Path, description = "Event ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Reactions for event", body = crate::http::openapi::ReactionListResponse),
+    ),
+)]
 pub async fn get_reactions(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -117,6 +157,15 @@ pub async fn get_reactions(
     }
 }
 
+#[utoipa::path(
+    get, path = "/streams/{id}/cursors",
+    tag = "cursors",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Read cursors for stream", body = crate::http::openapi::CursorListResponse),
+    ),
+)]
 pub async fn list_cursors(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

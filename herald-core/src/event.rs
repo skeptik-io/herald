@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub type Sequence = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EventId(pub String);
 
 impl EventId {
@@ -18,6 +19,7 @@ impl std::fmt::Display for EventId {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Event {
     pub id: EventId,
     pub stream_id: String,

@@ -183,10 +183,11 @@ pub trait ChronicleOps: Send + Sync {
 }
 
 /// Query parameters for audit log filtering.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, utoipa::IntoParams)]
 pub struct AuditQuery {
     /// Tenant ID — always set by the HTTP handler from the URL path.
     #[serde(default)]
+    #[param(ignore)]
     pub tenant_id: Option<String>,
     pub resource_type: Option<String>,
     pub resource_id: Option<String>,

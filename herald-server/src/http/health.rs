@@ -10,6 +10,14 @@ use crate::http::TenantId;
 use crate::state::AppState;
 use crate::ws::connection::now_millis;
 
+#[utoipa::path(
+    get, path = "/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Server is healthy", body = crate::http::openapi::HealthResponse),
+        (status = 503, description = "Server is degraded", body = crate::http::openapi::HealthResponse),
+    ),
+)]
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let storage_health = state.db.storage_health().await;
     let storage_ok = matches!(storage_health, shroudb_storage::engine::HealthState::Ready);
@@ -36,11 +44,24 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 /// Liveness probe -- always 200 if process is running.
+#[utoipa::path(
+    get, path = "/health/live",
+    tag = "health",
+    responses((status = 200, description = "Process is alive", body = crate::http::openapi::LivenessResponse)),
+)]
 pub async fn liveness() -> impl IntoResponse {
     Json(serde_json::json!({"status": "alive"}))
 }
 
 /// Readiness probe -- checks storage and integration health.
+#[utoipa::path(
+    get, path = "/health/ready",
+    tag = "health",
+    responses(
+        (status = 200, description = "Server is ready", body = crate::http::openapi::ReadinessResponse),
+        (status = 503, description = "Server is not ready", body = crate::http::openapi::ReadinessResponse),
+    ),
+)]
 pub async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let storage_health = state.db.storage_health().await;
     let storage_ok = matches!(storage_health, shroudb_storage::engine::HealthState::Ready);
@@ -60,6 +81,11 @@ pub async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     (http_status, Json(checks))
 }
 
+#[utoipa::path(
+    get, path = "/metrics",
+    tag = "health",
+    responses((status = 200, description = "Prometheus metrics", content_type = "text/plain")),
+)]
 pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let body = state.metrics.format_prometheus(&state);
     (
@@ -71,13 +97,22 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct TenantStatsQuery {
     pub from: Option<i64>,
     pub to: Option<i64>,
 }
 
 /// Tenant-scoped stats endpoint. Returns snapshots for the authenticated tenant.
+#[utoipa::path(
+    get, path = "/stats",
+    tag = "streams",
+    params(TenantStatsQuery),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Tenant statistics", body = crate::http::openapi::TenantStatsResponse),
+    ),
+)]
 pub async fn tenant_stats(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

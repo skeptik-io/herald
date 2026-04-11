@@ -15,18 +15,29 @@ use crate::store;
 use crate::ws::connection::now_millis;
 use crate::ws::fanout::fanout_to_stream;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddMemberRequest {
     pub user_id: String,
     #[serde(default)]
     pub role: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateMemberRequest {
     pub role: String,
 }
 
+#[utoipa::path(
+    post, path = "/streams/{id}/members",
+    tag = "members",
+    params(("id" = String, Path, description = "Stream ID")),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = AddMemberRequest,
+    responses(
+        (status = 201, description = "Member added", body = herald_core::member::Member),
+        (status = 400, description = "Validation error", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn add_member(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -100,6 +111,15 @@ pub async fn add_member(
     (StatusCode::CREATED, Json(member)).into_response()
 }
 
+#[utoipa::path(
+    get, path = "/streams/{id}/members",
+    tag = "members",
+    params(("id" = String, Path, description = "Stream ID"), crate::http::validation::PaginationQuery),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of members", body = crate::http::openapi::MemberListResponse),
+    ),
+)]
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -124,6 +144,19 @@ pub async fn list_members(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/streams/{id}/members/{user_id}",
+    tag = "members",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("user_id" = String, Path, description = "User ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Member removed"),
+        (status = 404, description = "Member not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,
@@ -179,6 +212,21 @@ pub async fn remove_member(
     }
 }
 
+#[utoipa::path(
+    patch, path = "/streams/{id}/members/{user_id}",
+    tag = "members",
+    params(
+        ("id" = String, Path, description = "Stream ID"),
+        ("user_id" = String, Path, description = "User ID"),
+    ),
+    security(("basic_auth" = []), ("bearer_auth" = [])),
+    request_body = UpdateMemberRequest,
+    responses(
+        (status = 200, description = "Member role updated"),
+        (status = 400, description = "Invalid role", body = crate::http::openapi::ErrorResponse),
+        (status = 404, description = "Member not found", body = crate::http::openapi::ErrorResponse),
+    ),
+)]
 pub async fn update_member(
     State(state): State<Arc<AppState>>,
     Extension(tenant): Extension<TenantId>,

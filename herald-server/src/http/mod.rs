@@ -4,6 +4,7 @@ pub mod blocks;
 pub mod events;
 pub mod health;
 pub mod members;
+pub mod openapi;
 #[cfg(not(feature = "chat"))]
 pub mod presence;
 pub mod self_service;
@@ -187,19 +188,36 @@ pub fn router(state: Arc<AppState>) -> Router {
         CorsLayer::permissive()
     };
 
-    Router::new()
+    let app = Router::new()
         .merge(tenant_api)
         .merge(admin_api)
         .merge(self_api)
         .route("/health", get(health::health))
         .route("/health/live", get(health::liveness))
         .route("/health/ready", get(health::readiness))
-        .route("/metrics", get(health::metrics))
+        .route("/metrics", get(health::metrics));
+
+    #[cfg(feature = "openapi")]
+    let app = app.route("/openapi.json", get(serve_openapi));
+
+    app
         // WebSocket upgrade on the same port — browsers connect to wss://domain/ws
         .route("/ws", get(crate::ws::upgrade::ws_handler))
         .layer(cors)
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state)
+}
+
+/// Serve the OpenAPI spec as JSON.
+#[cfg(feature = "openapi")]
+async fn serve_openapi() -> impl IntoResponse {
+    use utoipa::OpenApi;
+    let spec = openapi::ApiDoc::openapi().to_json().unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        spec,
+    )
 }
 
 /// Middleware that generates a UUID per request, injects it as an extension,

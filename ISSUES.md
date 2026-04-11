@@ -116,7 +116,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`chat-extensions`~~ | ~~N-5~~ | ~~Ephemeral events, per-message delivery status, event middleware~~ | **done** |
 | ~~`sdk-packaging`~~ | ~~N-6~~ | ~~READMEs for chat SDKs, publish chat packages in release pipeline~~ | **done** |
 | ~~`tenant-auth`~~ | ~~T-1, T-2~~ | ~~Auth redesign: key+secret, auth-on-upgrade, self-service, single port~~ | **done** |
-| `openapi` | S-1 | `utoipa` annotations → `openapi.yaml` from Rust handlers | |
+| ~~`openapi`~~ | ~~S-1~~ | ~~`utoipa` annotations → `openapi.yaml` from Rust handlers~~ | **done** |
 | `admin-codegen` | S-2 | Replace hand-rolled admin SDKs with generated + add PHP, C# | |
 | `mobile-sdks` | S-3 | Swift, Kotlin, Dart WS client SDKs (hand-rolled, WS not HTTP) | |
 | ~~`moat-clients`~~ | ~~—~~ | ~~shroudb crate updates for Moat prefix routing~~ | **superseded by N-1** |
@@ -367,21 +367,33 @@ Full auth system redesign. See `AUTH.md` for the audit and design rationale.
 
 ---
 
+## BACKLOG — Code quality
+
+- [ ] **B-1: Remove dead `chat` feature gate**
+  The `chat` Cargo feature in `herald-server` gates chat modules behind `#[cfg(feature = "chat")]`, but `default = ["chat"]` and every build path (Dockerfile, CI, release) compiles with defaults. No build produces a chat-less binary. Remove the feature flag and inline all `cfg(feature = "chat")` conditionals.
+  - [ ] Remove `chat` from `[features]` in `herald-server/Cargo.toml`
+  - [ ] Remove all `#[cfg(feature = "chat")]` annotations in `herald-server/src/`
+  - [ ] Remove `cargo build --no-default-features` / `cargo clippy --no-default-features` CI steps
+  - [ ] Update CLAUDE.md to remove `--no-default-features` build instructions
+  - [ ] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
+
+---
+
 ## NEXT — SDK codegen pipeline
 
 Hand-rolling SDKs does not scale. Four admin SDKs already drift (the contract tests caught a dead `events.search` method on all four). Before adding mobile or server SDKs, the API surface must be machine-described and SDKs generated from a single source of truth.
 
-- [ ] **S-1: OpenAPI spec from Rust handlers** `session:openapi`
+- [x] **S-1: OpenAPI spec from Rust handlers** `session:openapi`
   Add `utoipa` annotations to every HTTP handler in `herald-server/src/http/` and `herald-server/src/chat/`. Generate `openapi.yaml` as a build artifact. This becomes the single source of truth for the Herald HTTP API.
-  - [ ] Add `utoipa` and `utoipa-axum` dependencies to Cargo.toml
-  - [ ] Annotate all tenant-scoped endpoints (streams, members, events, trigger, presence, cursors, blocks)
-  - [ ] Annotate all admin endpoints (tenants, tokens, audit, connections, stats, errors)
-  - [ ] Annotate health/liveness/readiness/metrics endpoints
-  - [ ] Define request/response schemas via `ToSchema` derives or manual `utoipa::ToSchema` impls
-  - [ ] Serve `/openapi.json` endpoint (opt-in, behind feature flag)
-  - [ ] CI: generate `openapi.yaml` and commit to repo root as versioned artifact
-  - [ ] Validate generated spec against contract-tests/spec/spec.json (no endpoint drift)
-  - [ ] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
+  - [x] Add `utoipa` and `utoipa-axum` dependencies to Cargo.toml
+  - [x] Annotate all tenant-scoped endpoints (streams, members, events, trigger, presence, cursors, blocks)
+  - [x] Annotate all admin endpoints (tenants, tokens, audit, connections, stats, errors)
+  - [x] Annotate health/liveness/readiness/metrics endpoints
+  - [x] Define request/response schemas via `ToSchema` derives or manual `utoipa::ToSchema` impls
+  - [x] Serve `/openapi.json` endpoint (opt-in, behind feature flag)
+  - [x] CI: generate `openapi.yaml` and commit to repo root as versioned artifact
+  - [x] Validate generated spec against contract-tests/spec/spec.json (no endpoint drift)
+  - [x] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
 
 - [ ] **S-2: Admin SDK codegen** `session:admin-codegen`
   Replace hand-rolled admin SDKs with generated ones. Use openapi-generator (or a lighter alternative if openapi-generator output quality is unacceptable — evaluate during this session). Generated SDKs must pass the existing contract tests with zero behavioral diff.

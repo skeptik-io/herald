@@ -209,14 +209,18 @@ def execute_operation(client, op, inp):
         return None
     # Presence
     if op == "presence.getUser":
-        p = client.chat.presence.get_user(inp["user_id"])
+        p = client.presence.get_user(inp["user_id"])
         return {"user_id": p.user_id, "status": p.status, "connections": p.connections}
     if op == "presence.getStream":
-        members = client.chat.presence.get_stream(inp["stream_id"])
+        members = client.presence.get_stream(inp["stream_id"])
         return [{"user_id": m.user_id, "status": m.status} for m in members]
     if op == "presence.getCursors":
-        cursors = client.chat.presence.get_cursors(inp["stream_id"])
+        cursors = client.presence.get_cursors(inp["stream_id"])
         return [{"user_id": c.user_id, "seq": c.seq} for c in cursors]
+    if op == "presence.getBulk":
+        return client.presence.get_bulk(inp["user_ids"])
+    if op == "presence.setOverride":
+        return client.presence.set_override(inp["user_id"], status=inp["status"])
 
     # Blocks
     if op == "blocks.block":

@@ -207,12 +207,16 @@ def execute_operation(client, op, inp) # rubocop:disable Metrics/CyclomaticCompl
     nil
   # Presence
   when "presence.getUser"
-    p = client.chat.presence.get_user(inp["user_id"])
+    p = client.presence.get_user(inp["user_id"])
     { "user_id" => p.user_id, "status" => p.status, "connections" => p.connections }
   when "presence.getStream"
-    client.chat.presence.get_stream(inp["stream_id"]).map { |m| { "user_id" => m.user_id, "status" => m.status } }
+    client.presence.get_stream(inp["stream_id"]).map { |m| { "user_id" => m.user_id, "status" => m.status } }
   when "presence.getCursors"
-    client.chat.presence.get_cursors(inp["stream_id"]).map { |c| { "user_id" => c.user_id, "seq" => c.seq } }
+    client.presence.get_cursors(inp["stream_id"]).map { |c| { "user_id" => c.user_id, "seq" => c.seq } }
+  when "presence.getBulk"
+    client.presence.get_bulk(inp["user_ids"])
+  when "presence.setOverride"
+    client.presence.set_override(inp["user_id"], status: inp["status"])
 
   # Blocks
   when "blocks.block"

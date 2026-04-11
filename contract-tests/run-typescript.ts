@@ -117,11 +117,15 @@ async function executeOperation(op: string, input: Record<string, unknown>): Pro
       );
     // Presence
     case "presence.getUser":
-      return client.chat.presence.getUser(input.user_id as string);
+      return client.presence.getUser(input.user_id as string);
     case "presence.getStream":
-      return client.chat.presence.getStream(input.stream_id as string);
+      return client.presence.getStream(input.stream_id as string);
     case "presence.getCursors":
-      return client.chat.presence.getCursors(input.stream_id as string);
+      return client.presence.getCursors(input.stream_id as string);
+    case "presence.getBulk":
+      return client.presence.getBulk(input.user_ids as string[]);
+    case "presence.setOverride":
+      return client.presence.setOverride(input.user_id as string, { status: input.status as string });
 
     // Blocks
     case "blocks.block":

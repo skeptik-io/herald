@@ -289,14 +289,14 @@ func (r *runner) execute(ctx context.Context, t *testing.T, tc TestCase) interfa
 		return nil
 
 	case "presence.getUser":
-		p, err := r.client.Chat.Presence.GetUser(ctx, getString(input, "user_id"))
+		p, err := r.client.Presence.GetUser(ctx, getString(input, "user_id"))
 		if err != nil {
 			return err
 		}
 		return map[string]interface{}{"user_id": p.UserID, "status": p.Status, "connections": float64(p.Connections)}
 
 	case "presence.getStream":
-		members, err := r.client.Chat.Presence.GetStream(ctx, getString(input, "stream_id"))
+		members, err := r.client.Presence.GetStream(ctx, getString(input, "stream_id"))
 		if err != nil {
 			return err
 		}
@@ -307,7 +307,7 @@ func (r *runner) execute(ctx context.Context, t *testing.T, tc TestCase) interfa
 		return arr
 
 	case "presence.getCursors":
-		cursors, err := r.client.Chat.Presence.GetCursors(ctx, getString(input, "stream_id"))
+		cursors, err := r.client.Presence.GetCursors(ctx, getString(input, "stream_id"))
 		if err != nil {
 			return err
 		}
@@ -316,6 +316,29 @@ func (r *runner) execute(ctx context.Context, t *testing.T, tc TestCase) interfa
 			arr[i] = map[string]interface{}{"user_id": c.UserID, "seq": float64(c.Seq)}
 		}
 		return arr
+
+	case "presence.getBulk":
+		ids := input["user_ids"].([]interface{})
+		strIDs := make([]string, len(ids))
+		for i, id := range ids {
+			strIDs[i] = id.(string)
+		}
+		result, err := r.client.Presence.GetBulk(ctx, strIDs)
+		if err != nil {
+			return err
+		}
+		bulkArr := make([]interface{}, len(result))
+		for i, p := range result {
+			bulkArr[i] = map[string]interface{}{"user_id": p.UserID, "status": p.Status, "connections": float64(p.Connections)}
+		}
+		return bulkArr
+
+	case "presence.setOverride":
+		p, err := r.client.Presence.SetOverride(ctx, getString(input, "user_id"), herald.SetPresenceOptions{Status: getString(input, "status")})
+		if err != nil {
+			return err
+		}
+		return map[string]interface{}{"user_id": p.UserID, "status": p.Status, "connections": float64(p.Connections)}
 
 	case "blocks.block":
 		if err := r.client.Chat.Blocks.Block(ctx, getString(input, "user_id"), getString(input, "blocked_id")); err != nil {

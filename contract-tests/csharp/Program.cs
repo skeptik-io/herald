@@ -293,11 +293,16 @@ static async Task<object?> ExecuteOperation(HeraldAdmin client, string op, Dicti
             return null;
 
         case "presence.getUser":
-            return await client.Chat.Presence.GetUserAsync(S("user_id"));
+            return await client.Presence.GetUserAsync(S("user_id"));
         case "presence.getStream":
-            return await client.Chat.Presence.GetStreamAsync(S("stream_id"));
+            return await client.Presence.GetStreamAsync(S("stream_id"));
         case "presence.getCursors":
-            return await client.Chat.Presence.GetCursorsAsync(S("stream_id"));
+            return await client.Presence.GetCursorsAsync(S("stream_id"));
+        case "presence.getBulk":
+            var bulkIds = ((System.Collections.IList)inp["user_ids"]!).Cast<object>().Select(x => x.ToString()!).ToArray();
+            return await client.Presence.GetBulkAsync(bulkIds);
+        case "presence.setOverride":
+            return await client.Presence.SetOverrideAsync(S("user_id"), new Dictionary<string, object?> { ["status"] = S("status") });
 
         case "blocks.block":
             await client.Chat.Blocks.BlockAsync(S("user_id"), S("blocked_id"));

@@ -449,6 +449,10 @@ pub struct PresenceChangedPayload {
     /// ISO 8601 expiry for the override, if set (e.g. "Away until Monday 9am").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
+    /// Unix milliseconds when the user was last seen (last disconnect after linger).
+    /// Present only when `presence` is `offline`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,6 +505,10 @@ pub struct EventReceivedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchlistPayload {
     pub user_ids: Vec<String>,
+    /// Per-user last-seen timestamps (unix millis). Present only on
+    /// `watchlist.offline` frames; omitted on `watchlist.online`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<std::collections::HashMap<String, i64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -113,6 +113,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
                     .send(ServerMessage::WatchlistOnline {
                         payload: WatchlistPayload {
                             user_ids: online_ids,
+                            last_seen_at: None,
                         },
                     })
                     .await;
@@ -130,6 +131,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
                 let msg = ServerMessage::WatchlistOnline {
                     payload: WatchlistPayload {
                         user_ids: vec![user_id.clone()],
+                        last_seen_at: None,
                     },
                 };
                 for watcher_id in &watchers {
@@ -167,6 +169,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
                 .send(ServerMessage::WatchlistOnline {
                     payload: WatchlistPayload {
                         user_ids: online_ids,
+                        last_seen_at: None,
                     },
                 })
                 .await;
@@ -391,6 +394,18 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
                 // When presence engine is not active, handle inline
                 #[cfg(not(feature = "presence"))]
                 {
+                    // Stamp last-seen and persist to WAL
+                    let now_ms = now_millis();
+                    linger_state
+                        .presence
+                        .stamp_last_seen(&linger_tenant, &linger_user, now_ms);
+                    let entry = crate::registry::presence::PersistedLastSeen {
+                        tenant_id: linger_tenant.clone(),
+                        user_id: linger_user.clone(),
+                        last_seen_at_ms: now_ms,
+                    };
+                    let _ = crate::store::last_seen::save(&*linger_state.db, &entry).await;
+
                     broadcast_presence_change(&linger_state, &linger_tenant, &linger_user).await;
 
                     let watchers = linger_state
@@ -400,6 +415,10 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
                         let msg = ServerMessage::WatchlistOffline {
                             payload: WatchlistPayload {
                                 user_ids: vec![linger_user.clone()],
+                                last_seen_at: Some(std::collections::HashMap::from([(
+                                    linger_user.clone(),
+                                    now_ms,
+                                )])),
                             },
                         };
                         for watcher_id in &watchers {
@@ -710,6 +729,7 @@ pub async fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, u
             user_id: user_id.to_string(),
             presence: resolved.status,
             until: resolved.until.clone(),
+            last_seen_at: resolved.last_seen_at,
         },
     };
 

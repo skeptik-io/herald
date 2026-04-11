@@ -114,12 +114,20 @@ pub struct UserPresenceResponse {
     pub user_id: String,
     pub status: herald_core::presence::PresenceStatus,
     pub connections: usize,
+    /// Unix milliseconds when the user was last seen (last disconnect).
+    /// Null when the user is currently online.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct StreamPresenceMember {
     pub user_id: String,
     pub status: herald_core::presence::PresenceStatus,
+    /// Unix milliseconds when the user was last seen (last disconnect).
+    /// Null when the user is currently online.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -132,6 +140,10 @@ pub struct BatchPresenceUser {
     pub user_id: String,
     pub status: herald_core::presence::PresenceStatus,
     pub connections: usize,
+    /// Unix milliseconds when the user was last seen (last disconnect).
+    /// Null when the user is currently online.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
 }
 
 #[derive(Serialize, ToSchema)]

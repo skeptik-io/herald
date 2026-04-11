@@ -353,6 +353,19 @@ async fn main() -> anyhow::Result<()> {
                 warn!("failed to load presence overrides: {e}");
             }
         }
+
+        match store::last_seen::load_all(&*state.db).await {
+            Ok(entries) => {
+                let count = entries.len();
+                state.presence.load_last_seen(entries);
+                if count > 0 {
+                    info!(count, "loaded last-seen timestamps from WAL");
+                }
+            }
+            Err(e) => {
+                warn!("failed to load last-seen timestamps: {e}");
+            }
+        }
     }
 
     // Hydrate streams + members into memory

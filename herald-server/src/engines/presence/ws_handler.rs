@@ -49,6 +49,7 @@ pub async fn handle_presence_set(
             user_id: ctx.user_id.clone(),
             presence: status,
             until,
+            last_seen_at: None,
         },
     };
     for stream_id in state
@@ -106,6 +107,7 @@ pub async fn on_connect(
                 .send(ServerMessage::WatchlistOnline {
                     payload: WatchlistPayload {
                         user_ids: online_ids,
+                        last_seen_at: None,
                     },
                 })
                 .await;
@@ -114,6 +116,8 @@ pub async fn on_connect(
 
     // Notify users who have this user in their watchlist (only on first connection)
     if state.connections.user_connection_count(tenant_id, user_id) == 1 {
+        // Clear last-seen — user is now online
+        state.presence.clear_last_seen(tenant_id, user_id);
         // Check resolved presence before notifying — if user has an override,
         // send actual status instead of assuming "online"
         let resolved = state.presence.resolve(
@@ -129,6 +133,7 @@ pub async fn on_connect(
                 let msg = ServerMessage::WatchlistOnline {
                     payload: WatchlistPayload {
                         user_ids: vec![user_id.to_string()],
+                        last_seen_at: None,
                     },
                 };
                 for watcher_id in &watchers {
@@ -140,6 +145,7 @@ pub async fn on_connect(
                         user_id: user_id.to_string(),
                         presence: resolved.status,
                         until: resolved.until,
+                        last_seen_at: None,
                     },
                 };
                 for watcher_id in &watchers {
@@ -153,6 +159,16 @@ pub async fn on_connect(
 /// Called when a user's last connection disconnects (after linger timeout).
 /// Broadcasts offline presence and cleans up watchlist entries.
 pub async fn on_last_disconnect(state: &Arc<AppState>, tenant_id: &str, user_id: &str) {
+    // Stamp last-seen and persist to WAL
+    let now_ms = crate::ws::connection::now_millis();
+    state.presence.stamp_last_seen(tenant_id, user_id, now_ms);
+    let entry = crate::registry::presence::PersistedLastSeen {
+        tenant_id: tenant_id.to_string(),
+        user_id: user_id.to_string(),
+        last_seen_at_ms: now_ms,
+    };
+    let _ = crate::store::last_seen::save(&*state.db, &entry).await;
+
     crate::ws::connection::broadcast_presence_change(state, tenant_id, user_id).await;
 
     // Notify watchlist watchers
@@ -161,6 +177,10 @@ pub async fn on_last_disconnect(state: &Arc<AppState>, tenant_id: &str, user_id:
         let msg = ServerMessage::WatchlistOffline {
             payload: WatchlistPayload {
                 user_ids: vec![user_id.to_string()],
+                last_seen_at: Some(std::collections::HashMap::from([(
+                    user_id.to_string(),
+                    now_ms,
+                )])),
             },
         };
         for watcher_id in &watchers {

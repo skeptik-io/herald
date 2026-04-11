@@ -21,6 +21,8 @@ type PresenceKey = (String, String);
 #[derive(Default)]
 pub struct PresenceTracker {
     overrides: Mutex<HashMap<PresenceKey, ManualOverride>>,
+    /// Unix millis of each user's last disconnect (after linger).
+    last_seen: Mutex<HashMap<PresenceKey, i64>>,
 }
 
 impl PresenceTracker {
@@ -82,6 +84,7 @@ impl PresenceTracker {
                     return ResolvedPresence {
                         status: ov.status,
                         until: ov.until_iso.clone(),
+                        last_seen_at: None,
                     };
                 }
             }
@@ -92,11 +95,18 @@ impl PresenceTracker {
             ResolvedPresence {
                 status: PresenceStatus::Online,
                 until: None,
+                last_seen_at: None,
             }
         } else {
+            let last_seen_at = self
+                .last_seen
+                .lock()
+                .ok()
+                .and_then(|map| map.get(&key).copied());
             ResolvedPresence {
                 status: PresenceStatus::Offline,
                 until: None,
+                last_seen_at,
             }
         }
     }
@@ -174,6 +184,55 @@ impl PresenceTracker {
             })
             .collect()
     }
+
+    // -----------------------------------------------------------------------
+    // last_seen tracking
+    // -----------------------------------------------------------------------
+
+    /// Record the timestamp of a user's last disconnect.
+    pub fn stamp_last_seen(&self, tenant_id: &str, user_id: &str, ts_ms: i64) {
+        if let Ok(mut map) = self.last_seen.lock() {
+            map.insert((tenant_id.to_string(), user_id.to_string()), ts_ms);
+        }
+    }
+
+    /// Clear the in-memory last-seen entry (called on reconnect).
+    pub fn clear_last_seen(&self, tenant_id: &str, user_id: &str) {
+        if let Ok(mut map) = self.last_seen.lock() {
+            map.remove(&(tenant_id.to_string(), user_id.to_string()));
+        }
+    }
+
+    /// Get the last-seen timestamp for a user, if any.
+    pub fn get_last_seen(&self, tenant_id: &str, user_id: &str) -> Option<i64> {
+        self.last_seen.lock().ok().and_then(|map| {
+            map.get(&(tenant_id.to_string(), user_id.to_string()))
+                .copied()
+        })
+    }
+
+    /// Bulk-load last-seen entries from WAL on startup.
+    pub fn load_last_seen(&self, entries: Vec<PersistedLastSeen>) {
+        if let Ok(mut map) = self.last_seen.lock() {
+            for entry in entries {
+                map.insert((entry.tenant_id, entry.user_id), entry.last_seen_at_ms);
+            }
+        }
+    }
+
+    /// Dump last-seen entries for diagnostics.
+    pub fn dump_last_seen(&self) -> Vec<PersistedLastSeen> {
+        let Ok(map) = self.last_seen.lock() else {
+            return vec![];
+        };
+        map.iter()
+            .map(|((tenant_id, user_id), &ts)| PersistedLastSeen {
+                tenant_id: tenant_id.clone(),
+                user_id: user_id.clone(),
+                last_seen_at_ms: ts,
+            })
+            .collect()
+    }
 }
 
 /// Resolved presence with optional expiry info for the client.
@@ -181,6 +240,8 @@ pub struct ResolvedPresence {
     pub status: PresenceStatus,
     /// ISO 8601 string of when the override expires, if applicable.
     pub until: Option<String>,
+    /// Unix millis of the user's last disconnect. Present only when offline.
+    pub last_seen_at: Option<i64>,
 }
 
 /// Serializable override for WAL persistence.
@@ -191,4 +252,12 @@ pub struct PersistedOverride {
     pub status: PresenceStatus,
     pub expires_at_ms: Option<i64>,
     pub until_iso: Option<String>,
+}
+
+/// Serializable last-seen entry for WAL persistence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedLastSeen {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub last_seen_at_ms: i64,
 }

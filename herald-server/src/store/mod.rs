@@ -1,6 +1,7 @@
 pub mod blocks;
 pub mod cursors;
 pub mod events;
+pub mod last_seen;
 pub mod members;
 pub mod presence_overrides;
 pub mod purge;
@@ -22,6 +23,7 @@ pub const NS_BLOCKS: &str = "herald.blocks";
 pub const NS_SEQUENCES: &str = "herald.sequences";
 pub const NS_TENANT_KEYS: &str = "herald.tenant_keys";
 pub const NS_PRESENCE_OVERRIDES: &str = "herald.presence_overrides";
+pub const NS_LAST_SEEN: &str = "herald.last_seen";
 
 /// Initialize all namespaces on startup.
 #[cfg(test)]
@@ -56,6 +58,7 @@ pub async fn init_namespaces<S: Store>(store: &S) -> Result<(), shroudb_store::S
         NS_SEQUENCES,
         NS_TENANT_KEYS,
         NS_PRESENCE_OVERRIDES,
+        NS_LAST_SEEN,
     ] {
         match store.namespace_create(ns, config.clone()).await {
             Ok(()) => {}

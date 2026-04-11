@@ -22,7 +22,7 @@ pub async fn user_presence(
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    let status = state.presence.resolve_status(
+    let resolved = state.presence.resolve(
         tid,
         &user_id,
         &state.connections,
@@ -32,8 +32,9 @@ pub async fn user_presence(
 
     Json(serde_json::json!({
         "user_id": user_id,
-        "status": status,
+        "status": resolved.status,
         "connections": connections,
+        "last_seen_at": resolved.last_seen_at,
     }))
 }
 
@@ -56,7 +57,7 @@ pub async fn stream_presence(
     let presence: Vec<serde_json::Value> = members
         .iter()
         .map(|uid| {
-            let status = state.presence.resolve_status(
+            let resolved = state.presence.resolve(
                 tid,
                 uid,
                 &state.connections,
@@ -64,7 +65,8 @@ pub async fn stream_presence(
             );
             serde_json::json!({
                 "user_id": uid,
-                "status": status,
+                "status": resolved.status,
+                "last_seen_at": resolved.last_seen_at,
             })
         })
         .collect();

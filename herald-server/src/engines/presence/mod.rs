@@ -75,6 +75,7 @@ impl HeraldEngine for PresenceEngine {
                         let msg = herald_core::protocol::ServerMessage::WatchlistOnline {
                             payload: herald_core::protocol::WatchlistPayload {
                                 user_ids: vec![user_id.clone()],
+                                last_seen_at: None,
                             },
                         };
                         for watcher_id in &watchers {
@@ -86,6 +87,7 @@ impl HeraldEngine for PresenceEngine {
                                 user_id: user_id.clone(),
                                 presence: resolved.status,
                                 until: resolved.until,
+                                last_seen_at: None,
                             },
                         };
                         for watcher_id in &watchers {
@@ -111,7 +113,7 @@ impl HeraldEngine for PresenceEngine {
     }
 
     fn namespaces(&self) -> Vec<&'static str> {
-        vec!["herald.presence_overrides"]
+        vec!["herald.presence_overrides", "herald.last_seen"]
     }
 
     fn timers(&self) -> Vec<TimerTask> {
@@ -148,6 +150,7 @@ impl HeraldEngine for PresenceEngine {
                                     user_id: user_id.clone(),
                                     presence: resolved.status,
                                     until: resolved.until,
+                                    last_seen_at: resolved.last_seen_at,
                                 },
                             };
                             for watcher_id in &watchers {

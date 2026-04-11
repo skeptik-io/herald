@@ -4934,6 +4934,335 @@ async fn test_watchlist_initial_online_status() {
 }
 
 // ---------------------------------------------------------------------------
+// last_seen_at tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_last_seen_at_stamped_on_disconnect() {
+    let server = TestServer::start().await;
+    let (_id, key, secret, token) = server.create_tenant("acme").await;
+    server.create_stream(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Connect alice
+    let ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    // While online, last_seen_at should be null
+    let resp = server
+        .http_client()
+        .get(server.http_url("/presence/alice"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "online");
+    assert!(
+        body["last_seen_at"].is_null(),
+        "last_seen_at should be null while online"
+    );
+
+    // Disconnect alice (linger_secs=0 in test config)
+    drop(ws_alice);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Now last_seen_at should be set
+    let resp = server
+        .http_client()
+        .get(server.http_url("/presence/alice"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "offline");
+    assert!(
+        body["last_seen_at"].is_i64(),
+        "last_seen_at should be a timestamp after disconnect, got {:?}",
+        body["last_seen_at"]
+    );
+}
+
+#[tokio::test]
+async fn test_last_seen_at_cleared_on_reconnect() {
+    let server = TestServer::start().await;
+    let (_id, key, secret, token) = server.create_tenant("acme").await;
+    server.create_stream(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Connect, disconnect, verify last_seen_at is set
+    let ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/presence/alice"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["last_seen_at"].is_i64());
+
+    // Reconnect — last_seen_at should clear
+    let _ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    let resp = server
+        .http_client()
+        .get(server.http_url("/presence/alice"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "online");
+    assert!(
+        body["last_seen_at"].is_null(),
+        "last_seen_at should be null after reconnect"
+    );
+}
+
+#[tokio::test]
+async fn test_last_seen_at_in_batch_and_stream_presence() {
+    let server = TestServer::start().await;
+    let (_id, key, secret, token) = server.create_tenant("acme").await;
+    server.create_stream(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Connect and disconnect alice
+    let ws = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Batch presence — alice should have last_seen_at, bob should not
+    let resp = server
+        .http_client()
+        .get(server.http_url("/presence?user_ids=alice,bob"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let users = body["users"].as_array().unwrap();
+    let alice = users.iter().find(|u| u["user_id"] == "alice").unwrap();
+    let bob = users.iter().find(|u| u["user_id"] == "bob").unwrap();
+    assert!(alice["last_seen_at"].is_i64());
+    assert!(bob["last_seen_at"].is_null());
+
+    // Stream presence — alice should have last_seen_at
+    let resp = server
+        .http_client()
+        .get(server.http_url("/streams/chat/presence"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let members = body["members"].as_array().unwrap();
+    let alice = members.iter().find(|u| u["user_id"] == "alice").unwrap();
+    assert!(alice["last_seen_at"].is_i64());
+}
+
+#[tokio::test]
+async fn test_last_seen_at_in_presence_changed_frame() {
+    let server = TestServer::start().await;
+    let (_id, key, secret, token) = server.create_tenant("acme").await;
+    server.create_stream(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Bob observes
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_bob).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await;
+
+    // Alice connects
+    let ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+
+    // Bob sees alice online — no last_seen_at
+    let msg = ws_recv_type(&mut ws_bob, "presence.changed").await;
+    assert_eq!(msg["payload"]["user_id"], "alice");
+    assert_eq!(msg["payload"]["presence"], "online");
+    assert!(msg["payload"]["last_seen_at"].is_null());
+
+    // Alice disconnects
+    drop(ws_alice);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Bob sees alice offline — with last_seen_at
+    let msg = ws_recv_type(&mut ws_bob, "presence.changed").await;
+    assert_eq!(msg["payload"]["user_id"], "alice");
+    assert_eq!(msg["payload"]["presence"], "offline");
+    assert!(
+        msg["payload"]["last_seen_at"].is_i64(),
+        "presence.changed offline frame should include last_seen_at"
+    );
+}
+
+#[tokio::test]
+async fn test_watchlist_offline_includes_last_seen_at() {
+    let server = TestServer::start().await;
+    let (_id, key, secret, _token) = server.create_tenant("acme").await;
+
+    // Alice watches bob
+    let mut ws_alice = server
+        .ws_connect_auth_watchlist(&key, &secret, "alice", &[], &["bob"])
+        .await;
+    ws_wait_auth_ok(&mut ws_alice).await;
+
+    // Bob connects
+    let ws_bob = server.ws_connect_auth(&key, &secret, "bob", &[]).await;
+    ws_recv_type(&mut ws_alice, "watchlist.online").await;
+
+    // Bob disconnects
+    drop(ws_bob);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Alice should receive watchlist.offline with last_seen_at map
+    let msg = ws_recv_type(&mut ws_alice, "watchlist.offline").await;
+    assert_eq!(
+        msg["payload"]["user_ids"].as_array().unwrap(),
+        &[json!("bob")]
+    );
+    let last_seen_map = &msg["payload"]["last_seen_at"];
+    assert!(
+        last_seen_map["bob"].is_i64(),
+        "watchlist.offline should include last_seen_at map with bob's timestamp"
+    );
+}
+
+#[tokio::test]
+async fn test_presence_override_broadcasts_to_all_sessions() {
+    let server = TestServer::start().await;
+    let (_id, key, secret, token) = server.create_tenant("acme").await;
+    server.create_stream(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+
+    // Alice connects from two sessions, both subscribed to chat
+    let mut ws_alice1 = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_alice1).await;
+    ws_send(
+        &mut ws_alice1,
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice1, "subscribed").await;
+
+    let mut ws_alice2 = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat"])
+        .await;
+    ws_wait_auth_ok(&mut ws_alice2).await;
+    ws_send(
+        &mut ws_alice2,
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice2, "subscribed").await;
+
+    // Session 1 sets DND
+    ws_send(
+        &mut ws_alice1,
+        json!({"type": "presence.set", "payload": {"status": "dnd"}}),
+    )
+    .await;
+
+    // Session 2 should receive the presence.changed (sender NOT excluded)
+    let msg = ws_recv_type(&mut ws_alice2, "presence.changed").await;
+    assert_eq!(msg["payload"]["user_id"], "alice");
+    assert_eq!(msg["payload"]["presence"], "dnd");
+}
+
+#[tokio::test]
+async fn test_presence_override_broadcasts_to_presence_stream() {
+    let server = TestServer::start().await;
+    let (_id, key, secret, token) = server.create_tenant("acme").await;
+    server.create_stream(&token, "chat").await;
+    server.add_member(&token, "chat", "alice").await;
+    server.add_member(&token, "chat", "bob").await;
+
+    // Create __presence stream (normally bootstrapped in main.rs on startup;
+    // dynamically created tenants don't get it automatically — tracked as a
+    // separate issue).
+    let resp = server
+        .http_client()
+        .post(server.http_url("/streams"))
+        .bearer_auth(&token)
+        .json(&json!({"id": "__presence", "name": "Presence", "public": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Bob subscribes to __presence
+    let mut ws_bob = server
+        .ws_connect_auth(&key, &secret, "bob", &["chat", "__presence"])
+        .await;
+    ws_wait_auth_ok(&mut ws_bob).await;
+    ws_send(
+        &mut ws_bob,
+        json!({"type": "subscribe", "payload": {"streams": ["chat", "__presence"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_bob, "subscribed").await; // chat
+    ws_recv_type(&mut ws_bob, "subscribed").await; // __presence
+
+    // Alice connects and subscribes
+    let mut ws_alice = server
+        .ws_connect_auth(&key, &secret, "alice", &["chat", "__presence"])
+        .await;
+    ws_wait_auth_ok(&mut ws_alice).await;
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
+    )
+    .await;
+    ws_recv_type(&mut ws_alice, "subscribed").await;
+
+    // Drain all frames bob received from alice's connect (presence.changed,
+    // subscriber_count, etc.) before sending the override.
+    loop {
+        let timeout = tokio::time::timeout(Duration::from_millis(500), ws_bob.next()).await;
+        match timeout {
+            Ok(Some(Ok(Message::Text(_)))) => continue,
+            _ => break,
+        }
+    }
+
+    // Alice sets away — this should broadcast to __presence
+    ws_send(
+        &mut ws_alice,
+        json!({"type": "presence.set", "payload": {"status": "away"}}),
+    )
+    .await;
+
+    // Bob should see the override on __presence (or chat stream)
+    let msg = ws_recv_type(&mut ws_bob, "presence.changed").await;
+    assert_eq!(msg["payload"]["user_id"], "alice");
+    assert_eq!(msg["payload"]["presence"], "away");
+}
+
+// ---------------------------------------------------------------------------
 // Feature E: Subscriber count broadcast tests
 // ---------------------------------------------------------------------------
 

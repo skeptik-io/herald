@@ -6,7 +6,6 @@ use herald_core::protocol::*;
 
 use crate::state::AppState;
 use crate::ws::connection::ConnContext;
-use crate::ws::fanout::fanout_to_stream;
 
 pub async fn handle_presence_set(
     state: &Arc<AppState>,
@@ -44,27 +43,26 @@ pub async fn handle_presence_set(
         let _ = crate::store::presence_overrides::save(&*state.db, &po).await;
     }
 
-    let msg = ServerMessage::PresenceChanged {
-        payload: PresenceChangedPayload {
-            user_id: ctx.user_id.clone(),
-            presence: status,
-            until,
-            last_seen_at: None,
-        },
-    };
-    for stream_id in state
-        .streams
-        .get_member_streams(&ctx.tenant_id, &ctx.user_id)
-    {
-        fanout_to_stream(
-            state,
-            &ctx.tenant_id,
-            &stream_id,
-            &msg,
-            None,
-            Some(&ctx.user_id),
-        )
-        .await;
+    // Broadcast to all member streams + __presence.  Do NOT exclude the
+    // sender — other sessions for the same user need the update.
+    crate::ws::connection::broadcast_presence_change(state, &ctx.tenant_id, &ctx.user_id).await;
+
+    // Notify watchlist watchers of the override
+    let watchers = state.connections.get_watchers(&ctx.tenant_id, &ctx.user_id);
+    if !watchers.is_empty() {
+        let msg = ServerMessage::PresenceChanged {
+            payload: PresenceChangedPayload {
+                user_id: ctx.user_id.clone(),
+                presence: status,
+                until,
+                last_seen_at: None,
+            },
+        };
+        for watcher_id in &watchers {
+            state
+                .connections
+                .send_to_user(&ctx.tenant_id, watcher_id, &msg);
+        }
     }
 }
 

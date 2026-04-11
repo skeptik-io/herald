@@ -7,6 +7,9 @@
     <PackageId>Herald.Admin</PackageId>
     <Version>2.0.0</Version>
     <Description>Herald HTTP admin SDK for .NET</Description>
-    <PackageLicenseExpression>SEE LICENSE IN LICENSE</PackageLicenseExpression>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
   </PropertyGroup>
+  <ItemGroup>
+    <None Include="../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
 </Project>

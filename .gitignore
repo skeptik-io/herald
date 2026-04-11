@@ -12,3 +12,4 @@ dist/
 *.tsbuildinfo
 .idea/
 __pycache__/
+.claude/

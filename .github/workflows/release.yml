@@ -248,3 +248,47 @@ jobs:
           sed -i "s/0.1.0/$VERSION/" herald-admin.gemspec
           gem build herald-admin.gemspec
           gem push --host https://rubygems.pkg.github.com/skeptik-io herald-admin-${VERSION}.gem
+
+  publish-php:
+    name: Publish PHP SDK → GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package PHP SDK
+        working-directory: herald-admin-php
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" composer.json 2>/dev/null || true
+          tar czf herald-admin-php-${VERSION}.tar.gz composer.json autoload.php src/
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: herald-admin-php/herald-admin-php-*.tar.gz
+
+  publish-csharp:
+    name: Publish C# SDK → NuGet (GitHub Packages)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0"
+
+      - name: Pack and publish
+        working-directory: herald-admin-csharp
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          dotnet pack -c Release -p:PackageVersion=$VERSION
+          dotnet nuget push bin/Release/Herald.Admin.${VERSION}.nupkg \
+            --source "https://nuget.pkg.github.com/skeptik-io/index.json" \
+            --api-key "${{ secrets.GITHUB_TOKEN }}"

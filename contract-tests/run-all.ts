@@ -139,6 +139,28 @@ async function main(): Promise<void> {
       apiToken,
     );
     results.push(rbResult);
+
+    // PHP
+    const phpDir = join(import.meta.dirname, "php");
+    const phpResult = await runSubprocess(
+      "PHP",
+      "php",
+      ["test_contract.php"],
+      phpDir,
+      apiToken,
+    );
+    results.push(phpResult);
+
+    // C#
+    const csDir = join(import.meta.dirname, "csharp");
+    const csResult = await runSubprocess(
+      "C#",
+      "dotnet",
+      ["run", "--no-build"],
+      csDir,
+      apiToken,
+    );
+    results.push(csResult);
   } finally {
     await stopServer();
   }

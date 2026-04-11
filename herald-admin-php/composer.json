@@ -1,0 +1,14 @@
+{
+  "name": "skeptik-io/herald-admin",
+  "description": "Herald HTTP admin SDK for PHP",
+  "license": "proprietary",
+  "type": "library",
+  "require": {
+    "php": ">=8.1"
+  },
+  "autoload": {
+    "psr-4": {
+      "Herald\\Admin\\": "src/"
+    }
+  }
+}

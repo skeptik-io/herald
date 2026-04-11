@@ -117,7 +117,7 @@ Work items derived from market analysis and current codebase state. Each item mu
 | ~~`sdk-packaging`~~ | ~~N-6~~ | ~~READMEs for chat SDKs, publish chat packages in release pipeline~~ | **done** |
 | ~~`tenant-auth`~~ | ~~T-1, T-2~~ | ~~Auth redesign: key+secret, auth-on-upgrade, self-service, single port~~ | **done** |
 | ~~`openapi`~~ | ~~S-1~~ | ~~`utoipa` annotations → `openapi.yaml` from Rust handlers~~ | **done** |
-| `admin-codegen` | S-2 | Replace hand-rolled admin SDKs with generated + add PHP, C# | |
+| ~~`admin-codegen`~~ | ~~S-2~~ | ~~Replace hand-rolled admin SDKs with generated + add PHP, C#~~ | **done** |
 | `mobile-sdks` | S-3 | Swift, Kotlin, Dart WS client SDKs (hand-rolled, WS not HTTP) | |
 | ~~`moat-clients`~~ | ~~—~~ | ~~shroudb crate updates for Moat prefix routing~~ | **superseded by N-1** |
 | ~~`audit-log`~~ | ~~—~~ | ~~Chronicle rip-out, skeptik-audit-log integration~~ | **superseded by N-1** |
@@ -395,19 +395,19 @@ Hand-rolling SDKs does not scale. Four admin SDKs already drift (the contract te
   - [x] Validate generated spec against contract-tests/spec/spec.json (no endpoint drift)
   - [x] `cargo build`, `cargo clippy`, `cargo test --workspace` clean
 
-- [ ] **S-2: Admin SDK codegen** `session:admin-codegen`
+- [x] **S-2: Admin SDK codegen** `session:admin-codegen`
   Replace hand-rolled admin SDKs with generated ones. Use openapi-generator (or a lighter alternative if openapi-generator output quality is unacceptable — evaluate during this session). Generated SDKs must pass the existing contract tests with zero behavioral diff.
-  - [ ] Evaluate codegen tooling: openapi-generator vs Kiota vs custom templates. Pick one.
-  - [ ] Define generator config + mustache/template overrides for Herald SDK style (namespaced clients, chat grouping, error types)
-  - [ ] Generate TypeScript admin SDK, diff against hand-rolled, pass contract tests
-  - [ ] Generate Go admin SDK, diff against hand-rolled, pass contract tests
-  - [ ] Generate Python admin SDK, diff against hand-rolled, pass contract tests
-  - [ ] Generate Ruby admin SDK, diff against hand-rolled, pass contract tests
-  - [ ] Generate PHP admin SDK, pass contract tests
-  - [ ] Generate C#/.NET admin SDK, pass contract tests
-  - [ ] CI: codegen runs on OpenAPI spec changes, generated code committed
-  - [ ] Remove hand-rolled admin SDK source (replaced by generated)
-  - [ ] Contract tests pass for all 6 admin SDKs
+  - [x] Evaluate codegen tooling: openapi-generator vs Kiota vs custom templates. Pick one.
+  - [x] Define generator config + mustache/template overrides for Herald SDK style (namespaced clients, chat grouping, error types)
+  - [x] Generate TypeScript admin SDK, diff against hand-rolled, pass contract tests
+  - [x] Generate Go admin SDK, diff against hand-rolled, pass contract tests
+  - [x] Generate Python admin SDK, diff against hand-rolled, pass contract tests
+  - [x] Generate Ruby admin SDK, diff against hand-rolled, pass contract tests
+  - [x] Generate PHP admin SDK, pass contract tests
+  - [x] Generate C#/.NET admin SDK, pass contract tests
+  - [x] CI: codegen runs on OpenAPI spec changes, generated code committed
+  - [x] Remove hand-rolled admin SDK source (replaced by generated)
+  - [x] Contract tests pass for all 6 admin SDKs
 
 - [ ] **S-3: Mobile client SDKs (Swift, Kotlin, Dart)** `session:mobile-sdks`
   WebSocket client SDKs for native mobile. These are **not** admin SDKs (no codegen from OpenAPI — the WS protocol is not HTTP). Hand-rolled but informed by the WS frame spec in contract-tests/spec/spec.json.

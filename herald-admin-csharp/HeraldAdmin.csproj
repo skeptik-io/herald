@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Herald.Admin</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>Herald.Admin</PackageId>
+    <Version>2.0.0</Version>
+    <Description>Herald HTTP admin SDK for .NET</Description>
+    <PackageLicenseExpression>SEE LICENSE IN LICENSE</PackageLicenseExpression>
+  </PropertyGroup>
+</Project>

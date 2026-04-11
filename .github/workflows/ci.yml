@@ -169,6 +169,19 @@ jobs:
         with:
           ruby-version: "3.3"
 
+      - name: Setup PHP (for contract tests)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+
+      - name: Setup .NET (for contract tests)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0"
+
+      - name: Build C# SDK + contract runner
+        run: cd contract-tests/csharp && dotnet build
+
       - name: Contract tests (all SDKs)
         run: |
           cd contract-tests
@@ -176,6 +189,11 @@ jobs:
           npx tsx run-all.ts
         env:
           SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+      - name: Verify codegen is up to date
+        run: |
+          cd codegen && npm install && npx tsx generate.ts
+          git diff --exit-code -- herald-admin-typescript/src/ herald-admin-go/*.go herald-admin-python/herald_admin/ herald-admin-ruby/lib/ herald-admin-php/src/ herald-admin-csharp/*.cs
 
       - name: Security audit
         run: cargo install cargo-audit --locked && cargo audit
@@ -240,6 +258,36 @@ jobs:
       - name: Ruby Admin SDK
         working-directory: herald-admin-ruby
         run: ruby -e "require_relative 'lib/herald_admin'"
+
+  sdk-check-php:
+    name: PHP SDK Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+
+      - name: PHP Admin SDK
+        working-directory: herald-admin-php
+        run: php -r "require 'autoload.php'; new Herald\Admin\HeraldAdmin('http://localhost', token:'test'); echo 'OK';"
+
+  sdk-check-csharp:
+    name: C# SDK Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0"
+
+      - name: C# Admin SDK
+        working-directory: herald-admin-csharp
+        run: dotnet build
 
   sdk-check-chat:
     name: Chat SDK Build + Test

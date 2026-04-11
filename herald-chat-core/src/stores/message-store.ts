@@ -210,6 +210,13 @@ export class MessageStore {
     this.bumpVersion(reaction.stream);
   }
 
+  updateMeta(streamId: string, messageId: string, meta: unknown): void {
+    const msg = this.byId.get(messageId);
+    if (!msg) return;
+    msg.meta = meta;
+    this.bumpVersion(streamId);
+  }
+
   markDelivered(streamId: string, upToSeq: number, sender: string): boolean {
     const list = this.streams.get(streamId);
     if (!list) return false;

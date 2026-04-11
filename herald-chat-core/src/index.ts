@@ -16,3 +16,6 @@ export type {
   Middleware,
   PresenceStatus,
 } from "./types.js";
+
+// Re-export SDK types consumers need for seedHistory / loadMoreWith
+export type { EventNew } from "herald-sdk";

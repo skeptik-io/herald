@@ -276,6 +276,15 @@ export class ChatCore {
     this.chat.stopTyping(streamId);
   }
 
+  /**
+   * Update the `meta` field of a message in the store and notify subscribers.
+   * Useful for application-specific metadata (e.g. pinned state) that isn't
+   * covered by Herald's built-in edit/delete operations.
+   */
+  updateMessageMeta(streamId: string, messageId: string, meta: unknown): void {
+    this.messages.updateMeta(streamId, messageId, meta);
+  }
+
   // ── Read state ───────────────────────────────────────────────────
 
   getMessages(streamId: string): Message[] {
@@ -333,6 +342,20 @@ export class ChatCore {
     }
   }
 
+  /**
+   * Seed the message store with externally-sourced history (e.g. from a
+   * database). Call after `joinStream()` so cursor tracking is initialized.
+   *
+   * Events are deduplicated and inserted in seq order via `prependBatch`.
+   */
+  seedHistory(streamId: string, events: EventNew[], hasMore: boolean): void {
+    this.messages.prependBatch(streamId, events, hasMore);
+    if (events.length > 0) {
+      const maxSeq = Math.max(...events.map((e) => e.seq));
+      this.cursors.bumpLatestSeq(streamId, maxSeq);
+    }
+  }
+
   async loadMore(streamId: string): Promise<boolean> {
     const scroll = this.scrollStates.get(streamId);
     if (scroll?.getSnapshot().isLoadingMore) return false;
@@ -348,6 +371,31 @@ export class ChatCore {
       });
       this.messages.prependBatch(streamId, batch.events, batch.has_more);
       return batch.has_more;
+    } finally {
+      scroll?.setLoadingMore(false);
+    }
+  }
+
+  /**
+   * Like `loadMore()` but uses an external fetcher instead of the Herald
+   * server. Useful when the Herald WAL's TTL has expired and history must
+   * come from an application database.
+   */
+  async loadMoreWith(
+    streamId: string,
+    fetcher: (before: number, limit: number) => Promise<{ events: EventNew[]; hasMore: boolean }>,
+  ): Promise<boolean> {
+    const scroll = this.scrollStates.get(streamId);
+    if (scroll?.getSnapshot().isLoadingMore) return false;
+
+    const oldest = this.messages.getOldestSeq(streamId);
+    if (!this.messages.hasMoreHistory(streamId)) return false;
+
+    scroll?.setLoadingMore(true);
+    try {
+      const batch = await fetcher(oldest!, this.loadMoreLimit);
+      this.messages.prependBatch(streamId, batch.events, batch.hasMore);
+      return batch.hasMore;
     } finally {
       scroll?.setLoadingMore(false);
     }

@@ -40,10 +40,12 @@ await admin.members.remove('general', 'alice');
 await admin.events.publish('general', 'system', 'Welcome!');
 const history = await admin.events.list('general', { limit: 50 });
 
-// Presence
+// Presence (top-level namespace)
 const presence = await admin.presence.getUser('alice');
+const bulk = await admin.presence.getBulk(['alice', 'bob', 'carol']);
 const streamPresence = await admin.presence.getStream('general');
 const cursors = await admin.presence.getCursors('general');
+await admin.presence.setOverride('alice', { status: 'dnd', until: '2026-04-14T09:00:00Z' });
 
 // Health
 const health = await admin.health();

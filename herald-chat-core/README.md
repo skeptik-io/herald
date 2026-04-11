@@ -10,6 +10,8 @@ npm install @skeptik-io/herald-chat --registry=https://npm.pkg.github.com
 
 Peer dependencies: `@skeptik-io/herald-sdk ^2.0.0`, `@skeptik-io/herald-chat-sdk ^0.1.0`
 
+Optional peer dependency: `@skeptik-io/herald-presence-sdk ^0.1.0` (for manual presence overrides)
+
 ## Usage
 
 ```typescript
@@ -25,9 +27,10 @@ const core = new ChatCore({
   client,
   chat,
   userId: 'alice',
-  scrollIdleMs: 1000,     // debounce auto-mark-read (default 1000ms)
-  loadMoreLimit: 50,      // events per loadMore() call (default 50)
-  middleware: [            // optional — runs before/after store mutations
+  presence: presenceClient, // optional — HeraldPresenceClient for manual overrides
+  scrollIdleMs: 1000,       // debounce auto-mark-read (default 1000ms)
+  loadMoreLimit: 50,        // events per loadMore() call (default 50)
+  middleware: [              // optional — runs before/after store mutations
     (event, next) => {
       console.log(event.type);
       next(); // call next() to proceed; code after next() runs post-mutation
@@ -50,6 +53,11 @@ core.getMembers('general');      // Member[] with presence
 core.getTypingUsers('general');  // string[] of user IDs
 core.getUnreadCount('general');  // number
 core.getRemoteCursors('general'); // Map<userId, seq>
+
+// Manual presence overrides (requires presence client)
+core.setPresence('dnd', '2026-04-14T09:00:00Z');
+core.clearPresenceOverride();
+core.getPresence();               // PresenceStatus
 
 // Subscribe to changes (useSyncExternalStore contract)
 const unsub = core.subscribe('messages:general', () => {
@@ -146,6 +154,7 @@ core.subscribe('ephemeral:general', () => {
 | `unread:total` | Total unread across all streams changes |
 | `scroll:{streamId}` | Scroll state changes |
 | `liveness` | Browser activity state changes |
+| `presence` | Presence state changes |
 | `ephemeral:{streamId}` | Ephemeral event received |
 | `event:{streamId}` | Any event received (both full-state and listen-only) |
 

@@ -142,7 +142,7 @@ The client passes `key`, `token`, `userId`, and `streams` when constructing `Her
 | `event.edited` | `{ stream, id, seq, body, edited_at }` |
 | `reaction.changed` | `{ stream, event_id, emoji, user_id, action }` |
 | `event.received` | `{ stream, event, sender, data }` |
-| `presence` | `{ user_id, presence }` |
+| `presence` | `{ user_id, presence, until? }` |
 | `cursor` | `{ stream, user_id, seq }` |
 | `member.joined` / `member.left` | `{ stream, user_id, role }` |
 | `typing` | `{ stream, user_id, active }` |

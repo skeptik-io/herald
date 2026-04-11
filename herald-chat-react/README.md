@@ -81,7 +81,11 @@ const totalUnread = useTotalUnreadCount();      // number (all streams)
 
 ```typescript
 const liveness = useLiveness();   // "active" | "idle" | "hidden"
-const presence = usePresence();   // "online" | "away" (derived from liveness)
+
+const { presence, setPresence, clearOverride } = usePresence();
+// presence: PresenceStatus — current presence ("online" | "away" | "dnd" | "offline")
+// setPresence(status, until?) — set a manual override
+// clearOverride() — revert to connection-derived presence
 ```
 
 ### useEphemeral
@@ -150,8 +154,8 @@ Scroll coordination: live-edge detection, load-more triggers, scroll anchoring o
 
 ```tsx
 <PresenceIndicator streamId="general">
-  {({ members, onlineCount }) => (
-    <span>{onlineCount} online</span>
+  {({ online, away, dnd, offline }) => (
+    <span>{online.length} online, {away.length} away, {dnd.length} DND</span>
   )}
 </PresenceIndicator>
 ```

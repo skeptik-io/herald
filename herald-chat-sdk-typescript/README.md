@@ -28,8 +28,7 @@ await client.connect();
 await chat.editEvent('general', 'event-id', 'corrected text');
 await chat.deleteEvent('general', 'event-id');
 
-// Presence and typing
-chat.setPresence('online');    // "online" | "away" | "dnd"
+// Typing
 chat.startTyping('general');
 chat.stopTyping('general');
 
@@ -48,7 +47,6 @@ chat.removeReaction('general', 'event-id', '🔥');
 | `editEvent(stream, id, body)` | `event.edit` | `Promise<EventAck>` |
 | `deleteEvent(stream, id)` | `event.delete` | `Promise<EventAck>` |
 | `updateCursor(stream, seq)` | `cursor.update` | fire-and-forget |
-| `setPresence(status)` | `presence.set` | fire-and-forget |
 | `startTyping(stream)` | `typing.start` | fire-and-forget |
 | `stopTyping(stream)` | `typing.stop` | fire-and-forget |
 | `addReaction(stream, eventId, emoji)` | `reaction.add` | fire-and-forget |

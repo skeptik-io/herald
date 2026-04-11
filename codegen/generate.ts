@@ -4,13 +4,13 @@
 
 import { resolve, dirname } from "node:path";
 import { existsSync } from "node:fs";
-import { parseSpec } from "./parser.js";
-import { emitTypeScript } from "./emitters/typescript.js";
-import { emitGo } from "./emitters/go.js";
-import { emitPython } from "./emitters/python.js";
-import { emitRuby } from "./emitters/ruby.js";
-import { emitPhp } from "./emitters/php.js";
-import { emitCsharp } from "./emitters/csharp.js";
+import { parseSpec } from "./parser.ts";
+import { emitTypeScript } from "./emitters/typescript.ts";
+import { emitGo } from "./emitters/go.ts";
+import { emitPython } from "./emitters/python.ts";
+import { emitRuby } from "./emitters/ruby.ts";
+import { emitPhp } from "./emitters/php.ts";
+import { emitCsharp } from "./emitters/csharp.ts";
 
 const ROOT = resolve(dirname(import.meta.url.replace("file://", "")), "..");
 const SPEC_PATH = resolve(ROOT, "openapi.yaml");

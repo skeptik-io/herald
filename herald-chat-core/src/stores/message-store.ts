@@ -29,6 +29,11 @@ export class MessageStore {
       if (this.byId.has(extId) || this.externalIds.has(extId)) return false;
     }
 
+    // Fallback dedup: match by sender + timestamp when IDs can't be linked
+    // (e.g. legacy events with "__pending__" dbMessageId)
+    const existing = this.streams.get(event.stream);
+    if (existing && isFuzzyDuplicate(existing, event)) return false;
+
     const msg = eventToMessage(event);
     this.byId.set(msg.id, msg);
 
@@ -78,6 +83,8 @@ export class MessageStore {
       // Also check if this message's ID was registered as an external ID
       // by a prior appendEvent (catch-up arrived before seed)
       if (!dup && this.externalIds.has(event.id)) dup = true;
+      // Fallback: fuzzy match by sender + timestamp
+      if (!dup && isFuzzyDuplicate(list, event)) dup = true;
       if (dup) continue;
 
       const msg = eventToMessage(event);
@@ -382,6 +389,27 @@ function extractExternalIds(meta: unknown): string[] {
     ids.push(m.dbMessageId);
   }
   return ids;
+}
+
+/**
+ * Fuzzy duplicate check: returns true if the list already contains a message
+ * with the same sender, body, and timestamp within 2 seconds. Catches
+ * duplicates when the same message arrives from different sources (DB seed
+ * vs Herald catch-up) with no shared external IDs.
+ */
+function isFuzzyDuplicate(list: Message[], event: EventNew): boolean {
+  const ts = event.sent_at;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (Math.abs(m.sentAt - ts) > 2000) {
+      // Messages are sorted by seq; once we pass the timestamp window
+      // scanning backwards, no earlier message will match either
+      if (m.sentAt < ts - 2000) break;
+      continue;
+    }
+    if (m.sender === event.sender && m.body === event.body) return true;
+  }
+  return false;
 }
 
 function eventToMessage(event: EventNew): Message {

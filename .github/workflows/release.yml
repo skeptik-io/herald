@@ -11,11 +11,41 @@ env:
 
 jobs:
   docker:
-    name: Docker Image → GHCR
+    name: Docker ${{ matrix.variant }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+
+    strategy:
+      matrix:
+        include:
+          - variant: social
+            suffix: ""
+            features: "chat,presence"
+            tags: |
+              type=semver,pattern={{version}}
+              type=semver,pattern={{major}}.{{minor}}
+              type=raw,value=latest
+            cache-to: type=gha,mode=max
+          - variant: transport
+            suffix: "-transport"
+            features: ""
+            tags: |
+              type=raw,value=${{ github.ref_name }}
+              type=raw,value=latest
+          - variant: chat
+            suffix: "-chat"
+            features: "chat"
+            tags: |
+              type=raw,value=${{ github.ref_name }}
+              type=raw,value=latest
+          - variant: presence
+            suffix: "-presence"
+            features: "presence"
+            tags: |
+              type=raw,value=${{ github.ref_name }}
+              type=raw,value=latest
 
     steps:
       - uses: actions/checkout@v4
@@ -31,11 +61,8 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.suffix }}
+          tags: ${{ matrix.tags }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -67,49 +94,16 @@ jobs:
           token = "${{ secrets.SHROUDB_REGISTRY_TOKEN }}"
           EOF
 
-      - name: Build and push — herald/social (default, chat + presence)
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: HERALD_FEATURES=chat,presence
+          build-args: HERALD_FEATURES=${{ matrix.features }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push — herald/herald (transport only)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-transport:${{ github.ref_name }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-transport:latest
-          build-args: HERALD_FEATURES=
-          cache-from: type=gha
-
-      - name: Build and push — herald/chat (transport + chat)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-chat:${{ github.ref_name }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-chat:latest
-          build-args: HERALD_FEATURES=chat
-          cache-from: type=gha
-
-      - name: Build and push — herald/presence (transport + presence)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-presence:${{ github.ref_name }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-presence:latest
-          build-args: HERALD_FEATURES=presence
-          cache-from: type=gha
+          cache-to: ${{ matrix.cache-to || '' }}
 
   # Admin UI Docker image moved to skeptik-io/herald-admin-ui repo
 

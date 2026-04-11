@@ -89,18 +89,7 @@ await test("updateCursor sends cursor.update frame with correct payload", async 
   assert(p.seq === 42, `seq: ${p.seq}`);
 });
 
-await test("setPresence sends presence.set frame with status", async () => {
-  const { mock, chat } = makeClient();
-
-  for (const status of ["online", "away", "dnd"] as const) {
-    mock.reset();
-    chat.setPresence(status);
-    assert(mock.sentFrames.length === 1, `${status}: 1 frame`);
-    const p = mock.sentFrames[0].payload as { status: string };
-    assert(p.status === status, `${status}: payload.status`);
-    assert(mock.sentFrames[0].type === "presence.set", `${status}: type`);
-  }
-});
+// setPresence moved to herald-presence-sdk — tested there
 
 await test("startTyping sends typing.start frame", async () => {
   const { mock, chat } = makeClient();
@@ -250,20 +239,18 @@ await test("fire-and-forget calls are independent", async () => {
   const { mock, chat } = makeClient();
 
   chat.updateCursor("s1", 1);
-  chat.setPresence("away");
   chat.startTyping("s2");
   chat.stopTyping("s2");
   chat.addReaction("s1", "e1", "👍");
   chat.removeReaction("s1", "e1", "👍");
 
-  assert(mock.sentFrames.length === 6, `expected 6 frames, got ${mock.sentFrames.length}`);
+  assert(mock.sentFrames.length === 5, `expected 5 frames, got ${mock.sentFrames.length}`);
   const types = mock.sentFrames.map((f) => f.type);
   assert(types[0] === "cursor.update", "1st");
-  assert(types[1] === "presence.set", "2nd");
-  assert(types[2] === "typing.start", "3rd");
-  assert(types[3] === "typing.stop", "4th");
-  assert(types[4] === "reaction.add", "5th");
-  assert(types[5] === "reaction.remove", "6th");
+  assert(types[1] === "typing.start", "2nd");
+  assert(types[2] === "typing.stop", "3rd");
+  assert(types[3] === "reaction.add", "4th");
+  assert(types[4] === "reaction.remove", "5th");
 });
 
 // ── Edge: special characters in stream/event IDs ───────────────────

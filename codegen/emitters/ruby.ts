@@ -274,9 +274,9 @@ module HeraldAdmin
       data["users"]
     end
 
-    def set_override(user_id, status:, until: nil)
+    def set_override(user_id, status:, expires_at: nil)
       body = { status: status }
-      body[:until] = until if until
+      body[:until] = expires_at if expires_at
       @t.request("POST", "/presence/\#{ERB::Util.url_encode(user_id)}", body)
     end
   end

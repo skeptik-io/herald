@@ -85,7 +85,9 @@ class HttpTransport
 
         // Parse status code from response headers
         \$statusCode = 0;
-        \$responseHeaders = http_get_last_response_headers() ?? [];
+        \$responseHeaders = function_exists('http_get_last_response_headers')
+            ? (http_get_last_response_headers() ?? [])
+            : (\$http_response_header ?? []);
         foreach (\$responseHeaders as \$hdr) {
             if (preg_match('/^HTTP\\/[\\d.]+ (\\d+)/', \$hdr, \$m)) {
                 \$statusCode = (int)\$m[1];

@@ -1,90 +1,87 @@
 # Herald
 
-Multi-tenant WebSocket chat server. Rooms, messages, presence, cursors, and real-time fan-out — with ABAC authorization via ShroudB Sentry. Message body is opaque; consumers handle their own encryption and search.
+Persistent realtime event streams with built-in authorization. Multi-tenant by default. Event body is opaque — Herald is a transport and delivery layer.
 
 ## What It Does
 
-Herald replaces Pusher/Soketi/Ably with a purpose-built chat server. Browsers connect via WebSocket for real-time messaging. Your backend manages rooms and members via HTTP. No external database required — Herald uses ShroudB's WAL-based storage engine for persistence. Message bodies are treated as opaque bytes — Herald stores and delivers them as-is.
+Herald delivers events in real time over WebSocket with persistence, ordering, and replay. Browsers connect via WebSocket. Your backend manages streams and members via HTTP. No external database — Herald uses ShroudB's WAL-based storage engine.
 
 ```
                     wss://herald.example.com/ws
-Browser ←— WebSocket (/ws) ——→  HERALD  ←—— HTTP API ——→ Your Backend
-                                   │
+Browser <-- WebSocket (/ws) -->  HERALD  <-- HTTP API --> Your Backend
+                                   |
                            ShroudB engines (embedded)
-                           └── Sentry — authorization policies
+                           +-- Sentry (authorization)
 ```
 
-WebSocket and HTTP API share the same port. Behind any reverse proxy (nginx, Caddy, cloud LB), TLS terminates at the proxy and Herald serves both protocols on one port. For direct TCP deployments, a standalone WebSocket port is also available.
+WebSocket and HTTP API share the same port. Behind any reverse proxy, TLS terminates at the proxy and Herald serves both protocols on one port.
 
-### Create a room and add members (HTTP)
+### Create a stream and add members (HTTP)
 
 ```bash
-curl -X POST http://localhost:6201/rooms \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -d '{"id": "general", "name": "General Chat"}'
+curl -X POST http://localhost:6200/streams \
+  -H "Authorization: Basic $(echo -n 'key:secret' | base64)" \
+  -d '{"id": "general", "name": "General"}'
 
-curl -X POST http://localhost:6201/rooms/general/members \
-  -H "Authorization: Bearer $API_TOKEN" \
+curl -X POST http://localhost:6200/streams/general/members \
+  -H "Authorization: Basic $(echo -n 'key:secret' | base64)" \
   -d '{"user_id": "alice", "role": "owner"}'
 ```
 
-### Connect, subscribe, send messages (WebSocket)
+### Connect, subscribe, publish (WebSocket)
 
 ```json
-→ {"type": "auth", "payload": {"token": "<jwt with tenant claim>"}}
-← {"type": "auth_ok", "payload": {"user_id": "alice"}}
+--> {"type": "subscribe", "payload": {"streams": ["general"]}}
+<-- {"type": "subscribed", "payload": {"stream": "general", "members": [...], "cursor": 0, "latest_seq": 42}}
 
-→ {"type": "subscribe", "payload": {"rooms": ["general"]}}
-← {"type": "subscribed", "payload": {"room": "general", "members": [...], "cursor": 0, "latest_seq": 42}}
-
-→ {"type": "message.send", "ref": "m1", "payload": {"room": "general", "body": "hello!"}}
-← {"type": "message.ack", "ref": "m1", "payload": {"id": "msg_abc", "seq": 43}}
+--> {"type": "event.publish", "ref": "r1", "payload": {"stream": "general", "body": "hello!"}}
+<-- {"type": "event.ack", "ref": "r1", "payload": {"id": "evt_abc", "seq": 43}}
 ```
 
-## Architecture
+## Engine Architecture
 
-- **Storage**: ShroudB WAL engine — ~80µs writes (vs ~580µs Postgres). No external database.
-- **Multi-tenant**: Each tenant has isolated rooms, members, and JWT secrets. `--single-tenant` mode for self-hosted.
-- **Opaque message body**: Herald stores and delivers message bodies as-is. Consumers handle their own encryption and search.
-- **ShroudB Sentry**: ABAC authorization runs **embedded by default** — no config needed. Remote mode available via `[shroudb]` config.
-- **Circuit breakers**: Remote Sentry connections have timeout + circuit breaker + graceful degradation.
-- **Latency histograms**: Per-stage Prometheus metrics (store, fanout).
+Herald's core is a transport layer. Domain-specific features are provided by **engines** — isolated modules that register routes, lifecycle hooks, and background tasks.
 
-## Performance
+| Image | Features | Use Case |
+|-------|----------|----------|
+| `ghcr.io/skeptik-io/herald` | Transport + Chat + Presence | Chat apps with rich presence (default) |
+| `ghcr.io/skeptik-io/herald-transport` | Transport only | IoT, activity feeds, service-to-service events |
+| `ghcr.io/skeptik-io/herald-chat` | Transport + Chat | Messaging with reactions, typing, read receipts — basic presence only |
+| `ghcr.io/skeptik-io/herald-presence` | Transport + Presence | Rich presence without chat (creator platforms, team dashboards) |
 
-| Throughput | p50 Latency |
-|-----------|-------------|
-| ~8,000 msg/s | 0.10ms |
+### Transport (always included)
+
+Publish, subscribe, replay, delivery acknowledgment, ephemeral triggers, stream/member CRUD, multi-tenant auth, connection-derived presence (online/offline).
+
+### Chat Engine
+
+Event editing and deletion, emoji reactions, read cursors, typing indicators, user blocking with fanout filtering.
+
+### Presence Engine
+
+Manual presence overrides (away, dnd, appear offline), per-override expiry ("away until Monday 9am"), WAL-persisted overrides that survive restarts, `__presence` broadcast stream for global real-time presence, watchlist with override awareness, batch presence queries, admin presence API.
 
 ## Quick Start
-
-### From source
-
-```bash
-cargo build --release
-cp herald.toml.example herald.toml
-# Edit: set auth.jwt_secret, auth.super_admin_token
-
-SHROUDB_MASTER_KEY="$(openssl rand -hex 32)" ./target/release/herald herald.toml
-```
 
 ### Docker
 
 ```bash
 docker pull ghcr.io/skeptik-io/herald:latest
 
-# Single port — HTTP API + WebSocket (/ws) on 6201
 docker run -d \
-  -p 6201:6201 \
+  -p 6200:6200 \
   -e SHROUDB_MASTER_KEY="$(openssl rand -hex 32)" \
-  -e HERALD_JWT_SECRET="your-secret" \
-  -e HERALD_SUPER_ADMIN_TOKEN="your-admin-token" \
-  -e HERALD_API_TOKENS="your-api-token" \
-  -v herald-data:/data/herald-data \
+  -e HERALD_AUTH_PASSWORD="your-admin-password" \
+  -v herald-data:/data \
   ghcr.io/skeptik-io/herald:latest
 ```
 
-Behind a reverse proxy (nginx, Caddy, Traefik), expose port 6201 and route `/ws` for WebSocket upgrades. No TLS config needed in Herald — the proxy handles it.
+### From source
+
+```bash
+cargo build --release
+SHROUDB_MASTER_KEY="$(openssl rand -hex 32)" ./target/release/herald
+```
 
 ### Docker Compose
 
@@ -93,46 +90,65 @@ services:
   herald:
     image: ghcr.io/skeptik-io/herald:latest
     ports:
-      - "6201:6201"
+      - "6200:6200"
     environment:
       SHROUDB_MASTER_KEY: "your-64-hex-char-master-key"
-      HERALD_JWT_SECRET: "your-secret"
-      HERALD_SUPER_ADMIN_TOKEN: "your-admin-token"
-      HERALD_API_TOKENS: "your-api-token"
+      HERALD_AUTH_PASSWORD: "your-admin-password"
     volumes:
-      - herald-data:/data/herald-data
+      - herald-data:/data
 
 volumes:
   herald-data:
 ```
 
-## Multi-Tenancy
+## Architecture
 
-Single-tenant (`--single-tenant`, default): auto-creates a `default` tenant from config. Multi-tenant (`--multi-tenant`): tenants managed via admin API.
+- **Storage**: ShroudB WAL engine. No external database.
+- **Multi-tenant**: Each tenant has isolated streams, members, and API keys. A default tenant is auto-created on first start.
+- **Opaque event body**: Herald stores and delivers event bodies as-is. Consumers handle their own encryption and search.
+- **HMAC-SHA256 auth**: Tenants use a key+secret model. WebSocket auth via signed query params. Admin API uses bearer token.
+- **ShroudB Sentry**: ABAC authorization runs embedded by default. Remote mode available.
+- **Circuit breakers**: Remote connections have timeout + circuit breaker + graceful degradation.
+- **Latency histograms**: Per-stage Prometheus metrics at `/metrics`.
 
-JWTs must include a `tenant` claim: `{"sub": "alice", "tenant": "acme", "rooms": ["general"], ...}`
+## Performance
+
+| Throughput | p50 Latency |
+|-----------|-------------|
+| ~8,000 msg/s | 0.10ms |
 
 ## SDKs
 
 Published to GitHub Packages on each release.
 
-| Package | Language | Install |
-|---|---|---|
-| `@skeptik-io/herald-sdk` | TypeScript | `npm install @skeptik-io/herald-sdk` |
-| `@skeptik-io/herald-admin` | TypeScript | `npm install @skeptik-io/herald-admin` |
-| `herald-admin-go` | Go | `go get github.com/skeptik-io/herald/herald-admin-go` |
-| `herald-admin` | Python | Release artifact |
-| `herald-admin` | Ruby | `gem install herald-admin --source https://rubygems.pkg.github.com/skeptik-io` |
+### WebSocket (client-side)
+
+| Package | Description |
+|---------|-------------|
+| `@skeptik-io/herald-sdk` | Browser WebSocket client — events, reconnect, dedup, E2EE |
+| `@skeptik-io/herald-chat-sdk` | Chat frame extensions — edit, delete, cursor, typing, reactions |
+| `@skeptik-io/herald-presence-sdk` | Presence frame extensions — setPresence, clearOverride |
+| `@skeptik-io/herald-chat` | Framework-agnostic chat state machine |
+| `@skeptik-io/herald-chat-react` | React hooks and headless components |
+
+### HTTP Admin (server-side, all codegen-managed)
+
+| Package | Language |
+|---------|----------|
+| `@skeptik-io/herald-admin` | TypeScript |
+| `herald-admin-go` | Go |
+| `herald-admin` | Python |
+| `herald-admin` | Ruby |
+| `herald-admin-php` | PHP |
+| `Herald.Admin` | C# |
 
 ## Ecosystem
 
 - **ShroudB Sentry** — ABAC authorization (embedded or remote)
-- **ShroudB Sigil** — standalone tenant user authentication service (not embedded in Herald)
-- **Meterd** — MAU tracking, quota enforcement, Stripe billing (runs at proxy layer via Envoy ExtProc, not embedded in Herald)
+- **ShroudB Sigil** — standalone tenant user auth service (not embedded in Herald)
+- **Meterd** — MAU tracking, quota enforcement, Stripe billing (proxy layer via Envoy ExtProc)
 
-Herald treats message bodies as opaque bytes. If you need encryption, encrypt before sending. If you need search, index in your own backend via webhooks.
-
-See [DOCS.md](DOCS.md) for complete reference. See [ARCHITECTURE.md](ARCHITECTURE.md) for protocol specification.
+See [DOCS.md](DOCS.md) for configuration and API reference. See [ARCHITECTURE.md](ARCHITECTURE.md) for protocol specification.
 
 ## License
 

@@ -6,6 +6,10 @@ export class MessageStore {
   private streams = new Map<string, Message[]>();
   private byId = new Map<string, Message>();
   private byLocalId = new Map<string, Message>();
+  /** Maps external IDs (e.g. DB message IDs carried in meta) to stored message IDs.
+   *  Enables dedup when the same message arrives from different sources
+   *  (e.g. DB seed vs Herald catch-up) with different primary IDs. */
+  private externalIds = new Map<string, string>();
   private oldestSeq = new Map<string, number>();
   private _hasMore = new Map<string, boolean>();
   private versions = new Map<string, number>();
@@ -17,8 +21,24 @@ export class MessageStore {
   appendEvent(event: EventNew): boolean {
     if (this.byId.has(event.id)) return false;
 
+    // Cross-source dedup: check if an external ID from this event's meta
+    // matches an already-stored message (e.g. DB-seeded message with a
+    // different primary ID than the Herald event ID).
+    const extIds = extractExternalIds(event.meta);
+    for (const extId of extIds) {
+      if (this.byId.has(extId) || this.externalIds.has(extId)) return false;
+    }
+
     const msg = eventToMessage(event);
     this.byId.set(msg.id, msg);
+
+    // Register this event's external IDs so future seeds can dedup against it
+    for (const extId of extIds) {
+      this.externalIds.set(extId, msg.id);
+    }
+    // Also register this event's primary ID as an external ID target so
+    // seeds with matching meta can be deduped
+    this.externalIds.set(msg.id, msg.id);
 
     const list = this.getOrCreateList(event.stream);
     // Binary search insert by seq (ascending), treating seq 0 (optimistic) as +Infinity
@@ -48,8 +68,26 @@ export class MessageStore {
 
     for (const event of events) {
       if (this.byId.has(event.id)) continue;
+
+      // Cross-source dedup (same logic as appendEvent)
+      const extIds = extractExternalIds(event.meta);
+      let dup = false;
+      for (const extId of extIds) {
+        if (this.byId.has(extId) || this.externalIds.has(extId)) { dup = true; break; }
+      }
+      // Also check if this message's ID was registered as an external ID
+      // by a prior appendEvent (catch-up arrived before seed)
+      if (!dup && this.externalIds.has(event.id)) dup = true;
+      if (dup) continue;
+
       const msg = eventToMessage(event);
       this.byId.set(msg.id, msg);
+
+      // Register external IDs for future dedup
+      for (const extId of extIds) {
+        this.externalIds.set(extId, msg.id);
+      }
+      this.externalIds.set(msg.id, msg.id);
 
       // Binary search insert (same algorithm as appendEvent)
       const seq = msg.seq === 0 ? Infinity : msg.seq;
@@ -282,7 +320,11 @@ export class MessageStore {
     if (list) {
       for (const msg of list) {
         this.byId.delete(msg.id);
+        this.externalIds.delete(msg.id);
         if (msg.localId) this.byLocalId.delete(msg.localId);
+        // Clean up external ID mappings for this message
+        const extIds = extractExternalIds(msg.meta);
+        for (const extId of extIds) this.externalIds.delete(extId);
       }
     }
     this.streams.delete(streamId);
@@ -295,6 +337,7 @@ export class MessageStore {
     this.streams.clear();
     this.byId.clear();
     this.byLocalId.clear();
+    this.externalIds.clear();
     this.oldestSeq.clear();
     this._hasMore.clear();
     this.versions.clear();
@@ -324,6 +367,22 @@ export class MessageStore {
 }
 
 const EMPTY: Message[] = [];
+
+/**
+ * Extract external IDs from event meta that can be used for cross-source
+ * deduplication. Consumers may embed their own message IDs (e.g. from a
+ * database) in `meta.id` or `meta.dbMessageId`.
+ */
+function extractExternalIds(meta: unknown): string[] {
+  if (!meta || typeof meta !== "object") return [];
+  const m = meta as Record<string, unknown>;
+  const ids: string[] = [];
+  if (typeof m.id === "string" && m.id) ids.push(m.id);
+  if (typeof m.dbMessageId === "string" && m.dbMessageId && m.dbMessageId !== "__pending__") {
+    ids.push(m.dbMessageId);
+  }
+  return ids;
+}
 
 function eventToMessage(event: EventNew): Message {
   return {

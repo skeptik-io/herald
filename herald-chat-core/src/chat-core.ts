@@ -39,6 +39,10 @@ export class ChatCore {
   // Track pending optimistic sends for retry/cancel
   private pendingSends = new Map<string, { streamId: string; body: string; meta?: unknown; parentId?: string }>();
 
+  // Typing throttle: at most one frame per TYPING_THROTTLE_MS per stream
+  private lastTypingSent = new Map<string, number>();
+  private static readonly TYPING_THROTTLE_MS = 2000;
+
   // Bound handlers for clean detach
   private _onEvent: Handler<EventNew>;
   private _onEdited: Handler<EventEdited>;
@@ -179,6 +183,7 @@ export class ChatCore {
     this.typing.clear(streamId);
     this.scrollStates.delete(streamId);
     this.lastEphemeral.delete(streamId);
+    this.lastTypingSent.delete(streamId);
   }
 
   async listen(streamId: string): Promise<void> {
@@ -269,6 +274,10 @@ export class ChatCore {
   }
 
   startTyping(streamId: string): void {
+    const now = Date.now();
+    const last = this.lastTypingSent.get(streamId) ?? 0;
+    if (now - last < ChatCore.TYPING_THROTTLE_MS) return;
+    this.lastTypingSent.set(streamId, now);
     this.chat.startTyping(streamId);
   }
 

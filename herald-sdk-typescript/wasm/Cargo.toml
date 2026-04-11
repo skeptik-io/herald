@@ -21,8 +21,8 @@ ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
 
-shroudb-cipher-blind = { version = "1.4.9", registry = "shroudb", default-features = false, features = ["wasm"] }
-shroudb-veil-blind = { version = "1.4.1", registry = "shroudb", default-features = false, features = ["wasm"] }
+shroudb-cipher-blind = { version = "1.4.14", registry = "shroudb", default-features = false, features = ["wasm"] }
+shroudb-veil-blind = { version = "1.7.1", registry = "shroudb", default-features = false, features = ["wasm"] }
 
 [profile.release]
 opt-level = "s"

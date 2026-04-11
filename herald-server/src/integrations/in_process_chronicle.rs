@@ -112,7 +112,7 @@ impl<S: Store> ChronicleOps for InProcessChronicleOps<S> {
 
     async fn query(&self, filter: &AuditQuery) -> Option<AuditQueryResult> {
         let event_filter = query_to_filter(filter);
-        let result = self.engine.query(&event_filter);
+        let result = self.engine.query(&event_filter).await;
         Some(AuditQueryResult {
             matched: result.matched,
             events: result.events.iter().map(|e| chronicle_to_view(e)).collect(),
@@ -121,7 +121,7 @@ impl<S: Store> ChronicleOps for InProcessChronicleOps<S> {
 
     async fn count(&self, filter: &AuditQuery) -> Option<AuditCountResult> {
         let event_filter = query_to_filter(filter);
-        let result = self.engine.count(&event_filter);
+        let result = self.engine.count(&event_filter).await;
         Some(AuditCountResult {
             count: result.count,
         })

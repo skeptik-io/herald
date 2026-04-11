@@ -571,6 +571,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -782,7 +788,7 @@ checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -790,6 +796,11 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "headers"
@@ -1310,6 +1321,15 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "lru"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1dc47f592c06f33f8e3aea9591776ec7c9f9e4124778ff8a3c3b87159f7e593"
+dependencies = [
+ "hashbrown 0.16.1",
+]
 
 [[package]]
 name = "matchers"
@@ -2291,9 +2311,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-chronicle-client"
-version = "1.5.0"
+version = "1.7.1"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "05cd7c595545549d04deeb3441513f41c08bca2ab88a0a3baa4839041d0b4278"
+checksum = "cf6132473cd68e5f745c0eee30b85a79a5eda22c170ab4b9e4ff07a32b0931a5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2305,9 +2325,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-chronicle-core"
-version = "1.5.0"
+version = "1.7.1"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "e09c316285d231c5c08b2885781a29d5070de846f7cf109513b5ab5ac19ce27b"
+checksum = "1abb730994e722ae1c18f1d0f40548f54ed6f6396c9af97daba6294a9ebce3a5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2317,12 +2337,13 @@ dependencies = [
 
 [[package]]
 name = "shroudb-chronicle-engine"
-version = "1.5.0"
+version = "1.7.1"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "30314bda1b6fe348ab13d9c3eeb1ae61dc1e0199a23c64ccc52527d96c399bf1"
+checksum = "ac895978e2901968a7f06dc40fda46260841286b5ed406bd48d46c4384bb5fe3"
 dependencies = [
  "dashmap",
  "hex",
+ "lru",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -2336,9 +2357,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-client"
-version = "1.0.2"
+version = "1.0.11"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "9ae6b3be5c96aaba19708e3ef87c50086599e52dbcec04afbf358c5a9be71d7f"
+checksum = "a549c3c304eb5fdceb62f2e66262938372197e96c7a6e4e3ff2ac0c743e6e94d"
 dependencies = [
  "rustls",
  "rustls-native-certs",
@@ -2353,9 +2374,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-client-common"
-version = "0.1.0"
+version = "0.2.0"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "6ba7d69d552424894bc83e9cfe134b13c5c52ed6a753e9f6ce6dd09fa2335677"
+checksum = "9c4e6a263d9e57723137a0b67856433a4b2ee64a7a2b49d0925441284eff56fa"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -2364,9 +2385,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-courier-client"
-version = "1.4.5"
+version = "1.4.8"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "935d878cfee52c2082b6fe3629cc2a56addcc3df437cb9ea8cac2f670f68878e"
+checksum = "55e7b7ca785c18efb0d8e573648d174bdbe5681f41a8484a1ee91e43ea865c4b"
 dependencies = [
  "serde",
  "serde_json",
@@ -2376,9 +2397,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-courier-core"
-version = "1.4.5"
+version = "1.4.8"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "581ae53884f4c649a18bd0d2c0c034d01fc4d96a20100f526633a2458ed5f946"
+checksum = "749e0940fb0a1bcec3c993344cda3444e27de7ba80af2b02292258a0831db683"
 dependencies = [
  "serde",
  "serde_json",
@@ -2388,9 +2409,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-courier-engine"
-version = "1.4.5"
+version = "1.4.8"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "09ba95f1a612249e69bf5d0529857fb73a90ac0eaf5b7a1b5091cb43bde9b6e6"
+checksum = "00ec5779cbf14aea6fda0623cd43793c0f1ee87477f952f9dc58292cc184e611"
 dependencies = [
  "dashmap",
  "serde",
@@ -2409,9 +2430,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-crypto"
-version = "0.1.2"
+version = "0.1.4"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "f6759687677659a3a9f4b71972f665eba6be704b4cb370c47ee98682f03ce36f"
+checksum = "45c6685b945af28ff305e987f17f68e9f7ba4d2f97cc5a6f4bd2c0dd85245d40"
 dependencies = [
  "argon2",
  "base62",
@@ -2433,9 +2454,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-keep-client"
-version = "1.4.7"
+version = "1.6.1"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "2e74fec8959b6dc4b91c6fc1a202008a7ead354b04b05864e2be012a6bfa3a53"
+checksum = "ce46fb965062b362f09aeb86feb58d9296da009a45c967c999df3eff1a3e18a2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2445,9 +2466,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-sentry-client"
-version = "1.4.11"
+version = "1.4.14"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "2e2da9cf407568f638ad9bca7970f9c25693a2a95aaeb5473ca4944e169015d8"
+checksum = "00709af5b02f1f171c915dff26c7d34fcd726b4a225db5c099fec7e0b2801eb9"
 dependencies = [
  "serde_json",
  "shroudb-client-common",
@@ -2457,9 +2478,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-sentry-core"
-version = "1.4.11"
+version = "1.4.14"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "cd2d76b61a43890ecd595366064192c28d96fcf7d04441ab7c239aab815e795e"
+checksum = "5b0b18f76b42b5e30cf58e56676f0cb2fc9e323b4f8f0e2ff28477e94672b722"
 dependencies = [
  "serde",
  "shroudb-acl",
@@ -2469,9 +2490,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-sentry-engine"
-version = "1.4.11"
+version = "1.4.14"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "c166f8f351f46ddafbc8fb3601bbba4f9e387750af4ee9604039af039238323b"
+checksum = "a5c94ee5ecbda49ac3211211d3f470059a4a5418d1058ef799b94c62ae1065bb"
 dependencies = [
  "base64",
  "dashmap",
@@ -2491,9 +2512,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-storage"
-version = "0.2.15"
+version = "0.3.0"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "c9b08b0124790519fa8679e6e56feaa5d6d791d4373f2045fa07e78ae94dc671"
+checksum = "f673c156d61a10d26e1499c21b110a8acfa93ddb2ec9b1ca54fe671d493aa803"
 dependencies = [
  "crc32fast",
  "dashmap",
@@ -2515,9 +2536,9 @@ dependencies = [
 
 [[package]]
 name = "shroudb-store"
-version = "0.1.2"
+version = "0.1.3"
 source = "sparse+https://crates.shroudb.dev/api/v1/crates/"
-checksum = "0694dcb4e2f2736fd129dcffda5f6c95e6e442cb5511276490808a17b9591e33"
+checksum = "c402c01f3aaaeccb235afd2f4c8a565c6f375f6db9dc28597435eb4d0f9bcd71"
 dependencies = [
  "serde",
  "serde_json",

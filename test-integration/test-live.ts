@@ -11,6 +11,7 @@ import { randomBytes, createHmac } from "node:crypto";
 
 import { HeraldClient } from "herald-sdk";
 import { HeraldChatClient } from "herald-chat-sdk";
+import { HeraldPresenceClient } from "herald-presence-sdk";
 import { HeraldAdmin } from "herald-admin";
 
 let passed = 0;
@@ -410,7 +411,7 @@ async function run(): Promise<void> {
 
     await test("chat: presence round-trip", async () => {
       const alice = makeClient("alice", ["general"]);
-      const aliceChat = new HeraldChatClient(alice);
+      const alicePresence = new HeraldPresenceClient(alice);
       const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
@@ -419,7 +420,7 @@ async function run(): Promise<void> {
       await bob.subscribe(["general"]);
 
       const presencePromise = waitForEvent<any>(bob, "presence");
-      aliceChat.setPresence("away");
+      alicePresence.setPresence("away");
       const presence = await presencePromise;
       assert(presence.user_id === "alice", `user_id: ${presence.user_id}`);
       assert(presence.presence === "away", `presence: ${presence.presence}`);
@@ -468,7 +469,7 @@ async function run(): Promise<void> {
       await client.connect();
       await client.subscribe(["general"]);
 
-      const members = await tenantAdmin.chat.presence.getStream("general");
+      const members = await tenantAdmin.presence.getStream("general");
       assert(Array.isArray(members), "is array");
       const alice = members.find((m: any) => m.user_id === "alice");
       assert(alice !== undefined, "alice found");

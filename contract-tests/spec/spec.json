@@ -402,6 +402,26 @@
           }
         },
         {
+          "id": "presence_get_bulk",
+          "operation": "presence.getBulk",
+          "input": { "user_ids": ["ct-user-a"] },
+          "expect": {
+            "type": "array"
+          }
+        },
+        {
+          "id": "presence_set_override",
+          "operation": "presence.setOverride",
+          "input": { "user_id": "ct-user-a", "status": "away" },
+          "expect": {
+            "fields": {
+              "user_id": "string",
+              "status": "string",
+              "connections": "number"
+            }
+          }
+        },
+        {
           "id": "presence_get_cursors",
           "operation": "presence.getCursors",
           "input": { "stream_id": "ct-stream-1" },

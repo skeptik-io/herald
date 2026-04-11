@@ -37,7 +37,7 @@ pub async fn block_user(
     if let Err(e) = crate::http::validation::validate_id(&req.blocked_id, "blocked_id") {
         return (*e).into_response();
     }
-    match crate::chat::store_blocks::block(&*state.db, tid, &req.user_id, &req.blocked_id).await {
+    match crate::store::blocks::block(&*state.db, tid, &req.user_id, &req.blocked_id).await {
         Ok(()) => {
             state.audit(
                 tid,
@@ -83,7 +83,7 @@ pub async fn unblock_user(
     if let Err(e) = crate::http::validation::validate_id(&req.blocked_id, "blocked_id") {
         return (*e).into_response();
     }
-    match crate::chat::store_blocks::unblock(&*state.db, tid, &req.user_id, &req.blocked_id).await {
+    match crate::store::blocks::unblock(&*state.db, tid, &req.user_id, &req.blocked_id).await {
         Ok(true) => {
             state.audit(
                 tid,
@@ -126,7 +126,7 @@ pub async fn list_blocked(
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    match crate::chat::store_blocks::list_blocked(&*state.db, tid, &user_id).await {
+    match crate::store::blocks::list_blocked(&*state.db, tid, &user_id).await {
         Ok(blocked) => Json(serde_json::json!({"blocked": blocked})).into_response(),
         Err(e) => {
             tracing::error!(tenant = tid, "list blocked failed: {e}");

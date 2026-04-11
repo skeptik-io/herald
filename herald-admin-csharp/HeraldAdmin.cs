@@ -7,12 +7,10 @@ namespace Herald.Admin;
 
 public class ChatNamespaces
 {
-    public PresenceNamespace Presence { get; }
     public BlockNamespace Blocks { get; }
 
-    internal ChatNamespaces(PresenceNamespace presence, BlockNamespace blocks)
+    internal ChatNamespaces(BlockNamespace blocks)
     {
-        Presence = presence;
         Blocks = blocks;
     }
 }
@@ -24,6 +22,7 @@ public class HeraldAdmin
     public EventNamespace Events { get; }
     public TenantNamespace Tenants { get; }
     public AuditNamespace? Audit { get; }
+    public PresenceNamespace Presence { get; }
     public ChatNamespaces Chat { get; }
     private readonly HttpTransport _transport;
 
@@ -34,9 +33,8 @@ public class HeraldAdmin
         Members = new MemberNamespace(_transport);
         Events = new EventNamespace(_transport);
         Tenants = new TenantNamespace(_transport);
-        var presence = new PresenceNamespace(_transport);
-        var blocks = new BlockNamespace(_transport);
-        Chat = new ChatNamespaces(presence, blocks);
+        Presence = new PresenceNamespace(_transport);
+        Chat = new ChatNamespaces(new BlockNamespace(_transport));
         Audit = tenantId != null ? new AuditNamespace(_transport, tenantId) : null;
     }
 
@@ -192,6 +190,19 @@ public class PresenceNamespace
     {
         var data = await _t.RequestAsync("GET", $"/streams/{Uri.EscapeDataString(streamId)}/cursors");
         return data!.Value.GetProperty("cursors").EnumerateArray().Select(JsonHelper.ToDict).ToList();
+    }
+
+    public async Task<List<Dictionary<string, object?>>> GetBulkAsync(string[] userIds)
+    {
+        var ids = string.Join(",", userIds.Select(Uri.EscapeDataString));
+        var data = await _t.RequestAsync("GET", $"/presence?user_ids={ids}");
+        return data!.Value.GetProperty("users").EnumerateArray().Select(JsonHelper.ToDict).ToList();
+    }
+
+    public async Task<Dictionary<string, object?>> SetOverrideAsync(string userId, Dictionary<string, object?> options)
+    {
+        var data = await _t.RequestAsync("POST", $"/presence/{Uri.EscapeDataString(userId)}", options);
+        return JsonHelper.ToDict(data!.Value);
     }
 }
 

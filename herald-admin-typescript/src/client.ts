@@ -52,12 +52,11 @@ export class HeraldAdmin {
   public readonly tenants: TenantNamespace;
   public readonly audit: AuditNamespace | undefined;
 
-  /**
-   * Chat-specific namespaces (conversational layer).
-   * Groups presence and block operations that are part of the Herald Chat product.
-   */
+  /** Presence queries and admin overrides. */
+  public readonly presence: PresenceNamespace;
+
+  /** Chat-specific namespaces (conversational layer). */
   public readonly chat: {
-    readonly presence: PresenceNamespace;
     readonly blocks: BlockNamespace;
   };
 
@@ -72,8 +71,8 @@ export class HeraldAdmin {
     this.members = new MemberNamespace(this.transport);
     this.events = new EventNamespace(this.transport);
     this.tenants = new TenantNamespace(this.transport);
+    this.presence = new PresenceNamespace(this.transport);
     this.chat = {
-      presence: new PresenceNamespace(this.transport),
       blocks: new BlockNamespace(this.transport),
     };
     this.audit = options.tenantId

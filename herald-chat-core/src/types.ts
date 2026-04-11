@@ -2,6 +2,7 @@ import type { HeraldClient, EventNew, EventEdited, EventDeleted,
   ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
   EventReceived, EventDelivered } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
+import type { HeraldPresenceClient, PresenceStatus } from "herald-presence-sdk";
 
 // ---------------------------------------------------------------------------
 // Message
@@ -121,6 +122,9 @@ export type Middleware = (event: ChatEvent, next: () => void) => void;
 export interface ChatCoreOptions {
   client: HeraldClient;
   chat: HeraldChatClient;
+  /** Optional presence client for manual overrides. If omitted, liveness
+   *  still tracks state locally but doesn't send presence frames. */
+  presence?: HeraldPresenceClient;
   /** Current user ID (from JWT). Needed for unread/cursor logic. */
   userId: string;
   /** Omit to disable automatic presence management. */
@@ -132,3 +136,5 @@ export interface ChatCoreOptions {
   /** Optional middleware chain. Runs before/after store mutations — see {@link Middleware}. */
   middleware?: Middleware[];
 }
+
+export type { PresenceStatus } from "herald-presence-sdk";

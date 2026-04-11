@@ -16,7 +16,6 @@ use Herald\Admin\Namespaces\BlockNamespace;
 class ChatNamespaces
 {
     public function __construct(
-        public readonly PresenceNamespace $presence,
         public readonly BlockNamespace $blocks,
     ) {}
 }
@@ -28,6 +27,7 @@ class HeraldAdmin
     public readonly EventNamespace $events;
     public readonly TenantNamespace $tenants;
     public readonly ?AuditNamespace $audit;
+    public readonly PresenceNamespace $presence;
     public readonly ChatNamespaces $chat;
     private readonly HttpTransport $transport;
 
@@ -43,9 +43,8 @@ class HeraldAdmin
         $this->members = new MemberNamespace($this->transport);
         $this->events = new EventNamespace($this->transport);
         $this->tenants = new TenantNamespace($this->transport);
-        $presence = new PresenceNamespace($this->transport);
-        $blocks = new BlockNamespace($this->transport);
-        $this->chat = new ChatNamespaces($presence, $blocks);
+        $this->presence = new PresenceNamespace($this->transport);
+        $this->chat = new ChatNamespaces(new BlockNamespace($this->transport));
         $this->audit = $tenantId !== null ? new AuditNamespace($this->transport, $tenantId) : null;
     }
 

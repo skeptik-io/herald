@@ -2,6 +2,7 @@ import type { HeraldClient, EventNew, EventEdited, EventDeleted, EventAck, Event
   ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
   EventReceived, EventDelivered, SubscribedPayload } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
+import type { HeraldPresenceClient, PresenceStatus } from "herald-presence-sdk";
 import type { ChatCoreOptions, Message, PendingMessage, Member, ScrollStateSnapshot, LivenessState, ChatEvent, Middleware } from "./types.js";
 import { Notifier } from "./notifier.js";
 import { MessageStore } from "./stores/message-store.js";
@@ -16,7 +17,9 @@ type Handler<T> = (data: T) => void;
 export class ChatCore {
   private client: HeraldClient;
   private chat: HeraldChatClient;
+  private presenceClient: HeraldPresenceClient | null = null;
   private userId: string;
+  private manualPresenceOverride: PresenceStatus | null = null;
   private notifier: Notifier;
   private messages: MessageStore;
   private cursors: CursorStore;
@@ -54,6 +57,7 @@ export class ChatCore {
   constructor(options: ChatCoreOptions) {
     this.client = options.client;
     this.chat = options.chat;
+    this.presenceClient = options.presence ?? null;
     this.userId = options.userId;
     this.scrollIdleMs = options.scrollIdleMs ?? 1000;
     this.loadMoreLimit = options.loadMoreLimit ?? 50;
@@ -564,15 +568,59 @@ export class ChatCore {
   }
 
   private syncPresence(state: LivenessState): void {
+    // Don't auto-sync if user has a manual override active
+    if (this.manualPresenceOverride) return;
+    if (!this.presenceClient) return;
+
     switch (state) {
       case "active":
-        this.chat.setPresence("online");
+        this.presenceClient.setPresence("online");
         break;
       case "idle":
       case "hidden":
-        this.chat.setPresence("away");
+        this.presenceClient.setPresence("away");
         break;
     }
+  }
+
+  // ── Presence manual override API ──────────────────────────────────
+
+  /**
+   * Set a manual presence override. Suspends automatic liveness-driven
+   * presence until {@link clearPresenceOverride} is called.
+   *
+   * @param status - The presence status to set.
+   * @param until - Optional ISO 8601 datetime for when the override expires.
+   */
+  setPresence(status: PresenceStatus, until?: string): void {
+    if (status === "online") {
+      this.clearPresenceOverride();
+      return;
+    }
+    this.manualPresenceOverride = status;
+    this.presenceClient?.setPresence(status, until);
+    this.notifier.notify("presence");
+  }
+
+  /**
+   * Clear any manual presence override. Reverts to liveness-driven presence
+   * and re-enables automatic sync.
+   */
+  clearPresenceOverride(): void {
+    this.manualPresenceOverride = null;
+    this.presenceClient?.clearOverride();
+    this.notifier.notify("presence");
+    // Re-sync from current liveness state
+    this.syncPresence(this.livenessState);
+  }
+
+  /**
+   * Get the current effective presence: manual override if set, otherwise
+   * liveness-derived.
+   */
+  getPresence(): PresenceStatus {
+    if (this.manualPresenceOverride) return this.manualPresenceOverride;
+    return this.livenessState === "active" ? "online" : "away";
   }
 }
 

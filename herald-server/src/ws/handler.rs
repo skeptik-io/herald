@@ -52,7 +52,10 @@ pub async fn handle_message(
         } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_edit(state, ctx, tx, ref_, stream, id, body).await;
+                crate::engines::chat::ws_handler::handle_edit(
+                    state, ctx, tx, ref_, stream, id, body,
+                )
+                .await;
             }
             #[cfg(not(feature = "chat"))]
             {
@@ -61,7 +64,7 @@ pub async fn handle_message(
                     .send(ServerMessage::error(
                         ref_,
                         ErrorCode::BadRequest,
-                        "event editing requires the chat feature",
+                        "event editing requires the chat engine",
                     ))
                     .await;
             }
@@ -69,26 +72,34 @@ pub async fn handle_message(
         ClientMessage::CursorUpdate { stream, seq } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_cursor_update(state, ctx, stream, seq).await;
+                crate::engines::chat::ws_handler::handle_cursor_update(state, ctx, stream, seq)
+                    .await;
             }
             #[cfg(not(feature = "chat"))]
             {
                 let _ = (stream, seq);
             }
         }
-        ClientMessage::PresenceSet { ref_, status } => {
-            #[cfg(feature = "chat")]
+        ClientMessage::PresenceSet {
+            ref_,
+            status,
+            until,
+        } => {
+            #[cfg(feature = "presence")]
             {
-                crate::chat::ws_handler::handle_presence_set(state, ctx, tx, ref_, status).await;
+                crate::engines::presence::ws_handler::handle_presence_set(
+                    state, ctx, tx, ref_, status, until,
+                )
+                .await;
             }
-            #[cfg(not(feature = "chat"))]
+            #[cfg(not(feature = "presence"))]
             {
-                let _ = status;
+                let _ = (status, until);
                 let _ = tx
                     .send(ServerMessage::error(
                         ref_,
                         ErrorCode::BadRequest,
-                        "manual presence requires the chat feature",
+                        "manual presence requires the presence engine",
                     ))
                     .await;
             }
@@ -96,7 +107,7 @@ pub async fn handle_message(
         ClientMessage::TypingStart { stream } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_typing(state, ctx, &stream, true).await;
+                crate::engines::chat::ws_handler::handle_typing(state, ctx, &stream, true).await;
             }
             #[cfg(not(feature = "chat"))]
             {
@@ -106,7 +117,7 @@ pub async fn handle_message(
         ClientMessage::TypingStop { stream } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_typing(state, ctx, &stream, false).await;
+                crate::engines::chat::ws_handler::handle_typing(state, ctx, &stream, false).await;
             }
             #[cfg(not(feature = "chat"))]
             {
@@ -125,7 +136,8 @@ pub async fn handle_message(
         ClientMessage::EventDelete { ref_, stream, id } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_delete(state, ctx, tx, ref_, stream, id).await;
+                crate::engines::chat::ws_handler::handle_delete(state, ctx, tx, ref_, stream, id)
+                    .await;
             }
             #[cfg(not(feature = "chat"))]
             {
@@ -134,7 +146,7 @@ pub async fn handle_message(
                     .send(ServerMessage::error(
                         ref_,
                         ErrorCode::BadRequest,
-                        "event deletion requires the chat feature",
+                        "event deletion requires the chat engine",
                     ))
                     .await;
             }
@@ -155,7 +167,7 @@ pub async fn handle_message(
         } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_reaction(
+                crate::engines::chat::ws_handler::handle_reaction(
                     state, ctx, tx, ref_, stream, event_id, emoji, true,
                 )
                 .await;
@@ -167,7 +179,7 @@ pub async fn handle_message(
                     .send(ServerMessage::error(
                         ref_,
                         ErrorCode::BadRequest,
-                        "reactions require the chat feature",
+                        "reactions require the chat engine",
                     ))
                     .await;
             }
@@ -180,7 +192,7 @@ pub async fn handle_message(
         } => {
             #[cfg(feature = "chat")]
             {
-                crate::chat::ws_handler::handle_reaction(
+                crate::engines::chat::ws_handler::handle_reaction(
                     state, ctx, tx, ref_, stream, event_id, emoji, false,
                 )
                 .await;
@@ -192,7 +204,7 @@ pub async fn handle_message(
                     .send(ServerMessage::error(
                         ref_,
                         ErrorCode::BadRequest,
-                        "reactions require the chat feature",
+                        "reactions require the chat engine",
                     ))
                     .await;
             }
@@ -269,7 +281,7 @@ async fn handle_subscribe(
         let mut member_presence = Vec::new();
         for uid in &members {
             if let Ok(Some(member)) = store::members::get(&*state.db, tid, &stream_id, uid).await {
-                let presence = state.presence.resolve(
+                let presence = state.presence.resolve_status(
                     tid,
                     uid,
                     &state.connections,
@@ -283,11 +295,6 @@ async fn handle_subscribe(
             }
         }
 
-        #[cfg(feature = "chat")]
-        let cursor = crate::chat::store_cursors::get(&*state.db, tid, &stream_id, &ctx.user_id)
-            .await
-            .unwrap_or(0);
-        #[cfg(not(feature = "chat"))]
         let cursor = store::cursors::get(&*state.db, tid, &stream_id, &ctx.user_id)
             .await
             .unwrap_or(0);

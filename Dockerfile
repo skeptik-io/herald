@@ -1,5 +1,7 @@
 FROM rust:1.92-slim AS builder
 
+ARG HERALD_FEATURES="chat,presence"
+
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
@@ -11,7 +13,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY herald-core/ herald-core/
 COPY herald-server/ herald-server/
 
-RUN cargo build --release --bin herald
+RUN if [ -z "$HERALD_FEATURES" ]; then \
+      cargo build --release --bin herald --no-default-features; \
+    else \
+      cargo build --release --bin herald --no-default-features --features "$HERALD_FEATURES"; \
+    fi
 
 FROM debian:trixie-slim
 

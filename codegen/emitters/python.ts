@@ -327,6 +327,17 @@ class PresenceNamespace:
         data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/cursors")
         return [Cursor(user_id=c["user_id"], seq=c["seq"]) for c in data["cursors"]]
 
+    def get_bulk(self, user_ids: list[str]) -> list[dict]:
+        ids = ",".join(user_ids)
+        data = self._t.request("GET", f"/presence?user_ids={quote(ids, safe='')}")
+        return data["users"]
+
+    def set_override(self, user_id: str, *, status: str, until: str | None = None) -> dict:
+        body: dict[str, Any] = {"status": status}
+        if until is not None:
+            body["until"] = until
+        return self._t.request("POST", f"/presence/{quote(user_id, safe='')}", body)
+
 
 class TenantNamespace:
     def __init__(self, t: HttpTransport) -> None:
@@ -484,7 +495,6 @@ class AuditNamespace:
 @dataclass
 class _ChatNamespaces:
     """Chat-specific namespaces (conversational layer)."""
-    presence: PresenceNamespace
     blocks: BlockNamespace
 
 
@@ -507,18 +517,11 @@ class HeraldAdmin:
         self.events = EventNamespace(t)
         self.tenants = TenantNamespace(t)
         self.audit = AuditNamespace(t)
-        # Chat namespaces (conversational layer) — deprecated at top level, use self.chat.*
+        # Presence queries and admin overrides
         self.presence = PresenceNamespace(t)
-        self.blocks = BlockNamespace(t)
+        # Chat namespaces (conversational layer)
+        self.chat = _ChatNamespaces(blocks=BlockNamespace(t))
         self._transport = t
-
-    @property
-    def chat(self) -> "_ChatNamespaces":
-        """Chat-specific namespaces (conversational layer).
-
-        Groups presence and block operations that are part of the Herald Chat product.
-        """
-        return _ChatNamespaces(presence=self.presence, blocks=self.blocks)
 
     @classmethod
     def from_options(cls, opts: HeraldAdminOptions) -> "HeraldAdmin":

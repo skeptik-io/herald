@@ -67,15 +67,49 @@ jobs:
           token = "${{ secrets.SHROUDB_REGISTRY_TOKEN }}"
           EOF
 
-      - name: Build and push
+      - name: Build and push — herald/social (default, chat + presence)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: HERALD_FEATURES=chat,presence
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push — herald/herald (transport only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-transport:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-transport:latest
+          build-args: HERALD_FEATURES=
+          cache-from: type=gha
+
+      - name: Build and push — herald/chat (transport + chat)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-chat:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-chat:latest
+          build-args: HERALD_FEATURES=chat
+          cache-from: type=gha
+
+      - name: Build and push — herald/presence (transport + presence)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-presence:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-presence:latest
+          build-args: HERALD_FEATURES=presence
+          cache-from: type=gha
 
   # Admin UI Docker image moved to skeptik-io/herald-admin-ui repo
 
@@ -121,6 +155,22 @@ jobs:
           npx tsc
           npm publish
 
+      - name: Publish herald-presence-sdk (WS presence frame types)
+        working-directory: herald-presence-sdk-typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm install
+          npx tsc
+          jq --arg v "$VERSION" '
+            .name = "@skeptik-io/herald-presence-sdk" |
+            .version = $v |
+            .publishConfig = {"registry": "https://npm.pkg.github.com"} |
+            .peerDependencies = {"@skeptik-io/herald-sdk": (">=" + $v)}
+          ' package.json > package.tmp && mv package.tmp package.json
+          find dist -name '*.js' -o -name '*.d.ts' | xargs sed -i 's|"herald-sdk"|"@skeptik-io/herald-sdk"|g'
+          npm publish
+
       - name: Publish herald-chat-sdk (WS chat frame types)
         working-directory: herald-chat-sdk-typescript
         env:
@@ -152,10 +202,14 @@ jobs:
             .publishConfig = {"registry": "https://npm.pkg.github.com"} |
             .peerDependencies = {
               "@skeptik-io/herald-sdk": (">=" + $v),
-              "@skeptik-io/herald-chat-sdk": (">=" + $v)
+              "@skeptik-io/herald-chat-sdk": (">=" + $v),
+              "@skeptik-io/herald-presence-sdk": (">=" + $v)
+            } |
+            .peerDependenciesMeta = {
+              "@skeptik-io/herald-presence-sdk": {"optional": true}
             }
           ' package.json > package.tmp && mv package.tmp package.json
-          find dist -name '*.js' -o -name '*.d.ts' | xargs sed -i 's|"herald-chat-sdk"|"@skeptik-io/herald-chat-sdk"|g; s|"herald-sdk"|"@skeptik-io/herald-sdk"|g'
+          find dist -name '*.js' -o -name '*.d.ts' | xargs sed -i 's|"herald-presence-sdk"|"@skeptik-io/herald-presence-sdk"|g; s|"herald-chat-sdk"|"@skeptik-io/herald-chat-sdk"|g; s|"herald-sdk"|"@skeptik-io/herald-sdk"|g'
           npm publish
 
       - name: Publish herald-chat-react (React hooks + components)

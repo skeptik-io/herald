@@ -746,6 +746,28 @@ paths:
           description: Prometheus metrics
           content:
             text/plain: {}
+  /presence:
+    get:
+      tags:
+      - presence
+      operationId: batch_presence
+      parameters:
+      - name: user_ids
+        in: query
+        description: Comma-separated user IDs
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Batch presence query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchPresenceResponse'
+      security:
+      - basic_auth: []
+      - bearer_auth: []
   /presence/{user_id}:
     get:
       tags:
@@ -761,6 +783,33 @@ paths:
       responses:
         '200':
           description: User presence status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPresenceResponse'
+      security:
+      - basic_auth: []
+      - bearer_auth: []
+    post:
+      tags:
+      - presence
+      operationId: admin_set_presence
+      parameters:
+      - name: user_id
+        in: path
+        description: User ID
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminSetPresenceRequest'
+        required: true
+      responses:
+        '200':
+          description: Presence override applied
           content:
             application/json:
               schema:
@@ -1594,6 +1643,14 @@ components:
         events:
           type: array
           items: {}
+    AdminSetPresenceRequest:
+      type: object
+      description: Request body for admin presence override.
+      required:
+      - status
+      properties:
+        status:
+          $ref: '#/components/schemas/PresenceStatus'
     AdminStatsResponse:
       type: object
       required:
@@ -1658,6 +1715,29 @@ components:
         matched:
           type: integer
           minimum: 0
+    BatchPresenceResponse:
+      type: object
+      required:
+      - users
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchPresenceUser'
+    BatchPresenceUser:
+      type: object
+      required:
+      - user_id
+      - status
+      - connections
+      properties:
+        connections:
+          type: integer
+          minimum: 0
+        status:
+          $ref: '#/components/schemas/PresenceStatus'
+        user_id:
+          type: string
     BlockListResponse:
       type: object
       required:

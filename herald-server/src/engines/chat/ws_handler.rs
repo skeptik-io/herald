@@ -249,15 +249,9 @@ pub async fn handle_cursor_update(
     seq: u64,
 ) {
     let now = now_millis();
-    let _ = crate::chat::store_cursors::upsert(
-        &*state.db,
-        &ctx.tenant_id,
-        &stream,
-        &ctx.user_id,
-        seq,
-        now,
-    )
-    .await;
+    let _ =
+        crate::store::cursors::upsert(&*state.db, &ctx.tenant_id, &stream, &ctx.user_id, seq, now)
+            .await;
 
     let msg = ServerMessage::CursorMoved {
         payload: CursorMovedPayload {
@@ -275,39 +269,6 @@ pub async fn handle_cursor_update(
         Some(&ctx.user_id),
     )
     .await;
-}
-
-pub async fn handle_presence_set(
-    state: &Arc<AppState>,
-    ctx: &ConnContext,
-    _tx: &mpsc::Sender<ServerMessage>,
-    _ref_: Option<String>,
-    status: herald_core::presence::PresenceStatus,
-) {
-    state
-        .presence
-        .set_manual(&ctx.tenant_id, &ctx.user_id, status);
-
-    let msg = ServerMessage::PresenceChanged {
-        payload: PresenceChangedPayload {
-            user_id: ctx.user_id.clone(),
-            presence: status,
-        },
-    };
-    for stream_id in state
-        .streams
-        .get_member_streams(&ctx.tenant_id, &ctx.user_id)
-    {
-        fanout_to_stream(
-            state,
-            &ctx.tenant_id,
-            &stream_id,
-            &msg,
-            None,
-            Some(&ctx.user_id),
-        )
-        .await;
-    }
 }
 
 pub async fn handle_typing(state: &Arc<AppState>, ctx: &ConnContext, stream: &str, active: bool) {
@@ -366,19 +327,12 @@ pub async fn handle_reaction(
     }
 
     let result = if add {
-        crate::chat::store_reactions::add(&*state.db, tid, &stream, &event_id, &emoji, &ctx.user_id)
+        crate::store::reactions::add(&*state.db, tid, &stream, &event_id, &emoji, &ctx.user_id)
             .await
     } else {
-        crate::chat::store_reactions::remove(
-            &*state.db,
-            tid,
-            &stream,
-            &event_id,
-            &emoji,
-            &ctx.user_id,
-        )
-        .await
-        .map(|_| ())
+        crate::store::reactions::remove(&*state.db, tid, &stream, &event_id, &emoji, &ctx.user_id)
+            .await
+            .map(|_| ())
     };
 
     match result {

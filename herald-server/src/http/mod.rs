@@ -1,11 +1,8 @@
 pub mod admin;
-#[cfg(not(feature = "chat"))]
-pub mod blocks;
 pub mod events;
 pub mod health;
 pub mod members;
 pub mod openapi;
-#[cfg(not(feature = "chat"))]
 pub mod presence;
 pub mod self_service;
 pub mod streams;
@@ -60,56 +57,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/streams/{id}/trigger", post(events::trigger_ephemeral))
         .route("/stats", get(health::tenant_stats));
 
-    // Chat-specific routes: event edit/delete, reactions, cursors, presence, blocks
-    #[cfg(feature = "chat")]
+    // Presence routes: served by the presence engine when enabled,
+    // otherwise fall back to the basic http::presence handlers.
+    #[cfg(not(feature = "presence"))]
     {
         tenant_api = tenant_api
-            .route(
-                "/streams/{id}/events/{event_id}",
-                delete(crate::chat::http_events_ext::delete_event)
-                    .patch(crate::chat::http_events_ext::edit_event),
-            )
-            .route(
-                "/streams/{id}/events/{event_id}/reactions",
-                get(crate::chat::http_events_ext::get_reactions),
-            )
-            .route(
-                "/streams/{id}/cursors",
-                get(crate::chat::http_events_ext::list_cursors),
-            )
-            .route(
-                "/streams/{id}/presence",
-                get(crate::chat::http_presence::stream_presence),
-            )
-            .route(
-                "/presence/{user_id}",
-                get(crate::chat::http_presence::user_presence),
-            )
-            .route("/blocks", post(crate::chat::http_blocks::block_user))
-            .route("/blocks", delete(crate::chat::http_blocks::unblock_user))
-            .route(
-                "/blocks/{user_id}",
-                get(crate::chat::http_blocks::list_blocked),
-            );
+            .route("/streams/{id}/presence", get(presence::stream_presence))
+            .route("/presence/{user_id}", get(presence::user_presence));
     }
 
-    #[cfg(not(feature = "chat"))]
-    {
-        tenant_api = tenant_api
-            .route(
-                "/streams/{id}/events/{event_id}",
-                delete(events::delete_event).patch(events::edit_event),
-            )
-            .route(
-                "/streams/{id}/events/{event_id}/reactions",
-                get(events::get_reactions),
-            )
-            .route("/streams/{id}/cursors", get(events::list_cursors))
-            .route("/streams/{id}/presence", get(presence::stream_presence))
-            .route("/presence/{user_id}", get(presence::user_presence))
-            .route("/blocks", post(blocks::block_user))
-            .route("/blocks", delete(blocks::unblock_user))
-            .route("/blocks/{user_id}", get(blocks::list_blocked));
+    // Merge routes from registered engines (chat, presence, etc.)
+    for engine_routes in state.engines.tenant_routes(state.clone()) {
+        tenant_api = tenant_api.merge(engine_routes);
     }
 
     let tenant_api = tenant_api

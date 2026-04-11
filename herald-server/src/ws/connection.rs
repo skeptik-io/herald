@@ -90,19 +90,76 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
         }),
     );
 
-    broadcast_presence_change(&state, &tenant_id, &user_id).await;
+    // When the presence engine is active, it handles broadcast + watchlist
+    // via the on_connect hook below. Otherwise, fall back to inline logic.
+    #[cfg(not(feature = "presence"))]
+    {
+        broadcast_presence_change(&state, &tenant_id, &user_id).await;
 
-    // Set up watchlist and send initial online status
+        // Set up watchlist and send initial online status
+        if !auth.watchlist.is_empty() {
+            state
+                .connections
+                .set_watchlist(&tenant_id, &user_id, auth.watchlist.clone());
+
+            let online_ids: Vec<String> = auth
+                .watchlist
+                .iter()
+                .filter(|uid| state.connections.is_user_online(&tenant_id, uid))
+                .cloned()
+                .collect();
+            if !online_ids.is_empty() {
+                let _ = msg_tx
+                    .send(ServerMessage::WatchlistOnline {
+                        payload: WatchlistPayload {
+                            user_ids: online_ids,
+                        },
+                    })
+                    .await;
+            }
+        }
+
+        // Notify users who have this user in their watchlist (only on first connection)
+        if state
+            .connections
+            .user_connection_count(&tenant_id, &user_id)
+            == 1
+        {
+            let watchers = state.connections.get_watchers(&tenant_id, &user_id);
+            if !watchers.is_empty() {
+                let msg = ServerMessage::WatchlistOnline {
+                    payload: WatchlistPayload {
+                        user_ids: vec![user_id.clone()],
+                    },
+                };
+                for watcher_id in &watchers {
+                    state.connections.send_to_user(&tenant_id, watcher_id, &msg);
+                }
+            }
+        }
+    }
+
+    // When presence engine is active, set up watchlist here (the engine
+    // handles broadcast and watcher notification, but watchlist init + initial
+    // status for THIS connection needs the msg_tx which engines don't have).
+    #[cfg(feature = "presence")]
     if !auth.watchlist.is_empty() {
         state
             .connections
             .set_watchlist(&tenant_id, &user_id, auth.watchlist.clone());
 
-        // Send initial online status for watched users who are already connected
+        // Send initial presence status for watched users
         let online_ids: Vec<String> = auth
             .watchlist
             .iter()
-            .filter(|uid| state.connections.is_user_online(&tenant_id, uid))
+            .filter(|uid| {
+                state.presence.resolve_status(
+                    &tenant_id,
+                    uid,
+                    &state.connections,
+                    state.config.presence.manual_override_ttl_secs,
+                ) == herald_core::presence::PresenceStatus::Online
+            })
             .cloned()
             .collect();
         if !online_ids.is_empty() {
@@ -116,23 +173,14 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
         }
     }
 
-    // Notify users who have this user in their watchlist (only on first connection)
-    if state
-        .connections
-        .user_connection_count(&tenant_id, &user_id)
-        == 1
+    // Run engine on_connect hooks
     {
-        let watchers = state.connections.get_watchers(&tenant_id, &user_id);
-        if !watchers.is_empty() {
-            let msg = ServerMessage::WatchlistOnline {
-                payload: WatchlistPayload {
-                    user_ids: vec![user_id.clone()],
-                },
-            };
-            for watcher_id in &watchers {
-                state.connections.send_to_user(&tenant_id, watcher_id, &msg);
-            }
-        }
+        let engine_ctx = crate::engine::EngineConnContext {
+            conn_id,
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+        };
+        state.engines.on_connect(&state, &engine_ctx).await;
     }
 
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "authenticated");
@@ -254,29 +302,13 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
 
     debug!(conn = %conn_id, tenant = %tenant_id, user = %user_id, "disconnected");
 
-    // Clear typing state and broadcast stop for any streams this user was typing in
-    #[cfg(feature = "chat")]
-    {
-        let typing_streams = state.typing.remove_user(&tenant_id, &user_id);
-        for stream_id in typing_streams {
-            let msg = ServerMessage::Typing {
-                payload: herald_core::protocol::TypingPayload {
-                    stream: stream_id.clone(),
-                    user_id: user_id.clone(),
-                    active: false,
-                },
-            };
-            crate::ws::fanout::fanout_to_stream(
-                &state,
-                &tenant_id,
-                &stream_id,
-                &msg,
-                None,
-                Some(&user_id),
-            )
-            .await;
-        }
-    }
+    // Run engine on_disconnect hooks (typing cleanup, etc.)
+    let engine_ctx = crate::engine::EngineConnContext {
+        conn_id,
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+    };
+    state.engines.on_disconnect(&state, &engine_ctx).await;
 
     state.event_bus.push_event(
         crate::admin_events::EventKind::Disconnection,
@@ -301,12 +333,6 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
             );
         }
         for (stream_id, seq) in acked_seqs {
-            #[cfg(feature = "chat")]
-            let result = crate::chat::store_cursors::upsert(
-                &*state.db, &tenant_id, &stream_id, &user_id, seq, now,
-            )
-            .await;
-            #[cfg(not(feature = "chat"))]
             let result =
                 store::cursors::upsert(&*state.db, &tenant_id, &stream_id, &user_id, seq, now)
                     .await;
@@ -362,29 +388,43 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, auth: Au
                     .user_connection_count(&linger_tenant, &linger_user)
                     == 0
             {
-                broadcast_presence_change(&linger_state, &linger_tenant, &linger_user).await;
+                // When presence engine is not active, handle inline
+                #[cfg(not(feature = "presence"))]
+                {
+                    broadcast_presence_change(&linger_state, &linger_tenant, &linger_user).await;
 
-                // Notify watchlist watchers
-                let watchers = linger_state
-                    .connections
-                    .get_watchers(&linger_tenant, &linger_user);
-                if !watchers.is_empty() {
-                    let msg = ServerMessage::WatchlistOffline {
-                        payload: WatchlistPayload {
-                            user_ids: vec![linger_user.clone()],
-                        },
-                    };
-                    for watcher_id in &watchers {
-                        linger_state
-                            .connections
-                            .send_to_user(&linger_tenant, watcher_id, &msg);
+                    let watchers = linger_state
+                        .connections
+                        .get_watchers(&linger_tenant, &linger_user);
+                    if !watchers.is_empty() {
+                        let msg = ServerMessage::WatchlistOffline {
+                            payload: WatchlistPayload {
+                                user_ids: vec![linger_user.clone()],
+                            },
+                        };
+                        for watcher_id in &watchers {
+                            linger_state
+                                .connections
+                                .send_to_user(&linger_tenant, watcher_id, &msg);
+                        }
                     }
+
+                    linger_state
+                        .connections
+                        .cleanup_watchlist(&linger_tenant, &linger_user);
                 }
 
-                // Clean up watchlist entries for the disconnected user
+                // Run engine on_last_disconnect hooks (presence engine handles
+                // broadcast + watchlist + cleanup when active)
+                let engine_ctx = crate::engine::EngineConnContext {
+                    conn_id,
+                    tenant_id: linger_tenant.clone(),
+                    user_id: linger_user.clone(),
+                };
                 linger_state
-                    .connections
-                    .cleanup_watchlist(&linger_tenant, &linger_user);
+                    .engines
+                    .on_last_disconnect(&linger_state, &engine_ctx)
+                    .await;
             }
         });
     }
@@ -431,7 +471,7 @@ async fn reconnect_catchup(
             if let Ok(Some(member)) =
                 store::members::get(&*state.db, tenant_id, stream_id, uid).await
             {
-                let presence = state.presence.resolve(
+                let presence = state.presence.resolve_status(
                     tenant_id,
                     uid,
                     &state.connections,
@@ -445,11 +485,6 @@ async fn reconnect_catchup(
             }
         }
 
-        #[cfg(feature = "chat")]
-        let cursor = crate::chat::store_cursors::get(&*state.db, tenant_id, stream_id, user_id)
-            .await
-            .unwrap_or(0);
-        #[cfg(not(feature = "chat"))]
         let cursor = store::cursors::get(&*state.db, tenant_id, stream_id, user_id)
             .await
             .unwrap_or(0);
@@ -558,7 +593,7 @@ async fn reconnect_catchup_ack(
             if let Ok(Some(member)) =
                 store::members::get(&*state.db, tenant_id, stream_id, uid).await
             {
-                let presence = state.presence.resolve(
+                let presence = state.presence.resolve_status(
                     tenant_id,
                     uid,
                     &state.connections,
@@ -572,11 +607,6 @@ async fn reconnect_catchup_ack(
             }
         }
 
-        #[cfg(feature = "chat")]
-        let cursor = crate::chat::store_cursors::get(&*state.db, tenant_id, stream_id, user_id)
-            .await
-            .unwrap_or(0);
-        #[cfg(not(feature = "chat"))]
         let cursor = store::cursors::get(&*state.db, tenant_id, stream_id, user_id)
             .await
             .unwrap_or(0);
@@ -596,12 +626,6 @@ async fn reconnect_catchup_ack(
 
         // Read the last-acked seq from the cursor store.
         // The cursor store is shared across instances in clustered mode.
-        // (cursor module differs between chat and non-chat features)
-        #[cfg(feature = "chat")]
-        let acked_seq = crate::chat::store_cursors::get(&*state.db, tenant_id, stream_id, user_id)
-            .await
-            .unwrap_or(0);
-        #[cfg(not(feature = "chat"))]
         let acked_seq = store::cursors::get(&*state.db, tenant_id, stream_id, user_id)
             .await
             .unwrap_or(0);
@@ -669,8 +693,13 @@ async fn reconnect_catchup_ack(
     }
 }
 
+/// Well-known stream name for tenant-wide presence broadcast.
+/// Clients subscribe to this stream to receive all presence changes
+/// without needing per-user watchlists or shared stream membership.
+pub const PRESENCE_STREAM: &str = "__presence";
+
 pub async fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, user_id: &str) {
-    let status = state.presence.resolve(
+    let resolved = state.presence.resolve(
         tenant_id,
         user_id,
         &state.connections,
@@ -679,9 +708,12 @@ pub async fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, u
     let msg = ServerMessage::PresenceChanged {
         payload: PresenceChangedPayload {
             user_id: user_id.to_string(),
-            presence: status,
+            presence: resolved.status,
+            until: resolved.until.clone(),
         },
     };
+
+    // Broadcast to all streams the user is a member of
     for stream_id in state.streams.get_member_streams(tenant_id, user_id) {
         crate::ws::fanout::fanout_to_stream(
             state,
@@ -690,6 +722,21 @@ pub async fn broadcast_presence_change(state: &Arc<AppState>, tenant_id: &str, u
             &msg,
             None,
             Some(user_id),
+        )
+        .await;
+    }
+
+    // Broadcast to the tenant-wide __presence stream (if anyone is subscribed).
+    // This enables global real-time presence for apps where presence isn't
+    // scoped to shared streams (e.g. creator/fan platforms, team dashboards).
+    if state.streams.subscriber_count(tenant_id, PRESENCE_STREAM) > 0 {
+        crate::ws::fanout::fanout_to_stream(
+            state,
+            tenant_id,
+            PRESENCE_STREAM,
+            &msg,
+            None,
+            None, // No sender filtering on presence stream
         )
         .await;
     }

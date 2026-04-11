@@ -318,6 +318,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Register engines based on enabled features
+    let engines = herald_server::engines::default_engines();
+
     let state = AppState::build(AppStateBuilder {
         config,
         db,
@@ -325,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
         courier,
         chronicle,
         instance_id,
+        engines,
     });
 
     // Always hydrate all tenants from Store
@@ -333,6 +337,23 @@ async fn main() -> anyhow::Result<()> {
     // Ensure a default tenant exists (auto-creates on first startup)
     state.bootstrap_default_tenant().await?;
     info!(tenants = state.tenant_cache.len(), "tenants loaded");
+
+    // Hydrate presence overrides from WAL (when presence engine is active)
+    #[cfg(feature = "presence")]
+    {
+        match store::presence_overrides::load_all(&*state.db).await {
+            Ok(overrides) => {
+                let count = overrides.len();
+                state.presence.load_overrides(overrides);
+                if count > 0 {
+                    info!(count, "loaded presence overrides from WAL");
+                }
+            }
+            Err(e) => {
+                warn!("failed to load presence overrides: {e}");
+            }
+        }
+    }
 
     // Hydrate streams + members into memory
     let all_streams = store::streams::list_all(&*state.db).await?;
@@ -373,6 +394,30 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!(streams = all_streams.len(), "hydrated stream state");
+
+    // Create __presence stream for each tenant (presence engine global broadcast).
+    // This is a special stream that receives all presence changes tenant-wide.
+    // Clients subscribe to it for app-wide "who's online" without per-user watchlists.
+    #[cfg(feature = "presence")]
+    {
+        use herald_server::ws::connection::PRESENCE_STREAM;
+        for tc in state.tenant_cache.iter() {
+            let tid = tc.key().clone();
+            if !state.streams.stream_exists(&tid, PRESENCE_STREAM) {
+                state.streams.create_stream(&tid, PRESENCE_STREAM, 0, true);
+                // Persist the stream to WAL
+                let stream = herald_core::stream::Stream {
+                    id: herald_core::stream::StreamId(PRESENCE_STREAM.to_string()),
+                    name: "Presence".to_string(),
+                    meta: None,
+                    created_at: herald_server::ws::connection::now_millis(),
+                    public: true,
+                    archived: false,
+                };
+                let _ = store::streams::insert(&*state.db, &tid, &stream).await;
+            }
+        }
+    }
 
     // Stats snapshot collector — every 60 seconds
     let stats_state = state.clone();
@@ -422,35 +467,22 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Typing TTL expiry — every 5 seconds (chat feature only)
-    #[cfg(feature = "chat")]
-    let typing_handle = {
-        let typing_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let expired = typing_state.typing.expire();
-                for (tenant_id, stream_id, user_id) in expired {
-                    let msg = herald_core::protocol::ServerMessage::Typing {
-                        payload: herald_core::protocol::TypingPayload {
-                            stream: stream_id.clone(),
-                            user_id: user_id.clone(),
-                            active: false,
-                        },
-                    };
-                    herald_server::ws::fanout::fanout_to_stream(
-                        &typing_state,
-                        &tenant_id,
-                        &stream_id,
-                        &msg,
-                        None,
-                        Some(&user_id),
-                    )
-                    .await;
+    // Engine timer tasks (typing TTL expiry, presence sweep, etc.)
+    let engine_timer_handles: Vec<_> = state
+        .engines
+        .timers()
+        .into_iter()
+        .map(|task| {
+            let timer_state = state.clone();
+            info!(task = task.label, "starting engine timer");
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(task.interval).await;
+                    (task.run)(timer_state.clone()).await;
                 }
-            }
+            })
         })
-    };
+        .collect();
 
     // TTL cleanup
     let cleanup_db = state.db.clone();
@@ -515,8 +547,9 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref h) = backplane_handle {
             h.abort();
         }
-        #[cfg(feature = "chat")]
-        typing_handle.abort();
+        for h in &engine_timer_handles {
+            h.abort();
+        }
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
             let _ = server_handle.await;
@@ -553,8 +586,9 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref h) = backplane_handle {
             h.abort();
         }
-        #[cfg(feature = "chat")]
-        typing_handle.abort();
+        for h in &engine_timer_handles {
+            h.abort();
+        }
 
         let _ = tokio::time::timeout(Duration::from_secs(shutdown_timeout), async {
             let _ = server_handle.await;

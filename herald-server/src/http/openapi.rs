@@ -127,6 +127,18 @@ pub struct StreamPresenceResponse {
     pub members: Vec<StreamPresenceMember>,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct BatchPresenceUser {
+    pub user_id: String,
+    pub status: herald_core::presence::PresenceStatus,
+    pub connections: usize,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BatchPresenceResponse {
+    pub users: Vec<BatchPresenceUser>,
+}
+
 // ---------------------------------------------------------------------------
 // Block schemas
 // ---------------------------------------------------------------------------
@@ -348,10 +360,10 @@ pub struct AuditCountResponse {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// OpenAPI document — chat feature enabled (default)
+// OpenAPI document
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "chat")]
+#[cfg(feature = "openapi")]
 #[derive(utoipa::OpenApi)]
 #[openapi(
     info(
@@ -383,11 +395,12 @@ pub struct AuditCountResponse {
         crate::http::members::remove_member, crate::http::members::update_member,
         crate::http::events::inject_event, crate::http::events::list_events,
         crate::http::events::trigger_ephemeral, crate::http::events::purge_user_events,
-        crate::chat::http_events_ext::edit_event, crate::chat::http_events_ext::delete_event,
-        crate::chat::http_events_ext::get_reactions, crate::chat::http_events_ext::list_cursors,
-        crate::chat::http_presence::user_presence, crate::chat::http_presence::stream_presence,
-        crate::chat::http_blocks::block_user, crate::chat::http_blocks::unblock_user,
-        crate::chat::http_blocks::list_blocked,
+        crate::engines::chat::http_events::edit_event, crate::engines::chat::http_events::delete_event,
+        crate::engines::chat::http_events::get_reactions, crate::engines::chat::http_events::list_cursors,
+        crate::engines::presence::http::user_presence, crate::engines::presence::http::stream_presence,
+        crate::engines::presence::http::batch_presence, crate::engines::presence::http::admin_set_presence,
+        crate::engines::chat::http_blocks::block_user, crate::engines::chat::http_blocks::unblock_user,
+        crate::engines::chat::http_blocks::list_blocked,
         crate::http::admin::create_tenant, crate::http::admin::list_tenants,
         crate::http::admin::get_tenant, crate::http::admin::update_tenant,
         crate::http::admin::delete_tenant, crate::http::admin::purge_tenant_data,
@@ -411,13 +424,15 @@ pub struct AuditCountResponse {
         crate::http::streams::CreateStreamRequest, crate::http::streams::UpdateStreamRequest,
         crate::http::events::InjectEventRequest, crate::http::events::TriggerEphemeralRequest,
         crate::http::members::AddMemberRequest, crate::http::members::UpdateMemberRequest,
-        crate::chat::http_events_ext::EditEventRequest, crate::chat::http_blocks::BlockRequest,
+        crate::engines::chat::http_events::EditEventRequest, crate::engines::chat::http_blocks::BlockRequest,
+        crate::engines::presence::http::AdminSetPresenceRequest,
         crate::http::admin::CreateTenantRequest, crate::http::admin::UpdateTenantRequest,
         crate::http::admin::CreateTokenRequest, crate::http::self_service::CreateTokenRequest,
         ErrorResponse, StreamListResponse, MemberListResponse,
         EventView, EventListResponse, EventPublishResponse, PurgeResponse,
         ReactionSummary, ReactionListResponse, CursorView, CursorListResponse,
-        UserPresenceResponse, StreamPresenceMember, StreamPresenceResponse, BlockListResponse,
+        UserPresenceResponse, StreamPresenceMember, StreamPresenceResponse,
+        BatchPresenceUser, BatchPresenceResponse, BlockListResponse,
         HealthResponse, LivenessResponse, ReadinessResponse,
         TenantStatsCurrent, TenantStatsResponse, AdminStatsResponse, TodaySummary,
         TenantCreateResponse, TenantGetResponse, TenantListItem, TenantListResponse,
@@ -429,94 +444,13 @@ pub struct AuditCountResponse {
     security(("basic_auth" = []), ("bearer_auth" = []), ("admin_auth" = [])),
     modifiers(&SecurityAddon),
 )]
+#[cfg(feature = "openapi")]
 pub struct ApiDoc;
 
-// ---------------------------------------------------------------------------
-// OpenAPI document — non-chat build
-// ---------------------------------------------------------------------------
-
-#[cfg(not(feature = "chat"))]
-#[derive(utoipa::OpenApi)]
-#[openapi(
-    info(
-        title = "Herald API",
-        description = "Persistent realtime event streams with built-in authorization.",
-        version = "2.0.0",
-        license(name = "Proprietary"),
-    ),
-    servers((url = "/", description = "Local server")),
-    tags(
-        (name = "health", description = "Health and readiness probes"),
-        (name = "streams", description = "Stream CRUD operations"),
-        (name = "members", description = "Stream membership management"),
-        (name = "events", description = "Event publishing and retrieval"),
-        (name = "presence", description = "User presence queries"),
-        (name = "cursors", description = "Read cursor tracking"),
-        (name = "blocks", description = "User blocking"),
-        (name = "admin", description = "Admin API — tenant and system management"),
-        (name = "self-service", description = "Tenant self-service operations"),
-    ),
-    paths(
-        crate::http::health::health, crate::http::health::liveness,
-        crate::http::health::readiness, crate::http::health::metrics,
-        crate::http::health::tenant_stats,
-        crate::http::streams::create_stream, crate::http::streams::list_streams,
-        crate::http::streams::get_stream, crate::http::streams::update_stream,
-        crate::http::streams::delete_stream,
-        crate::http::members::add_member, crate::http::members::list_members,
-        crate::http::members::remove_member, crate::http::members::update_member,
-        crate::http::events::inject_event, crate::http::events::list_events,
-        crate::http::events::trigger_ephemeral, crate::http::events::purge_user_events,
-        crate::http::events::edit_event, crate::http::events::delete_event,
-        crate::http::events::get_reactions, crate::http::events::list_cursors,
-        crate::http::presence::user_presence, crate::http::presence::stream_presence,
-        crate::http::blocks::block_user, crate::http::blocks::unblock_user,
-        crate::http::blocks::list_blocked,
-        crate::http::admin::create_tenant, crate::http::admin::list_tenants,
-        crate::http::admin::get_tenant, crate::http::admin::update_tenant,
-        crate::http::admin::delete_tenant, crate::http::admin::purge_tenant_data,
-        crate::http::admin::create_api_token, crate::http::admin::list_api_tokens,
-        crate::http::admin::delete_api_token, crate::http::admin::list_tenant_streams,
-        crate::http::admin::query_audit, crate::http::admin::count_audit,
-        crate::http::admin::list_connections, crate::http::admin::list_events,
-        crate::http::admin::events_stream, crate::http::admin::list_errors,
-        crate::http::admin::get_stats,
-        crate::http::self_service::list_connections, crate::http::self_service::list_events,
-        crate::http::self_service::events_stream, crate::http::self_service::list_errors,
-        crate::http::self_service::rotate_secret, crate::http::self_service::create_token,
-        crate::http::self_service::list_tokens, crate::http::self_service::delete_token,
-    ),
-    components(schemas(
-        herald_core::stream::Stream, herald_core::stream::StreamId,
-        herald_core::event::Event, herald_core::event::EventId,
-        herald_core::member::Member, herald_core::member::Role,
-        herald_core::cursor::Cursor, herald_core::presence::PresenceStatus,
-        herald_core::error::ErrorCode, herald_core::error::HeraldError,
-        crate::http::streams::CreateStreamRequest, crate::http::streams::UpdateStreamRequest,
-        crate::http::events::InjectEventRequest, crate::http::events::TriggerEphemeralRequest,
-        crate::http::members::AddMemberRequest, crate::http::members::UpdateMemberRequest,
-        crate::http::events::EditEventRequest, crate::http::blocks::BlockRequest,
-        crate::http::admin::CreateTenantRequest, crate::http::admin::UpdateTenantRequest,
-        crate::http::admin::CreateTokenRequest, crate::http::self_service::CreateTokenRequest,
-        ErrorResponse, StreamListResponse, MemberListResponse,
-        EventView, EventListResponse, EventPublishResponse, PurgeResponse,
-        ReactionSummary, ReactionListResponse, CursorView, CursorListResponse,
-        UserPresenceResponse, StreamPresenceMember, StreamPresenceResponse, BlockListResponse,
-        HealthResponse, LivenessResponse, ReadinessResponse,
-        TenantStatsCurrent, TenantStatsResponse, AdminStatsResponse, TodaySummary,
-        TenantCreateResponse, TenantGetResponse, TenantListItem, TenantListResponse,
-        TokenCreateResponse, TokenView, TokenListResponse, SelfTokenListResponse,
-        TenantConnectionCount, ConnectionListResponse, SelfConnectionResponse,
-        AdminEventListResponse, ErrorListResponse, RotateSecretResponse,
-        AuditEventView, AuditQueryResponse, AuditCountResponse,
-    )),
-    security(("basic_auth" = []), ("bearer_auth" = []), ("admin_auth" = [])),
-    modifiers(&SecurityAddon),
-)]
-pub struct ApiDoc;
-
+#[cfg(feature = "openapi")]
 struct SecurityAddon;
 
+#[cfg(feature = "openapi")]
 impl utoipa::Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         let components = openapi.components.get_or_insert_with(Default::default);
@@ -542,6 +476,7 @@ impl utoipa::Modify for SecurityAddon {
 }
 
 /// Generate the OpenAPI JSON spec as a string.
+#[cfg(feature = "openapi")]
 pub fn generate_json() -> String {
     use utoipa::OpenApi;
     ApiDoc::openapi()
@@ -550,6 +485,7 @@ pub fn generate_json() -> String {
 }
 
 /// Generate the OpenAPI YAML spec as a string.
+#[cfg(feature = "openapi")]
 pub fn generate_yaml() -> String {
     use utoipa::OpenApi;
     ApiDoc::openapi()
@@ -557,7 +493,7 @@ pub fn generate_yaml() -> String {
         .expect("failed to serialize OpenAPI spec to YAML")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "openapi"))]
 mod tests {
     use super::*;
     use utoipa::OpenApi;

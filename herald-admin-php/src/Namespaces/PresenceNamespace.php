@@ -27,4 +27,16 @@ class PresenceNamespace
         $data = $this->t->request('GET', '/streams/' . rawurlencode($streamId) . '/cursors');
         return $data['cursors'];
     }
+
+    public function getBulk(array $userIds): array
+    {
+        $ids = implode(',', array_map('urlencode', $userIds));
+        $data = $this->t->request('GET', "/presence?user_ids={$ids}");
+        return $data['users'];
+    }
+
+    public function setOverride(string $userId, array $options): array
+    {
+        return $this->t->request('POST', '/presence/' . urlencode($userId), $options);
+    }
 }

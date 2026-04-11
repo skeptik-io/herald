@@ -36,13 +36,6 @@ export class HeraldChatClient {
     });
   }
 
-  setPresence(status: "online" | "away" | "dnd"): void {
-    this.client.sendFrame({
-      type: "presence.set",
-      payload: { status },
-    });
-  }
-
   startTyping(stream: string): void {
     this.client.sendFrame({
       type: "typing.start",

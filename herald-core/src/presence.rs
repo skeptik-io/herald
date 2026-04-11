@@ -31,6 +31,6 @@ impl PresenceStatus {
     }
 
     pub fn is_manual(&self) -> bool {
-        matches!(self, Self::Away | Self::Dnd)
+        matches!(self, Self::Away | Self::Dnd | Self::Offline)
     }
 }

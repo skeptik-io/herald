@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // Options configures the Herald admin client.
@@ -26,23 +27,20 @@ type Options struct {
 
 // ChatNamespaces groups chat-specific (conversational layer) namespaces.
 type ChatNamespaces struct {
-	Presence *PresenceNamespace
-	Blocks   *BlockNamespace
+	Blocks *BlockNamespace
 }
 
 // HeraldAdmin is the Herald HTTP admin client.
 type HeraldAdmin struct {
 	// Core namespaces (event transport)
-	Streams *StreamNamespace
-	Members *MemberNamespace
-	Events  *EventNamespace
-	Tenants *TenantNamespace
-	Audit   *AuditNamespace
+	Streams  *StreamNamespace
+	Members  *MemberNamespace
+	Events   *EventNamespace
+	Tenants  *TenantNamespace
+	Audit    *AuditNamespace
 
-	// Deprecated: Use Chat.Presence instead.
+	// Presence queries and admin overrides.
 	Presence *PresenceNamespace
-	// Deprecated: Use Chat.Blocks instead.
-	Blocks *BlockNamespace
 
 	// Chat groups chat-specific namespaces (conversational layer).
 	Chat *ChatNamespaces
@@ -53,17 +51,14 @@ type HeraldAdmin struct {
 // New creates a new Herald admin client.
 func New(opts Options) *HeraldAdmin {
 	t := newTransport(opts.URL, opts)
-	presence := &PresenceNamespace{t: t}
-	blocks := &BlockNamespace{t: t}
 	return &HeraldAdmin{
 		Streams:   &StreamNamespace{t: t},
 		Members:   &MemberNamespace{t: t},
 		Events:    &EventNamespace{t: t},
-		Presence:  presence,
+		Presence:  &PresenceNamespace{t: t},
 		Tenants:   &TenantNamespace{t: t},
 		Audit:     &AuditNamespace{t: t, tenantID: opts.TenantID},
-		Blocks:    blocks,
-		Chat:      &ChatNamespaces{Presence: presence, Blocks: blocks},
+		Chat:      &ChatNamespaces{Blocks: &BlockNamespace{t: t}},
 		transport: t,
 	}
 }
@@ -354,6 +349,37 @@ func (ns *PresenceNamespace) GetCursors(ctx context.Context, streamID string) ([
 		return nil, err
 	}
 	return resp.Cursors, nil
+}
+
+func (ns *PresenceNamespace) GetBulk(ctx context.Context, userIDs []string) ([]UserPresence, error) {
+	ids := strings.Join(userIDs, ",")
+	var resp struct{ Users []UserPresence `json:"users"` }
+	data, err := ns.t.request(ctx, "GET", "/presence?user_ids="+url.QueryEscape(ids), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Users, nil
+}
+
+// SetPresenceOptions are optional parameters for overriding a user's presence.
+type SetPresenceOptions struct {
+	Status string  `json:"status"`
+	Until  *string `json:"until,omitempty"`
+}
+
+func (ns *PresenceNamespace) SetOverride(ctx context.Context, userID string, opts SetPresenceOptions) (*UserPresence, error) {
+	data, err := ns.t.request(ctx, "POST", "/presence/"+url.PathEscape(userID), opts)
+	if err != nil {
+		return nil, err
+	}
+	var resp UserPresence
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // --- Observability ---

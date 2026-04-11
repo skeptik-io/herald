@@ -57,9 +57,10 @@ shroudb-chronicle-core = { version = "1.5", registry = "shroudb" }
 shroudb-chronicle-engine = { version = "1.5", registry = "shroudb" }
 
 [features]
-default = ["chat"]
+default = ["chat", "presence"]
 chat = []
-openapi = []
+presence = []
+openapi = ["chat", "presence"]
 otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "tracing-opentelemetry"]
 
 [dev-dependencies]

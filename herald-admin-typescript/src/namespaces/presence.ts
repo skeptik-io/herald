@@ -21,6 +21,23 @@ export class PresenceNamespace {
     return resp.members;
   }
 
+  async getBulk(userIds: string[]): Promise<UserPresence[]> {
+    const ids = userIds.map(encodeURIComponent).join(",");
+    const resp = await this.transport.request<{ users: UserPresence[] }>(
+      "GET",
+      `/presence?user_ids=${ids}`,
+    );
+    return resp.users;
+  }
+
+  async setOverride(userId: string, options: { status: string; until?: string }): Promise<UserPresence> {
+    return this.transport.request<UserPresence>(
+      "POST",
+      `/presence/${encodeURIComponent(userId)}`,
+      options,
+    );
+  }
+
   async getCursors(streamId: string): Promise<Cursor[]> {
     const resp = await this.transport.request<{ cursors: Cursor[] }>(
       "GET",

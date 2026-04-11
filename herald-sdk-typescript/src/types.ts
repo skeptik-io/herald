@@ -91,6 +91,8 @@ export interface EventsBatch {
 export interface PresenceChanged {
   user_id: string;
   presence: string;
+  /** ISO 8601 expiry for the override, if set (e.g. "Away until Monday 9am"). */
+  until?: string;
 }
 
 export interface CursorMoved {

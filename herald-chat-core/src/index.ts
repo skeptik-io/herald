@@ -14,4 +14,5 @@ export type {
   ChatCoreOptions,
   ChatEvent,
   Middleware,
+  PresenceStatus,
 } from "./types.js";

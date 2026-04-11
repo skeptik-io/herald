@@ -12,7 +12,9 @@ use crate::state::AppState;
     tag = "presence",
     params(("user_id" = String, Path, description = "User ID")),
     security(("basic_auth" = []), ("bearer_auth" = [])),
-    responses((status = 200, description = "User presence", body = crate::http::openapi::UserPresenceResponse)),
+    responses(
+        (status = 200, description = "User presence status", body = crate::http::openapi::UserPresenceResponse),
+    ),
 )]
 pub async fn user_presence(
     State(state): State<Arc<AppState>>,
@@ -20,7 +22,7 @@ pub async fn user_presence(
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    let status = state.presence.resolve(
+    let status = state.presence.resolve_status(
         tid,
         &user_id,
         &state.connections,
@@ -40,7 +42,9 @@ pub async fn user_presence(
     tag = "presence",
     params(("id" = String, Path, description = "Stream ID")),
     security(("basic_auth" = []), ("bearer_auth" = [])),
-    responses((status = 200, description = "Stream presence", body = crate::http::openapi::StreamPresenceResponse)),
+    responses(
+        (status = 200, description = "Presence for stream members", body = crate::http::openapi::StreamPresenceResponse),
+    ),
 )]
 pub async fn stream_presence(
     State(state): State<Arc<AppState>>,
@@ -52,7 +56,7 @@ pub async fn stream_presence(
     let presence: Vec<serde_json::Value> = members
         .iter()
         .map(|uid| {
-            let status = state.presence.resolve(
+            let status = state.presence.resolve_status(
                 tid,
                 uid,
                 &state.connections,

@@ -87,10 +87,20 @@ export const OPERATION_MAP: Record<string, OperationMapping> = {
     method: "trigger",
   },
 
-  // --- Presence (chat) ---
+  // --- Presence ---
   "GET /presence/{user_id}": {
     namespace: "presence",
     method: "getUser",
+  },
+  "GET /presence": {
+    namespace: "presence",
+    method: "getBulk",
+    unwrapKey: "users",
+    unwrapElementType: "UserPresence",
+  },
+  "POST /presence/{user_id}": {
+    namespace: "presence",
+    method: "setOverride",
   },
   "GET /streams/{id}/presence": {
     namespace: "presence",
@@ -99,7 +109,7 @@ export const OPERATION_MAP: Record<string, OperationMapping> = {
     unwrapElementType: "MemberPresenceEntry",
   },
 
-  // --- Cursors (chat.presence) ---
+  // --- Cursors ---
   "GET /streams/{id}/cursors": {
     namespace: "presence",
     method: "getCursors",
@@ -208,7 +218,7 @@ export const OPERATION_MAP: Record<string, OperationMapping> = {
 };
 
 /** Namespaces nested under client.chat. */
-export const CHAT_NAMESPACES = new Set(["presence", "blocks"]);
+export const CHAT_NAMESPACES = new Set(["blocks"]);
 
 /** Namespace ID → class name. */
 export const NAMESPACE_CLASSES: Record<string, string> = {

@@ -89,6 +89,7 @@ impl BenchServer {
             courier: None,
             chronicle: None,
             instance_id: uuid::Uuid::new_v4().to_string(),
+            engines: herald_server::engines::default_engines(),
         });
 
         state.hydrate_tenant_cache().await.unwrap();

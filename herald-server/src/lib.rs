@@ -1,8 +1,8 @@
 pub mod admin_events;
 pub mod backplane;
-#[cfg(feature = "chat")]
-pub mod chat;
 pub mod config;
+pub mod engine;
+pub mod engines;
 pub mod http;
 pub mod integrations;
 pub mod latency;

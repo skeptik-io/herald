@@ -6,19 +6,16 @@ require "erb"
 
 module HeraldAdmin
   # Groups chat-specific namespaces (conversational layer).
-  ChatNamespaces = Struct.new(:presence, :blocks, keyword_init: true)
+  ChatNamespaces = Struct.new(:blocks, keyword_init: true)
 
   class Client
     # Core namespaces (event transport)
     attr_reader :streams, :members, :events, :tenants, :audit
 
-    # @deprecated Use {#chat}.presence instead.
+    # Presence queries and admin overrides.
     attr_reader :presence
-    # @deprecated Use {#chat}.blocks instead.
-    attr_reader :blocks
 
     # Chat-specific namespaces (conversational layer).
-    # Groups presence and block operations that are part of the Herald Chat product.
     attr_reader :chat
 
     def initialize(url:, token: nil, key: nil, secret: nil, tenant_id: "default")
@@ -28,9 +25,8 @@ module HeraldAdmin
       @events = EventNamespace.new(transport)
       @presence = PresenceNamespace.new(transport)
       @tenants = TenantNamespace.new(transport)
-      @blocks = BlockNamespace.new(transport)
       @audit = AuditNamespace.new(transport, tenant_id)
-      @chat = ChatNamespaces.new(presence: @presence, blocks: @blocks)
+      @chat = ChatNamespaces.new(blocks: BlockNamespace.new(transport))
       @transport = transport
     end
 

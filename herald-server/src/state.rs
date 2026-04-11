@@ -7,6 +7,7 @@ use sha2::Sha256;
 
 use crate::admin_events::EventBus;
 use crate::config::{HeraldConfig, WebhookConfig};
+use crate::engine::EngineSet;
 use crate::integrations::{AuditEvent, ChronicleOps, CourierOps, SentryOps};
 use crate::latency::Histogram;
 use crate::registry::connection::ConnectionRegistry;
@@ -171,6 +172,8 @@ pub struct AppState {
     /// Set of recently-written event keys (primary keys in NS_EVENTS).
     /// Used by the backplane consumer to skip locally-originated events.
     pub local_writes: dashmap::DashSet<Vec<u8>>,
+    /// Registered engines (chat, presence, etc.).
+    pub engines: EngineSet,
 }
 
 pub struct AppStateBuilder {
@@ -180,6 +183,7 @@ pub struct AppStateBuilder {
     pub courier: Option<Arc<dyn CourierOps>>,
     pub chronicle: Option<Arc<dyn ChronicleOps>>,
     pub instance_id: String,
+    pub engines: EngineSet,
 }
 
 impl AppState {
@@ -214,6 +218,7 @@ impl AppState {
             webhook_client: reqwest::Client::new(),
             instance_id: b.instance_id,
             local_writes: dashmap::DashSet::new(),
+            engines: b.engines,
         })
     }
 

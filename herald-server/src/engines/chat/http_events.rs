@@ -143,8 +143,7 @@ pub async fn get_reactions(
     Path((stream_id, event_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let tid = &tenant.0;
-    match crate::chat::store_reactions::list_for_event(&*state.db, tid, &stream_id, &event_id).await
-    {
+    match crate::store::reactions::list_for_event(&*state.db, tid, &stream_id, &event_id).await {
         Ok(reactions) => Json(serde_json::json!({"reactions": reactions})).into_response(),
         Err(e) => {
             tracing::error!(tenant = tid, event = %event_id, "failed to list reactions: {e}");
@@ -171,7 +170,7 @@ pub async fn list_cursors(
     Extension(tenant): Extension<TenantId>,
     Path(stream_id): Path<String>,
 ) -> impl IntoResponse {
-    match crate::chat::store_cursors::list_by_stream(&*state.db, &tenant.0, &stream_id).await {
+    match crate::store::cursors::list_by_stream(&*state.db, &tenant.0, &stream_id).await {
         Ok(cursors) => {
             let cursors: Vec<serde_json::Value> = cursors
                 .into_iter()

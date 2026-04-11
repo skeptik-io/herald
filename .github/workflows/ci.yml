@@ -69,6 +69,12 @@ jobs:
       - name: Clippy (no-default-features)
         run: cargo clippy --package herald-server --no-default-features -- -D warnings
 
+      - name: Clippy (chat only)
+        run: cargo clippy --package herald-server --no-default-features --features chat -- -D warnings
+
+      - name: Clippy (presence only)
+        run: cargo clippy --package herald-server --no-default-features --features presence -- -D warnings
+
       - name: Build
         run: cargo build --workspace
 
@@ -86,7 +92,7 @@ jobs:
           SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
       - name: Generate OpenAPI spec
-        run: cargo test --lib -- openapi::tests::generate_spec_files --nocapture
+        run: cargo test --features openapi --lib -- openapi::tests::generate_spec_files --nocapture
         env:
           SHROUDB_MASTER_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -107,6 +113,7 @@ jobs:
             'events.edit': ('patch', '/streams/{id}/events/{event_id}'), 'events.delete': ('delete', '/streams/{id}/events/{event_id}'),
             'events.getReactions': ('get', '/streams/{id}/events/{event_id}/reactions'), 'events.trigger': ('post', '/streams/{id}/trigger'),
             'presence.getUser': ('get', '/presence/{user_id}'), 'presence.getStream': ('get', '/streams/{id}/presence'),
+            'presence.getBulk': ('get', '/presence'), 'presence.setOverride': ('post', '/presence/{user_id}'),
             'presence.getCursors': ('get', '/streams/{id}/cursors'),
             'blocks.block': ('post', '/blocks'), 'blocks.unblock': ('delete', '/blocks'), 'blocks.list': ('get', '/blocks/{user_id}'),
           }
@@ -137,13 +144,14 @@ jobs:
       - name: Build release binary (for live integration tests)
         run: cargo build --release
 
-      # Topological order: herald-sdk → herald-admin → herald-chat-sdk → herald-chat-core
+      # Topological order: herald-sdk → herald-admin → herald-chat-sdk → herald-presence-sdk → herald-chat-core
       # (herald-chat-react not needed by test-integration)
       - name: Build TypeScript SDKs
         run: |
           cd herald-sdk-typescript && npm install && npx tsc && cd ..
           cd herald-admin-typescript && npm install && npx tsc && cd ..
           cd herald-chat-sdk-typescript && npm install && npx tsc && cd ..
+          cd herald-presence-sdk-typescript && npm install && npx tsc && cd ..
           cd herald-chat-core && npm install && npx tsc && cd ..
 
       - name: Live integration tests
@@ -309,6 +317,10 @@ jobs:
 
       - name: Chat SDK — build
         working-directory: herald-chat-sdk-typescript
+        run: npm install && npx tsc
+
+      - name: Presence SDK — build
+        working-directory: herald-presence-sdk-typescript
         run: npm install && npx tsc
 
       - name: Chat Core — build

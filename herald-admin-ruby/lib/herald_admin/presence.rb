@@ -23,5 +23,17 @@ module HeraldAdmin
       data = @t.request("GET", "/streams/#{ERB::Util.url_encode(stream_id)}/cursors")
       data["cursors"].map { |c| Cursor.new(user_id: c["user_id"], seq: c["seq"]) }
     end
+
+    def get_bulk(user_ids)
+      ids = user_ids.map { |id| ERB::Util.url_encode(id) }.join(",")
+      data = @t.request("GET", "/presence?user_ids=#{ids}")
+      data["users"]
+    end
+
+    def set_override(user_id, status:, until: nil)
+      body = { status: status }
+      body[:until] = until if until
+      @t.request("POST", "/presence/#{ERB::Util.url_encode(user_id)}", body)
+    end
   end
 end

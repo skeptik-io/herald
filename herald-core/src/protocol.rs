@@ -65,6 +65,8 @@ pub enum ClientMessage {
     PresenceSet {
         ref_: Option<String>,
         status: PresenceStatus,
+        /// Optional ISO 8601 expiry for manual override (e.g. "2026-04-14T09:00:00Z").
+        until: Option<String>,
     },
     TypingStart {
         stream: String,
@@ -190,9 +192,14 @@ impl ClientMessage {
                 let s = str_field(p, "status")?;
                 let status = PresenceStatus::from_str_loose(&s)
                     .ok_or_else(|| format!("invalid presence status: {s}"))?;
+                let until = p
+                    .get("until")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 Ok(Self::PresenceSet {
                     ref_: raw.ref_,
                     status,
+                    until,
                 })
             }
             "typing.start" => Ok(Self::TypingStart {
@@ -439,6 +446,9 @@ pub struct EventDeletedPayload {
 pub struct PresenceChangedPayload {
     pub user_id: String,
     pub presence: PresenceStatus,
+    /// ISO 8601 expiry for the override, if set (e.g. "Away until Monday 9am").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

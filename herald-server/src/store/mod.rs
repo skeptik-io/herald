@@ -1,11 +1,9 @@
-#[cfg(not(feature = "chat"))]
 pub mod blocks;
-#[cfg(not(feature = "chat"))]
 pub mod cursors;
 pub mod events;
 pub mod members;
+pub mod presence_overrides;
 pub mod purge;
-#[cfg(not(feature = "chat"))]
 pub mod reactions;
 pub mod sequences;
 pub mod streams;
@@ -23,6 +21,7 @@ pub const NS_REACTIONS: &str = "herald.reactions";
 pub const NS_BLOCKS: &str = "herald.blocks";
 pub const NS_SEQUENCES: &str = "herald.sequences";
 pub const NS_TENANT_KEYS: &str = "herald.tenant_keys";
+pub const NS_PRESENCE_OVERRIDES: &str = "herald.presence_overrides";
 
 /// Initialize all namespaces on startup.
 #[cfg(test)]
@@ -56,6 +55,7 @@ pub async fn init_namespaces<S: Store>(store: &S) -> Result<(), shroudb_store::S
         NS_BLOCKS,
         NS_SEQUENCES,
         NS_TENANT_KEYS,
+        NS_PRESENCE_OVERRIDES,
     ] {
         match store.namespace_create(ns, config.clone()).await {
             Ok(()) => {}

@@ -95,6 +95,7 @@ impl TestServer {
             courier: None,
             chronicle: None,
             instance_id: uuid::Uuid::new_v4().to_string(),
+            engines: herald_server::engines::default_engines(),
         });
 
         // Bootstrap default tenant before starting server
@@ -1951,6 +1952,7 @@ async fn test_http_api_rate_limiting() {
         courier: None,
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
+        engines: herald_server::engine::EngineSet::empty(),
     });
     state.bootstrap_default_tenant().await.unwrap();
 
@@ -2038,6 +2040,7 @@ async fn test_ws_sliding_window_rate_limit() {
         courier: None,
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
+        engines: herald_server::engine::EngineSet::empty(),
     });
     state.bootstrap_default_tenant().await.unwrap();
 
@@ -2311,6 +2314,7 @@ async fn test_presence_linger_reconnect_no_offline() {
         courier: None,
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
+        engines: herald_server::engines::default_engines(),
     });
     state.bootstrap_default_tenant().await.unwrap();
 
@@ -3354,6 +3358,7 @@ async fn test_webhook_event_filtering() {
         courier: None,
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
+        engines: herald_server::engine::EngineSet::empty(),
     });
     state.bootstrap_default_tenant().await.unwrap();
 
@@ -5135,6 +5140,7 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
         courier: None,
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
+        engines: herald_server::engine::EngineSet::empty(),
     });
     state.bootstrap_default_tenant().await.unwrap();
 
@@ -6151,6 +6157,7 @@ async fn test_remote_backend_boots_and_operates() {
         courier: None,
         chronicle: None,
         instance_id: uuid::Uuid::new_v4().to_string(),
+        engines: herald_server::engine::EngineSet::empty(),
     });
 
     // Bootstrap single tenant
@@ -6484,6 +6491,7 @@ impl ClusteredTestServer {
             courier: None,
             chronicle: None,
             instance_id: uuid::Uuid::new_v4().to_string(),
+            engines: herald_server::engines::default_engines(),
         });
 
         // Spawn backplane consumer

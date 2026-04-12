@@ -312,13 +312,18 @@ export class MessageStore {
   }
 
   private replaceList(streamId: string, list: Message[]): void {
-    // Create a new array reference for useSyncExternalStore stability
-    this.streams.set(streamId, [...list]);
+    // Set the new list directly — bumpVersion creates the snapshot copy
+    this.streams.set(streamId, list);
     this.bumpVersion(streamId);
   }
 
   private bumpVersion(streamId: string): void {
     this.versions.set(streamId, (this.versions.get(streamId) ?? 0) + 1);
+    // New array reference so useSyncExternalStore detects the change.
+    // In-place mutations (reactions, edits, deletes) don't go through
+    // replaceList, so the snapshot must be refreshed here.
+    const list = this.streams.get(streamId);
+    if (list) this.streams.set(streamId, [...list]);
     this.notifier.notify(`messages:${streamId}`);
   }
 }

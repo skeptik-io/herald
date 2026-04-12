@@ -2,6 +2,8 @@
 
 Framework-agnostic chat state machine built on Herald. Manages messages, cursors, presence, typing, scroll position, and liveness detection. Designed for `useSyncExternalStore` but works with any UI framework.
 
+> **Two authorities: Herald within the buffer window, your DB across time.** Herald is authoritative for *deltas* within its retention window (default 7 days) — new events, edits, deletes, reactions, cursor moves. A client that disconnects briefly replays every missed delta on reconnect, including mutations. Your app's database is authoritative for *state* across time: on cold load, long absence, or a new device, hydrate from your DB via `seedHistory()` / `loadMoreWith(fetcher)`, then subscribe to Herald for further deltas. Both paths converge if your webhook mirrors every Herald event into your DB. Do not treat Herald as a history API — events past the TTL are pruned silently.
+
 ## Install
 
 ```bash

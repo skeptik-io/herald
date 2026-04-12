@@ -1,10 +1,10 @@
 # Herald
 
-Persistent realtime event streams with built-in authorization. Multi-tenant by default. Event body is opaque — Herald is a transport and delivery layer.
+Realtime event transport with built-in authorization. Multi-tenant by default. Event body is opaque — Herald is a delivery layer, not a database.
 
 ## What It Does
 
-Herald delivers events in real time over WebSocket with persistence, ordering, and replay. Browsers connect via WebSocket. Your backend manages streams and members via HTTP. No external database — Herald uses ShroudB's WAL-based storage engine.
+Herald delivers events in real time over WebSocket with ordering and a short-lived catch-up buffer (default **7-day** retention) for reconnects. Browsers connect via WebSocket. Your backend manages streams and members via HTTP. Herald uses ShroudB's WAL storage internally so it survives restarts without needing an external database — **but it is not your application database**. See [Herald is not your database](#herald-is-not-your-database) below.
 
 ```
                     wss://herald.example.com/ws
@@ -51,7 +51,7 @@ Herald's core is a transport layer. Domain-specific features are provided by **e
 
 ### Transport (always included)
 
-Publish, subscribe, replay, delivery acknowledgment, ephemeral triggers, stream/member CRUD, multi-tenant auth, connection-derived presence (online/offline).
+Publish, subscribe, catch-up on reconnect (within the retention window), delivery acknowledgment, ephemeral triggers, stream/member CRUD, multi-tenant auth, connection-derived presence (online/offline).
 
 ### Chat Engine
 
@@ -60,6 +60,24 @@ Event editing and deletion, emoji reactions, read cursors, typing indicators, us
 ### Presence Engine
 
 Manual presence overrides (away, dnd, appear offline), per-override expiry ("away until Monday 9am"), WAL-persisted overrides that survive restarts, `__presence` broadcast stream for global real-time presence, watchlist with override awareness, batch presence queries, admin presence API.
+
+## Herald is not your database
+
+Herald is a **transport layer**, in the same category as Pusher, Ably, or Centrifugo. It is **not** a message store, not a history API, and not your application's source of truth across time.
+
+### Two authorities, one reconciliation
+
+- **Inside the buffer window (default 7 days):** Herald is authoritative for *deltas* — new events, edits, deletes, reactions, cursor moves. A client that went offline briefly reconnects with its last-seen seq and receives every delta it missed via replay, including mutations to older messages. This is why those mutation events are persisted: without them, a 20-second wifi drop would silently lose a deletion that happened during the gap.
+- **Across the buffer window (cold load, long absence, new device):** your app's database is authoritative for *state*. The client hydrates from your DB, then subscribes to Herald for further deltas.
+- **Both paths must converge on the same end state.** They do if your webhook mirrors every Herald event — including chat mutations — into your DB as it happens.
+
+### What that means in practice
+
+- **Do not treat Herald as a queryable history API.** Events past the TTL are pruned hourly; requests for them return empty ranges silently. If you need long-term history, search, audit, or analytics, answer those queries from your own database.
+- **Do not treat Herald as the source of truth for chat state.** Mutations are persisted in the WAL for replay correctness, not for durability. They vanish with the TTL just like events do. Mirror them to your DB if they need to last.
+- **Integration shape:** browsers talk to Herald over WebSocket for realtime; your backend receives the webhook and writes to its own DB. On a cold load, clients hydrate history from your app's DB (via your own API), then subscribe to Herald for live updates. The chat SDK's `seedHistory` / `loadMoreWith(fetcher)` hooks are the seam for this.
+
+If you're picking between "keep it in Herald" and "keep it in my DB" for anything past a reconnect window, the answer is **your DB**. Treat Herald as an expiring pipe that happens to remember the last few days so reconnects are seamless.
 
 ## Quick Start
 
@@ -103,7 +121,7 @@ volumes:
 
 ## Architecture
 
-- **Storage**: ShroudB WAL engine. No external database.
+- **Internal storage**: ShroudB WAL engine for the catch-up buffer and registry state. No external database required *to run Herald* — but your application still needs its own database for anything beyond the retention window (see [Herald is not your database](#herald-is-not-your-database)).
 - **Multi-tenant**: Each tenant has isolated streams, members, and API keys. A default tenant is auto-created on first start.
 - **Opaque event body**: Herald stores and delivers event bodies as-is. Consumers handle their own encryption and search.
 - **HMAC-SHA256 auth**: Tenants use a key+secret model. WebSocket auth via signed query params. Admin API uses bearer token.

@@ -1,5 +1,7 @@
 # Herald — Reference Documentation
 
+> **Herald is a transport layer, not a database.** Events are retained in an internal ShroudB WAL for a configurable window (`store.event_ttl_days`, default **7 days**) to support reconnect catch-up and restart recovery. Older events are pruned hourly and are **silently unavailable** — requests for them return empty ranges, not errors. Long-term history, search, and audit belong in your application's own database. See [ARCHITECTURE.md §1 "What Herald Is Not"](ARCHITECTURE.md#what-herald-is-not) and the README's "Herald is not your database" section.
+
 ## Server
 
 ### Binary
@@ -34,7 +36,7 @@ A default tenant is auto-created on first start.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | `./herald-data` | Data directory for WAL + snapshots |
-| `event_ttl_days` | u32 | `7` | Events older than this are pruned hourly |
+| `event_ttl_days` | u32 | `7` | Events older than this are pruned hourly. This is the catch-up buffer horizon — **not** a history retention policy. Clients requesting events older than this receive empty ranges silently. Persist to your own database if you need longer retention. |
 
 #### `[auth]`
 

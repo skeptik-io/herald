@@ -2,6 +2,8 @@
 
 React bindings for Herald Chat. Hooks use `useSyncExternalStore` for tear-free reads. Components are headless (render-prop pattern, zero styling).
 
+> **Herald is transport, not storage.** These hooks render the live conversation and handle reconnect catch-up; they do not own long-term message history. On cold load, hydrate from your application's database (via `seedHistory` / `loadMoreWith` on the underlying `ChatCore`), then subscribe to Herald for live updates. Herald's internal buffer is a 7-day catch-up window by default, not a history API.
+
 ## Install
 
 ```bash

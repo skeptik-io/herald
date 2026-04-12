@@ -59,15 +59,17 @@ Herald runs ShroudB engines (Sentry, Courier, Chronicle) **in-process** using pu
 
 - A WebSocket server for real-time bidirectional messaging
 - An HTTP API for backend stream/member management
-- A event fan-out engine with per-stream sequence ordering
+- An event fan-out engine with per-stream sequence ordering
 - A presence tracker derived from connection state
-- A catch-up buffer for seamless reconnection
+- A short-horizon catch-up buffer for seamless reconnection (default 7-day retention)
 
 ### What Herald Is Not
 
+- **Not your application database.** The WAL is a catch-up buffer, not a message store. Events older than `store.event_ttl_days` (default 7 days) are pruned hourly. Long-term history, search, audit, and analytics belong in the consuming application's database. Treat Herald as an expiring pipe, in the same category as Pusher or Ably — not Kafka, not Postgres.
+- **Not the source of truth across time.** The app DB is. Herald is authoritative for *deltas within the buffer window* (new events plus mutations: edit/delete/reactions/cursor moves); the app DB is authoritative for *state across all time*. Both paths must converge on identical end state, which they do as long as the webhook reliably mirrors every Herald event to the app DB. Inside the window clients reconcile via replay; outside the window they reconcile via a fresh hydrate from the app DB.
 - Not a ShroudB engine (no RESP3, no Moat embedding, no engine conventions)
-- Storage is ShroudB WAL engine — ~80µs writes
 - Not an application server (no business logic, no domain awareness)
+- Backed internally by ShroudB WAL storage (~80µs writes) so no external database is required *to operate Herald itself* — this is an operational convenience, not a statement that Herald replaces your app's database.
 
 ---
 
@@ -850,9 +852,11 @@ Each connection has a bounded `mpsc` channel (capacity: 256 frames). If the chan
 
 ## 8. Storage Model
 
+> **Herald is not your application database.** This section describes Herald's *internal* persistence — the catch-up buffer and registry state that Herald needs to survive restarts and serve reconnects. Long-term message history, search, audit, and any data your product relies on past the retention window belong in the consuming application's own database. See the "What Herald Is Not" section in §1.
+
 ### Herald: WAL Catch-Up Buffer
 
-Herald uses ShroudB WAL engine as the primary persistence layer for reconnect catch-up and short-term history queries. 
+Herald uses the ShroudB WAL engine as a short-horizon buffer for reconnect catch-up and recent-history queries. It is sized for seamless reconnects, not for long-term retention.
 
 ```sql
 CREATE TABLE streams (
@@ -901,9 +905,19 @@ Events have a configurable TTL (default: 7 days). A background task runs hourly:
 DELETE FROM events WHERE expires_at < ?;
 ```
 
+Expiry is **silent**: a client requesting events older than the TTL will simply receive an empty range, not an error. This is intentional — the buffer is a best-effort catch-up window, not a queryable history API. If your product needs to distinguish "never existed" from "expired from the buffer," persist the event in your own database when you publish it (see App Sync below) and query that instead.
+
+### Why chat mutations live in the WAL
+
+Edit, delete, reaction, and cursor events are persisted in the same WAL for one reason: **replay correctness across brief disconnects**. Consider A and B chatting. B's wifi drops for 20 seconds; during the gap A deletes an earlier message. When B reconnects with `cursor = last_seen_seq`, Herald replays every event from that seq forward — including A's delete. B's local state converges without a refresh.
+
+If mutations were pure fanout signals (broadcast-only, never stored), replay would be lossy: B would reconnect and silently miss the delete until a full page reload re-hydrated from the app DB. That would break the "seamless reconnect" property the buffer exists to provide.
+
+The persistence is therefore bounded by the same TTL as events themselves: mutations need to survive only long enough to cover a reconnect within the buffer window. Across the window, the app DB is the reconciliation path — the client re-hydrates fully and the question "did this mutation happen" is answered by the app's own state, not by Herald. **Mirror every Herald event (including mutations) to the app DB via the webhook** so the two paths converge on the same truth.
+
 ### App Sync: Webhook
 
-Herald POSTs event events to the app backend so it can persist them in its own database.
+Herald POSTs events to the app backend so it can persist them in its own database. **This is the recommended integration shape**: Herald delivers in realtime to browsers, and the webhook lets your app maintain the canonical log.
 
 ```
 POST https://app.example.com/webhooks/herald

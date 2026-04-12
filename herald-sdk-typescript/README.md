@@ -2,6 +2,8 @@
 
 Browser WebSocket client for Herald.
 
+> **Herald is a transport layer, not a database.** Events are retained for a short catch-up window (default 7 days) so reconnecting clients can resume without gaps. Anything your app needs to keep past that window — long-term history, search, audit — must live in your own database. This SDK delivers live events and resumes on reconnect; it does not replace an application message store.
+
 ## Install
 
 ```bash

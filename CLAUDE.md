@@ -1,6 +1,16 @@
 # Herald
 
-Persistent realtime event streams with built-in authorization. Standalone Rust project using ShroudB for storage and authorization. Event body is opaque — Herald is a transport and delivery layer.
+Realtime event transport with built-in authorization. Standalone Rust project. Event body is opaque — Herald is a **delivery layer, not a database**.
+
+**Critical framing for agents working in this repo:** Herald is in the same category as Pusher, Ably, or Centrifugo. Herald's internal ShroudB WAL is a **short-horizon catch-up buffer** (default 7-day retention, pruned hourly) that lets Herald survive restarts and serve reconnecting clients — it is not a message store.
+
+The two authorities:
+
+- **Inside the buffer window:** Herald is authoritative for *deltas* — new events plus chat mutations (edit, delete, reaction, cursor). Mutations are persisted in the WAL *on purpose*, so replay stays lossless across brief disconnects (a client that missed a delete during a 20s wifi drop gets it via reconnect replay, no refresh needed). This is load-bearing, not scope creep.
+- **Across the buffer window:** the app DB is authoritative for *state*. Cold loads, long absences, and new-device hydrates go through the app's own API, not Herald.
+- Both paths converge because the webhook mirrors every Herald event (including mutations) to the app DB.
+
+When designing features, adding APIs, or writing SDK code: do **not** assume Herald has any event older than `store.event_ttl_days`. Do **not** treat Herald as the long-term source of truth for chat state. Do **not** propose "make mutations pure fanout signals" — that would break replay. The integration shape is: app DB is canonical across time, Herald is the delta pipe within the buffer window, SDK hydrates from app DB (`seedHistory` / `loadMoreWith`) and subscribes to Herald for live updates.
 
 ## Read Order
 

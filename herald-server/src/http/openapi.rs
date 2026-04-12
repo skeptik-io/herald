@@ -380,7 +380,7 @@ pub struct AuditCountResponse {
 #[openapi(
     info(
         title = "Herald API",
-        description = "Persistent realtime event streams with built-in authorization.",
+        description = "Realtime event transport with built-in authorization. Herald is a delivery layer, not a database — events are retained in an internal catch-up buffer (default 7-day TTL, configurable via `store.event_ttl_days`) for reconnect recovery, then pruned hourly. Requests for events older than the TTL return empty ranges silently. Long-term history, search, and audit belong in your application's own database.",
         version = "2.0.0",
         license(name = "Proprietary"),
     ),

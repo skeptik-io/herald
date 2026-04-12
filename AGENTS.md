@@ -1,12 +1,12 @@
 # Herald
 
-> Persistent realtime event streams with built-in authorization. Multi-tenant, ShroudB Sentry ABAC. Event body is opaque — Herald is a transport+storage layer.
+> Realtime event transport with built-in authorization. Multi-tenant, ShroudB Sentry ABAC. Event body is opaque — Herald is a **delivery layer, not a database**. The ShroudB WAL backing it is a short-horizon catch-up buffer (default 7-day TTL), not an application message store. Consumers own the canonical log in their own database.
 
 ## Quick Context
 
 - **Role**: Real-time event delivery. Browsers via WebSocket (`/ws`), backends via HTTP API. Single port (default `:6200`).
 - **Not a ShroudB engine**: Standalone Rust project. Uses ShroudB crates for storage.
-- **Storage**: ShroudB WAL engine (`shroudb-storage`). ~80µs writes. No Postgres.
+- **Internal storage**: ShroudB WAL engine (`shroudb-storage`), ~80µs writes. Backs the catch-up buffer and registry state only — not an app-facing message store. Default retention is 7 days (`store.event_ttl_days`); older events are pruned hourly. Apps still need their own database for history, audit, and search.
 - **Multi-tenant**: Per-tenant key+secret (HMAC-SHA256). Admin API for tenant CRUD. Default tenant auto-created on first start.
 - **Opaque event body**: Herald stores and delivers event bodies as-is. Consumers handle their own encryption and search.
 - **ShroudB Sentry**: ABAC authorization available as embedded (in-process) or remote (TCP with circuit breakers).

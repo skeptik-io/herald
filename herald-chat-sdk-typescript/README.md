@@ -2,6 +2,8 @@
 
 WebSocket client wrapper that extends `@skeptik-io/herald-sdk` with chat-specific frame types.
 
+> **Herald persists chat mutations for replay, not for durability.** Edits, deletes, and reactions are kept in Herald's WAL (default **7-day retention**) so a client that reconnects after a brief disconnect replays every delta it missed — including, say, a delete that happened while its wifi was down. This makes reconnects seamless without a page refresh. It does **not** make Herald a durable store: after the TTL, those mutations are gone. Mirror them into your app's database via the server-side webhook, and hydrate history from your DB on cold load / long absences.
+
 ## Install
 
 ```bash

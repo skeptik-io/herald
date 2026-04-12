@@ -589,13 +589,19 @@ export class ChatCore {
     const msgs = this.messages.getMessages(streamId);
     if (msgs.length === 0) return;
 
-    // Find the latest sequenced (non-optimistic) message
+    // Find the latest real (positive) seq from messages, or fall back to
+    // the stream's latestSeq from the cursor store. DB-seeded messages use
+    // negative synthetic seqs which aren't valid Herald cursors, but the
+    // cursor store's latestSeq (from SubscribedPayload) is always valid.
     let latestSeq = 0;
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].seq > 0) {
         latestSeq = msgs[i].seq;
         break;
       }
+    }
+    if (latestSeq === 0) {
+      latestSeq = this.cursors.getLatestSeq(streamId);
     }
 
     if (latestSeq > 0) {

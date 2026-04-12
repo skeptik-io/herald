@@ -34,6 +34,10 @@ export class CursorStore {
     return this.myCursor.get(streamId) ?? 0;
   }
 
+  getLatestSeq(streamId: string): number {
+    return this.latestSeq.get(streamId) ?? 0;
+  }
+
   getUnreadCount(streamId: string): number {
     const latest = this.latestSeq.get(streamId) ?? 0;
     const cursor = this.myCursor.get(streamId) ?? 0;

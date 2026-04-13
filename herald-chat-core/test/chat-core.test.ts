@@ -160,6 +160,20 @@ function makeCore(clientOpts?: MockClientOptions, coreOpts?: Partial<ChatCoreOpt
   return { client, chatClient, core };
 }
 
+/** Extract published cursor envelopes from a MockClient's publishCalls. */
+function cursorPublishes(client: MockClient): Array<{ stream: string; seq: number }> {
+  const out: Array<{ stream: string; seq: number }> = [];
+  for (const call of client.publishCalls) {
+    if (typeof call.body !== "string") continue;
+    if (!call.body.startsWith("{") || !call.body.includes('"cursor"')) continue;
+    try {
+      const env = JSON.parse(call.body);
+      if (env.kind === "cursor") out.push({ stream: call.stream, seq: env.seq });
+    } catch { /* not an envelope */ }
+  }
+  return out;
+}
+
 // ── Lifecycle ──────────────────────────────────────────────────────
 
 await test("attach registers event listeners", async () => {
@@ -761,38 +775,74 @@ await test("multiple concurrent sends produce correct order after reconcile", as
   core.destroy();
 });
 
-// ── Actions delegate to client ─────────────────────────────────────
+// ── Edit / delete via envelope publish ─────────────────────────────
 
-await test("edit delegates to client.editEvent", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("edit publishes envelope and applies optimistic", async () => {
+  const { client, core } = makeCore();
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "orig", sent_at: 1 });
+
   await core.edit("s1", "e1", "new body");
-  // Just verifies it doesn't throw; client mock accepts it
+
+  // Optimistic visible immediately
+  assert(core.getMessages("s1")[0].body === "new body", "optimistic body applied");
+  assert(typeof core.getMessages("s1")[0].editedAt === "number", "editedAt set");
+
+  // Envelope published, not legacy chat.editEvent
+  const editPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"edit"'));
+  assert(editPublish !== undefined, "edit envelope published");
+  const env = JSON.parse(editPublish!.body);
+  assert(env.kind === "edit" && env.targetId === "e1" && env.text === "new body", "envelope shape");
   core.destroy();
 });
 
-await test("edit propagates client error", async () => {
-  const { core } = makeCore({ editError: new Error("forbidden") });
+await test("edit rolls back on publish failure", async () => {
+  const { client, core } = makeCore({ publishError: new Error("forbidden") });
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "orig", sent_at: 1 });
+
   let threw = false;
   try { await core.edit("s1", "e1", "x"); } catch { threw = true; }
-  assert(threw, "should throw");
+  assert(threw, "edit threw");
+  // Rolled back
+  assert(core.getMessages("s1")[0].body === "orig", "body reverted");
+  assert(core.getMessages("s1")[0].editedAt === undefined, "editedAt reverted");
   core.destroy();
 });
 
-await test("deleteEvent delegates to client", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("deleteEvent publishes envelope and applies optimistic", async () => {
+  const { client, core } = makeCore();
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "secret", sent_at: 1 });
+
   await core.deleteEvent("s1", "e1");
+
+  assert(core.getMessages("s1")[0].deleted === true, "optimistic delete applied");
+  assert(core.getMessages("s1")[0].body === "", "body cleared");
+
+  const delPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"delete"'));
+  assert(delPublish !== undefined, "delete envelope published");
+  const env = JSON.parse(delPublish!.body);
+  assert(env.kind === "delete" && env.targetId === "e1", "envelope shape");
   core.destroy();
 });
 
-await test("deleteEvent propagates client error", async () => {
-  const { core } = makeCore({ deleteError: new Error("forbidden") });
+await test("deleteEvent rolls back on publish failure", async () => {
+  const { client, core } = makeCore({ publishError: new Error("forbidden") });
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "secret", sent_at: 1 });
+
   let threw = false;
   try { await core.deleteEvent("s1", "e1"); } catch { threw = true; }
-  assert(threw, "should throw");
+  assert(threw, "delete threw");
+  assert(core.getMessages("s1")[0].deleted === false, "delete reverted");
+  assert(core.getMessages("s1")[0].body === "secret", "body restored");
   core.destroy();
 });
 
@@ -906,7 +956,7 @@ await test("startTyping and stopTyping delegate to client", async () => {
 // ── Scroll coordination ────────────────────────────────────────────
 
 await test("at live edge auto-marks read on new events", async () => {
-  const { client, chatClient, core } = makeCore();
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
   core.setAtLiveEdge("s1", true);
@@ -914,8 +964,9 @@ await test("at live edge auto-marks read on new events", async () => {
   client.emit("event", { stream: "s1", id: "e1", seq: 5, sender: "a", body: "x", sent_at: 1 });
 
   assert(core.getUnreadCount("s1") === 0, "0 unread");
-  assert(chatClient.cursorCalls.length === 1, "cursor sent");
-  assert(chatClient.cursorCalls[0].seq === 5, "cursor at seq 5");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, "cursor envelope published");
+  assert(cp[0].seq === 5, "cursor at seq 5");
   core.destroy();
 });
 
@@ -935,7 +986,7 @@ await test("not at live edge increments pending count", async () => {
 });
 
 await test("returning to live edge resets pending and marks read", async () => {
-  const { client, chatClient, core } = makeCore();
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
   core.setAtLiveEdge("s1", false);
@@ -945,8 +996,9 @@ await test("returning to live edge resets pending and marks read", async () => {
   core.setAtLiveEdge("s1", true);
 
   assert(core.getScrollState("s1").pendingCount === 0, "pending reset");
-  assert(chatClient.cursorCalls.length === 1, "cursor sent on edge return");
-  assert(chatClient.cursorCalls[0].seq === 3, "cursor at latest seq");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, "cursor envelope published on edge return");
+  assert(cp[0].seq === 3, "cursor at latest seq");
   core.destroy();
 });
 
@@ -1115,7 +1167,7 @@ await test("getLivenessState returns active when no liveness configured", async 
 // ── scrollIdleMs debounce ──────────────────────────────────────────
 
 await test("scrollIdleMs debounce: cursor not sent immediately", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 100 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 100 });
   core.attach();
   await core.joinStream("s1");
 
@@ -1123,47 +1175,48 @@ await test("scrollIdleMs debounce: cursor not sent immediately", async () => {
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
 
   // Cursor should NOT have been sent yet (debounce pending)
-  assert(chatClient.cursorCalls.length === 0, "no cursor sent yet");
+  assert(cursorPublishes(client).length === 0, "no cursor envelope yet");
 
   core.destroy();
 });
 
 await test("scrollIdleMs debounce: cursor sent after delay", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 50 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 50 });
   core.attach();
   await core.joinStream("s1");
 
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
-  assert(chatClient.cursorCalls.length === 0, "not sent immediately");
+  assert(cursorPublishes(client).length === 0, "not sent immediately");
 
   // Wait for debounce
   await new Promise((r) => setTimeout(r, 80));
-  assert(chatClient.cursorCalls.length === 1, "cursor sent after delay");
-  assert(chatClient.cursorCalls[0].seq === 1, "correct seq");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, "cursor envelope sent after delay");
+  assert(cp[0].seq === 1, "correct seq");
 
   core.destroy();
 });
 
 await test("scrollIdleMs debounce: scroll away cancels pending cursor", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 100 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 100 });
   core.attach();
   await core.joinStream("s1");
 
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
-  assert(chatClient.cursorCalls.length === 0, "not sent yet");
+  assert(cursorPublishes(client).length === 0, "not sent yet");
 
   // Scroll away from live edge — should cancel the pending timer
   core.setAtLiveEdge("s1", false);
 
   // Wait longer than the debounce
   await new Promise((r) => setTimeout(r, 150));
-  assert(chatClient.cursorCalls.length === 0, "cursor never sent after scroll-away");
+  assert(cursorPublishes(client).length === 0, "cursor never sent after scroll-away");
 
   core.destroy();
 });
 
 await test("scrollIdleMs debounce: rapid events coalesce into one cursor update", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 50 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 50 });
   core.attach();
   await core.joinStream("s1");
 
@@ -1174,20 +1227,20 @@ await test("scrollIdleMs debounce: rapid events coalesce into one cursor update"
 
   // Wait for debounce
   await new Promise((r) => setTimeout(r, 80));
-  // Should send only one cursor update for the latest seq
-  assert(chatClient.cursorCalls.length === 1, `expected 1 cursor call, got ${chatClient.cursorCalls.length}`);
-  assert(chatClient.cursorCalls[0].seq === 5, "cursor sent for latest seq");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, `expected 1 cursor envelope, got ${cp.length}`);
+  assert(cp[0].seq === 5, "cursor sent for latest seq");
 
   core.destroy();
 });
 
 await test("scrollIdleMs: 0 fires cursor immediately (no debounce)", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 0 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 0 });
   core.attach();
   await core.joinStream("s1");
 
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
-  assert(chatClient.cursorCalls.length === 1, "cursor sent immediately");
+  assert(cursorPublishes(client).length === 1, "cursor envelope sent immediately");
 
   core.destroy();
 });
@@ -1953,15 +2006,19 @@ await test("writer.edit: routes through app, bypasses chat.editEvent", async () 
   core.destroy();
 });
 
-await test("writer.edit: omitted slot falls back to Herald chat.editEvent", async () => {
-  // editError configured; without a writer.edit, ChatCore should surface it
-  // from chat.editEvent (proving it went through the Herald path).
-  const { core } = makeCore({ editError: new Error("chat editEvent called") });
+await test("writer.edit: omitted slot falls back to Herald publish path", async () => {
+  // publishError configured; without a writer.edit, ChatCore should surface
+  // the publish error from the envelope path.
+  const { client, core } = makeCore({ publishError: new Error("publish failed") });
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "before", sent_at: 1 });
+
   let threw = false;
   try { await core.edit("s1", "e1", "x"); } catch (e) {
-    threw = (e as Error).message === "chat editEvent called";
+    threw = (e as Error).message === "publish failed";
   }
-  assert(threw, "edit fell through to chat.editEvent when writer.edit absent");
+  assert(threw, "edit fell through to envelope publish when writer.edit absent");
   core.destroy();
 });
 
@@ -2050,15 +2107,15 @@ await test("writer.updateCursor: routes through app, bypasses chat.updateCursor"
 
   assert(cursorCalls.length >= 1, `writer.updateCursor called (got ${cursorCalls.length})`);
   assert(chatClient.cursorCalls.length === 0, "chat.updateCursor NOT called");
+  assert(cursorPublishes(client).length === 0, "no cursor envelope published when writer slot is set");
   core.destroy();
 });
 
 await test("writer: partial writer only overrides provided slots", async () => {
   // Writer provides send only; edit/delete/reaction/cursor should still
-  // use the Herald defaults. Verifying edit falls through by configuring
-  // editError on the chat mock — if writer.edit had been called, no throw.
+  // use the Herald defaults (publish envelope on client.publish).
   const client = new MockClient();
-  const chatClient = new MockChatClient({ editError: new Error("chat edit called") });
+  const chatClient = new MockChatClient();
   const sendCalls: Array<{ localId: string }> = [];
   const writer = {
     send: async (d: { localId: string }) => {
@@ -2077,11 +2134,14 @@ await test("writer: partial writer only overrides provided slots", async () => {
   await core.send("s1", "hello");
   assert(sendCalls.length === 1, "writer.send used");
 
-  let editThrew = false;
-  try { await core.edit("s1", "e1", "x"); } catch (e) {
-    editThrew = (e as Error).message === "chat edit called";
-  }
-  assert(editThrew, "edit fell through to chat path");
+  // Seed a target so applyEditOptimistic has a message to mutate.
+  client.emit("event", { stream: "s1", id: "e1", seq: 99, sender: "me", body: "before", sent_at: 1 });
+  await core.edit("s1", "e1", "after");
+
+  // edit fell through to the Herald publish path (envelope), not to writer.edit
+  const editPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"edit"'));
+  assert(editPublish !== undefined, "edit envelope published when writer.edit absent");
   core.destroy();
 });
 

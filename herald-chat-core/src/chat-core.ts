@@ -266,18 +266,39 @@ export class ChatCore {
   }
 
   async edit(streamId: string, eventId: string, body: string): Promise<void> {
-    if (this.writer?.edit) {
-      await this.writer.edit(streamId, eventId, body);
-    } else {
-      await this.chat.editEvent(streamId, eventId, body);
+    // Optimistic: mutate the local message and capture previous state for
+    // rollback. The server's echo will overwrite editedAt with the canonical
+    // sent_at on receipt, which is desirable.
+    const previous = this.messages.applyEditOptimistic(streamId, eventId, body);
+    try {
+      if (this.writer?.edit) {
+        await this.writer.edit(streamId, eventId, body);
+      } else {
+        const env = encodeEnvelope({ kind: "edit", targetId: eventId, text: body });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      if (previous) {
+        this.messages.revertEdit(streamId, eventId, previous.previousBody, previous.previousEditedAt);
+      }
+      throw err;
     }
   }
 
   async deleteEvent(streamId: string, eventId: string): Promise<void> {
-    if (this.writer?.delete) {
-      await this.writer.delete(streamId, eventId);
-    } else {
-      await this.chat.deleteEvent(streamId, eventId);
+    const previous = this.messages.applyDeleteOptimistic(streamId, eventId);
+    try {
+      if (this.writer?.delete) {
+        await this.writer.delete(streamId, eventId);
+      } else {
+        const env = encodeEnvelope({ kind: "delete", targetId: eventId });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      if (previous) {
+        this.messages.revertDelete(streamId, eventId, previous.previousBody, previous.previousDeleted);
+      }
+      throw err;
     }
   }
 
@@ -787,10 +808,16 @@ export class ChatCore {
         if (this.writer?.updateCursor) {
           // Fire-and-forget: cursor updates are best-effort and we don't
           // block the UI on them. App writers that need to surface errors
-          // should handle them internally.
-          void this.writer.updateCursor(streamId, latestSeq);
+          // should handle them internally. Swallow the rejection so the
+          // promise doesn't bubble to an unhandled rejection.
+          this.writer.updateCursor(streamId, latestSeq).catch(() => { });
         } else {
-          this.chat.updateCursor(streamId, latestSeq);
+          // Publish the cursor advance as an envelope on the standard
+          // event.publish path. Fire-and-forget — the cursor is monotonic
+          // and will be re-announced on the next user-driven advance if
+          // this publish drops.
+          const env = encodeEnvelope({ kind: "cursor", seq: latestSeq });
+          this.client.publish(streamId, env).catch(() => { });
         }
       }
     }

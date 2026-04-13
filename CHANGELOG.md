@@ -4,6 +4,37 @@ All notable changes to Herald are documented in this file.
 
 ## [Unreleased]
 
+## [5.0.1] - 2026-04-13
+
+### Added
+
+- **`ChatCore.seedReactions(streamId, messageId, reactions)`**: seed
+  DB-sourced reactions onto a message already in the store. Idempotent
+  via the underlying `applyReaction` Set semantics; silent no-op if the
+  message is not present. Exists to let apps backed by a canonical
+  database hydrate old messages' reaction state on initial load without
+  round-tripping through the transport.
+
+- **`ChatCore.seedRemoteCursor(streamId, userId, seq)`**: seed a remote
+  user's read-cursor from an external source. Mirrors the envelope path:
+  MAX-only advancement, self-skip, listen-only skip, and auto `markRead`
+  on self-sent messages up to `seq`. Pairs with `seedReactions` to give
+  apps a complete DB-seed story alongside `seedHistory`.
+
+### Why
+
+v5.0.0 collapsed chat state mutations onto the envelope-over-`event.new`
+path and removed the dedicated reaction/cursor stores from the server.
+That works end-to-end for live traffic, but left a gap for apps whose
+DB is the canonical store: freshly seeded messages from `seedHistory`
+start with an empty reactions Map and `"sent"` status, and there was no
+public API to populate them from the app's canonical state. Apps were
+forced to maintain a parallel reaction store in `meta`, defeating the
+point of the v5 collapse. These two additive methods close the gap
+without expanding the mutation surface.
+
+## [5.0.0] - 2026-04-13
+
 ### Breaking Changes
 
 - **Chat state mutations are now typed envelopes on `event.publish`, not

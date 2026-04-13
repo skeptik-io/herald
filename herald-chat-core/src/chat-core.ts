@@ -446,6 +446,52 @@ export class ChatCore {
     }
   }
 
+  /**
+   * Seed DB-sourced reactions onto a message already present in the store.
+   * Idempotent: calling with the same `(emoji, userId)` more than once is a
+   * no-op. Silently no-ops if the message is not in the store — apps should
+   * call this after `seedHistory()` for the same stream.
+   *
+   * Live reactions arrive via reaction envelopes on `event.new`; this method
+   * exists so apps backed by a canonical database can hydrate old messages'
+   * reaction state on initial load without round-tripping through the
+   * transport.
+   */
+  seedReactions(
+    streamId: string,
+    messageId: string,
+    reactions: Array<{ emoji: string; userIds: string[] }>,
+  ): void {
+    for (const { emoji, userIds } of reactions) {
+      for (const userId of userIds) {
+        this.messages.applyReaction({
+          stream: streamId,
+          event_id: messageId,
+          user_id: userId,
+          emoji,
+          action: "add",
+        });
+      }
+    }
+  }
+
+  /**
+   * Seed a remote user's read-cursor position from an external source (e.g. a
+   * database row tracking last-read seq per user). Mirrors the envelope path
+   * semantics: MAX-only advancement via `updateRemoteCursor`, followed by
+   * `markRead` on self-sent messages up to `seq`.
+   *
+   * Skips self (seeding your own cursor as "remote" is nonsensical) and
+   * listen-only streams (the app has opted out of chat state).
+   */
+  seedRemoteCursor(streamId: string, userId: string, seq: number): void {
+    if (userId === this.userId) return;
+    if (this.listenOnly.has(streamId)) return;
+    const advanced = this.cursors.updateRemoteCursor(streamId, userId, seq);
+    if (!advanced) return;
+    this.messages.markRead(streamId, seq, this.userId);
+  }
+
   async loadMore(streamId: string): Promise<boolean> {
     const scroll = this.scrollStates.get(streamId);
     if (scroll?.getSnapshot().isLoadingMore) return false;

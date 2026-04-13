@@ -969,6 +969,136 @@ await test("setAtLiveEdge for unknown stream is harmless", async () => {
   core.destroy();
 });
 
+// ── Seed APIs (reactions + remote cursor) ─────────────────────────
+
+await test("seedReactions: populates reactions on a seeded message", async () => {
+  const { core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  core.seedHistory("s1", [
+    { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 },
+  ], false);
+
+  core.seedReactions("s1", "e1", [
+    { emoji: "🔥", userIds: ["bob", "carol"] },
+    { emoji: "❤️", userIds: ["dave"] },
+  ]);
+
+  const msg = core.getMessages("s1")[0];
+  assert(msg.reactions.get("🔥")?.has("bob") === true, "bob's 🔥 recorded");
+  assert(msg.reactions.get("🔥")?.has("carol") === true, "carol's 🔥 recorded");
+  assert(msg.reactions.get("❤️")?.has("dave") === true, "dave's ❤️ recorded");
+  assert(msg.reactions.get("🔥")?.size === 2, "🔥 has exactly 2 users");
+  core.destroy();
+});
+
+await test("seedReactions: idempotent on repeat (same user + emoji)", async () => {
+  const { core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  core.seedHistory("s1", [
+    { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 },
+  ], false);
+
+  core.seedReactions("s1", "e1", [{ emoji: "🔥", userIds: ["bob"] }]);
+  core.seedReactions("s1", "e1", [{ emoji: "🔥", userIds: ["bob"] }]);
+
+  const users = core.getMessages("s1")[0].reactions.get("🔥");
+  assert(users?.size === 1, "bob counted once despite two seed calls");
+  core.destroy();
+});
+
+await test("seedReactions: no-op when messageId not in store", async () => {
+  const { core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  // No seedHistory — message doesn't exist. Should silently no-op.
+  core.seedReactions("s1", "ghost", [{ emoji: "🔥", userIds: ["bob"] }]);
+  assert(core.getMessages("s1").length === 0, "no phantom messages created");
+  core.destroy();
+});
+
+await test("seedReactions: live envelope after seed merges into same state", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  core.seedHistory("s1", [
+    { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 },
+  ], false);
+  core.seedReactions("s1", "e1", [{ emoji: "🔥", userIds: ["bob"] }]);
+
+  // Live reaction from carol via envelope — should add, not replace.
+  const env = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "carol", body: env, sent_at: 2 });
+
+  const users = core.getMessages("s1")[0].reactions.get("🔥");
+  assert(users?.has("bob") === true, "bob's seeded reaction preserved");
+  assert(users?.has("carol") === true, "carol's live reaction added");
+  assert(users?.size === 2, "both reactions coexist");
+  core.destroy();
+});
+
+await test("seedRemoteCursor: flips self-sent messages to read", async () => {
+  const { core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  await core.send("s1", "mine-1");
+  await core.send("s1", "mine-2");
+  const msgs = core.getMessages("s1");
+  const seq2 = msgs[1].seq;
+
+  core.seedRemoteCursor("s1", "bob", seq2);
+
+  assert(core.getRemoteCursors("s1").get("bob") === seq2, "bob's cursor recorded");
+  assert(core.getMessages("s1")[0].status === "read", "first self message flipped to read");
+  assert(core.getMessages("s1")[1].status === "read", "second self message flipped to read");
+  core.destroy();
+});
+
+await test("seedRemoteCursor: skips when userId matches self", async () => {
+  const { core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  await core.send("s1", "mine");
+  const seq = core.getMessages("s1")[0].seq;
+
+  core.seedRemoteCursor("s1", "me", seq); // self — should no-op
+
+  assert(core.getRemoteCursors("s1").get("me") === undefined, "no remote cursor recorded for self");
+  assert(core.getMessages("s1")[0].status !== "read", "self message not flipped");
+  core.destroy();
+});
+
+await test("seedRemoteCursor: MAX semantics — does not go backward", async () => {
+  const { core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  await core.send("s1", "m1");
+  await core.send("s1", "m2");
+  const [m1, m2] = core.getMessages("s1");
+
+  core.seedRemoteCursor("s1", "bob", m2.seq);
+  core.seedRemoteCursor("s1", "bob", m1.seq); // earlier — should be ignored
+
+  assert(core.getRemoteCursors("s1").get("bob") === m2.seq, "cursor stays at the later seq");
+  core.destroy();
+});
+
+await test("seedRemoteCursor: does not flip other users' messages", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  // Alice's message (not mine)
+  client.emit("event", { stream: "s1", id: "a1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  core.seedRemoteCursor("s1", "bob", 1);
+
+  assert(core.getMessages("s1")[0].status !== "read", "alice's message not marked read by bob's cursor");
+  core.destroy();
+});
+
 // ── loadMore ───────────────────────────────────────────────────────
 
 await test("loadMore fetches older messages and prepends", async () => {

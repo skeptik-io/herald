@@ -2,7 +2,7 @@
 
 Herald is a product-agnostic WebSocket realtime server. It handles streams, events, presence, cursors, and real-time fan-out. It does not know about any consuming application's domain model.
 
-Herald is a standalone Rust project. It optionally integrates with [ShroudB](https://github.com/nicklucas/shroudb) for authorization, offline notifications, and audit — but runs independently without it. Event bodies are opaque — Herald stores and delivers them as-is. Consumers handle their own encryption and search.
+Herald is a standalone Rust project. It optionally integrates with [ShroudB](https://github.com/shroudb/shroudb) for authorization, offline notifications, and audit — but runs independently without it. Event bodies are opaque — Herald stores and delivers them as-is. Consumers handle their own encryption and search.
 
 ---
 

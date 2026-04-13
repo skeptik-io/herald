@@ -17,7 +17,7 @@ import (
 	"os"
 	"strconv"
 
-	herald "github.com/nicklucas/herald-admin-go"
+	herald "github.com/skeptik-io/herald-admin-go"
 )
 
 func main() {

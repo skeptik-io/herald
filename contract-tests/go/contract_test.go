@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	herald "github.com/nicklucas/herald-admin-go"
+	herald "github.com/skeptik-io/herald-admin-go"
 )
 
 // Spec types matching spec.json structure.

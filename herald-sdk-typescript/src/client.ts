@@ -2,7 +2,6 @@ import { Connection, type ConnectionState } from "./connection.js";
 import { HeraldError } from "./errors.js";
 import { E2EEManager } from "./e2ee.js";
 import type {
-  CursorMoved,
   EventDelivered,
   EventReceived,
   HeraldClientOptions,
@@ -10,12 +9,9 @@ import type {
   HeraldEventMap,
   MemberEvent,
   EventAck,
-  EventDeleted,
-  EventEdited,
   EventNew,
   EventsBatch,
   PresenceChanged,
-  ReactionChanged,
   StreamEvent,
   StreamSubscriberCount,
   ServerFrame,
@@ -446,10 +442,6 @@ export class HeraldClient {
         this.emit("presence", p as unknown as PresenceChanged);
         break;
 
-      case "cursor.moved":
-        this.emit("cursor", p as unknown as CursorMoved);
-        break;
-
       case "member.joined":
         this.emit("member.joined", p as unknown as MemberEvent);
         break;
@@ -468,24 +460,6 @@ export class HeraldClient {
 
       case "stream.deleted":
         this.emit("stream.deleted", p as unknown as StreamEvent);
-        break;
-
-      case "event.deleted":
-        this.emit("event.deleted", p as unknown as EventDeleted);
-        break;
-
-      case "event.edited": {
-        const edited = p as unknown as EventEdited;
-        if (this.e2ee) {
-          const result = this.e2ee.decryptIncoming(edited.stream, edited.body);
-          edited.body = result.body;
-        }
-        this.emit("event.edited", edited);
-        break;
-      }
-
-      case "reaction.changed":
-        this.emit("reaction.changed", p as unknown as ReactionChanged);
         break;
 
       case "event.received":

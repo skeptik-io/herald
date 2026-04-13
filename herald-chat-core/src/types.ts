@@ -1,8 +1,46 @@
-import type { HeraldClient, EventNew, EventEdited, EventDeleted,
-  ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
+import type { HeraldClient, EventNew,
+  PresenceChanged, MemberEvent, TypingEvent,
   EventReceived, EventDelivered } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
 import type { HeraldPresenceClient, PresenceStatus } from "herald-presence-sdk";
+
+// ---------------------------------------------------------------------------
+// Synthesized ChatEvent payloads
+// ---------------------------------------------------------------------------
+//
+// These shapes are no longer delivered as typed server-to-client frames.
+// Chat-core's envelope dispatcher synthesizes them from the typed `body`
+// payload inside an incoming `event` so existing middleware consumers can
+// continue to subscribe to `"reaction.changed"`, `"event.edited"`, etc.
+// without needing to decode envelopes themselves.
+
+export interface EventEdited {
+  stream: string;
+  id: string;
+  seq: number;
+  body: string;
+  edited_at: number;
+}
+
+export interface EventDeleted {
+  stream: string;
+  id: string;
+  seq: number;
+}
+
+export interface ReactionChanged {
+  stream: string;
+  event_id: string;
+  emoji: string;
+  user_id: string;
+  action: "add" | "remove";
+}
+
+export interface CursorMoved {
+  stream: string;
+  user_id: string;
+  seq: number;
+}
 
 // ---------------------------------------------------------------------------
 // Message

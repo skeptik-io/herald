@@ -1,5 +1,5 @@
-import type { EventNew, EventEdited, EventDeleted, EventAck, ReactionChanged } from "herald-sdk";
-import type { Message } from "../types.js";
+import type { EventNew, EventAck } from "herald-sdk";
+import type { Message, EventEdited, EventDeleted, ReactionChanged } from "../types.js";
 import { Notifier } from "../notifier.js";
 
 export class MessageStore {

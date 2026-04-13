@@ -1,6 +1,7 @@
-import type { HeraldClient, EventNew, EventEdited, EventDeleted, EventAck, EventsBatch,
-  ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
+import type { HeraldClient, EventNew, EventAck, EventsBatch,
+  PresenceChanged, MemberEvent, TypingEvent,
   EventReceived, EventDelivered, SubscribedPayload } from "herald-sdk";
+import type { EventEdited, EventDeleted, ReactionChanged, CursorMoved } from "./types.js";
 import type { HeraldChatClient } from "herald-chat-sdk";
 import type { HeraldPresenceClient, PresenceStatus } from "herald-presence-sdk";
 import type { ChatCoreOptions, ChatWriter, Message, MessageAck, PendingMessage, Member, ScrollStateSnapshot, LivenessState, ChatEvent, Middleware } from "./types.js";
@@ -55,11 +56,7 @@ export class ChatCore {
 
   // Bound handlers for clean detach
   private _onEvent: Handler<EventNew>;
-  private _onEdited: Handler<EventEdited>;
-  private _onDeleted: Handler<EventDeleted>;
-  private _onReaction: Handler<ReactionChanged>;
   private _onPresence: Handler<PresenceChanged>;
-  private _onCursor: Handler<CursorMoved>;
   private _onTyping: Handler<TypingEvent>;
   private _onMemberJoined: Handler<MemberEvent>;
   private _onMemberLeft: Handler<MemberEvent>;
@@ -99,11 +96,7 @@ export class ChatCore {
 
     // Bind handlers
     this._onEvent = (e) => this.handleEvent(e);
-    this._onEdited = (e) => this.handleEdited(e);
-    this._onDeleted = (e) => this.handleDeleted(e);
-    this._onReaction = (e) => this.handleReaction(e);
     this._onPresence = (e) => this.handlePresence(e);
-    this._onCursor = (e) => this.handleCursor(e);
     this._onTyping = (e) => this.handleTyping(e);
     this._onMemberJoined = (e) => this.handleMemberJoined(e);
     this._onMemberLeft = (e) => this.handleMemberLeft(e);
@@ -120,11 +113,7 @@ export class ChatCore {
     this.attached = true;
 
     this.client.on("event", this._onEvent);
-    this.client.on("event.edited", this._onEdited);
-    this.client.on("event.deleted", this._onDeleted);
-    this.client.on("reaction.changed", this._onReaction);
     this.client.on("presence", this._onPresence);
-    this.client.on("cursor", this._onCursor);
     this.client.on("typing", this._onTyping);
     this.client.on("member.joined", this._onMemberJoined);
     this.client.on("member.left", this._onMemberLeft);
@@ -142,11 +131,7 @@ export class ChatCore {
     this.attached = false;
 
     this.client.off("event", this._onEvent);
-    this.client.off("event.edited", this._onEdited);
-    this.client.off("event.deleted", this._onDeleted);
-    this.client.off("reaction.changed", this._onReaction);
     this.client.off("presence", this._onPresence);
-    this.client.off("cursor", this._onCursor);
     this.client.off("typing", this._onTyping);
     this.client.off("member.joined", this._onMemberJoined);
     this.client.off("member.left", this._onMemberLeft);
@@ -637,45 +622,11 @@ export class ChatCore {
     });
   }
 
-  private handleEdited(edit: EventEdited): void {
-    const listen = this.listenOnly.has(edit.stream);
-    this.runMiddleware({ type: "event.edited", data: edit }, () => {
-      this.notifier.notify(`event:${edit.stream}`);
-      if (!listen) this.messages.applyEdit(edit);
-    });
-  }
-
-  private handleDeleted(del: EventDeleted): void {
-    const listen = this.listenOnly.has(del.stream);
-    this.runMiddleware({ type: "event.deleted", data: del }, () => {
-      this.notifier.notify(`event:${del.stream}`);
-      if (!listen) this.messages.applyDelete(del);
-    });
-  }
-
-  private handleReaction(reaction: ReactionChanged): void {
-    const listen = this.listenOnly.has(reaction.stream);
-    this.runMiddleware({ type: "reaction.changed", data: reaction }, () => {
-      this.notifier.notify(`event:${reaction.stream}`);
-      if (!listen) this.messages.applyReaction(reaction);
-    });
-  }
-
   private handlePresence(event: PresenceChanged): void {
     this.runMiddleware({ type: "presence", data: event }, () => {
       for (const streamId of this.members.streamsForUser(event.user_id)) {
         this.members.updatePresence(streamId, event.user_id, event.presence);
       }
-    });
-  }
-
-  private handleCursor(event: CursorMoved): void {
-    this.runMiddleware({ type: "cursor", data: event }, () => {
-      if (event.user_id === this.userId) return;
-      if (this.listenOnly.has(event.stream)) return;
-      const advanced = this.cursors.updateRemoteCursor(event.stream, event.user_id, event.seq);
-      if (!advanced) return;
-      this.messages.markRead(event.stream, event.seq, this.userId);
     });
   }
 

@@ -109,7 +109,10 @@ export class MessageStore {
     this.replaceList(streamId, list);
   }
 
-  reconcile(localId: string, ack: EventAck): void {
+  reconcile(
+    localId: string,
+    ack: EventAck & { body?: string; meta?: unknown },
+  ): void {
     const msg = this.byLocalId.get(localId);
     if (!msg) return;
 
@@ -132,6 +135,11 @@ export class MessageStore {
     msg.seq = ack.seq;
     msg.sentAt = ack.sent_at;
     msg.status = "sent";
+    // If the app-side writer returned canonical body/meta (sanitized,
+    // attachments expanded, mentions resolved), replace the optimistic
+    // values so the UI shows what was actually persisted.
+    if (ack.body !== undefined) msg.body = ack.body;
+    if (ack.meta !== undefined) msg.meta = ack.meta;
 
     this.byId.set(ack.id, msg);
     this.byLocalId.delete(localId);

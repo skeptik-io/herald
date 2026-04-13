@@ -13,6 +13,9 @@ export type {
   LivenessEnvironment,
   ChatCoreOptions,
   ChatEvent,
+  ChatWriter,
+  MessageDraft,
+  MessageAck,
   Middleware,
   PresenceStatus,
 } from "./types.js";

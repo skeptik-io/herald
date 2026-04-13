@@ -3,7 +3,7 @@ import type { HeraldClient, EventNew, EventEdited, EventDeleted, EventAck, Event
   EventReceived, EventDelivered, SubscribedPayload } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
 import type { HeraldPresenceClient, PresenceStatus } from "herald-presence-sdk";
-import type { ChatCoreOptions, Message, PendingMessage, Member, ScrollStateSnapshot, LivenessState, ChatEvent, Middleware } from "./types.js";
+import type { ChatCoreOptions, ChatWriter, Message, MessageAck, PendingMessage, Member, ScrollStateSnapshot, LivenessState, ChatEvent, Middleware } from "./types.js";
 import { Notifier } from "./notifier.js";
 import { MessageStore } from "./stores/message-store.js";
 import { CursorStore } from "./stores/cursor-store.js";
@@ -31,6 +31,7 @@ export class ChatCore {
   private scrollIdleMs: number;
   private loadMoreLimit: number;
   private middleware: Middleware[];
+  private writer: ChatWriter | null = null;
   private readTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private attached = false;
   private listenOnly = new Set<string>();
@@ -66,6 +67,7 @@ export class ChatCore {
     this.scrollIdleMs = options.scrollIdleMs ?? 1000;
     this.loadMoreLimit = options.loadMoreLimit ?? 50;
     this.middleware = options.middleware ?? [];
+    this.writer = options.writer ?? null;
 
     this.notifier = new Notifier();
     this.messages = new MessageStore(this.notifier);
@@ -214,10 +216,7 @@ export class ChatCore {
     const pending = this.createPendingMessage(localId);
 
     try {
-      const ack = await this.client.publish(streamId, body, {
-        meta: opts?.meta,
-        parentId: opts?.parentId,
-      });
+      const ack = await this.dispatchSend(localId, streamId, body, opts);
       this.messages.reconcile(localId, ack);
       this.pendingSends.delete(localId);
       return pending;
@@ -239,7 +238,7 @@ export class ChatCore {
     this.pendingSends.set(newLocalId, pending);
 
     try {
-      const ack = await this.client.publish(pending.streamId, pending.body, {
+      const ack = await this.dispatchSend(newLocalId, pending.streamId, pending.body, {
         meta: pending.meta,
         parentId: pending.parentId,
       });
@@ -258,19 +257,59 @@ export class ChatCore {
   }
 
   async edit(streamId: string, eventId: string, body: string): Promise<void> {
-    await this.chat.editEvent(streamId, eventId, body);
+    if (this.writer?.edit) {
+      await this.writer.edit(streamId, eventId, body);
+    } else {
+      await this.chat.editEvent(streamId, eventId, body);
+    }
   }
 
   async deleteEvent(streamId: string, eventId: string): Promise<void> {
-    await this.chat.deleteEvent(streamId, eventId);
+    if (this.writer?.delete) {
+      await this.writer.delete(streamId, eventId);
+    } else {
+      await this.chat.deleteEvent(streamId, eventId);
+    }
   }
 
-  addReaction(streamId: string, eventId: string, emoji: string): void {
-    this.chat.addReaction(streamId, eventId, emoji);
+  async addReaction(streamId: string, eventId: string, emoji: string): Promise<void> {
+    if (this.writer?.addReaction) {
+      await this.writer.addReaction(streamId, eventId, emoji);
+    } else {
+      this.chat.addReaction(streamId, eventId, emoji);
+    }
   }
 
-  removeReaction(streamId: string, eventId: string, emoji: string): void {
-    this.chat.removeReaction(streamId, eventId, emoji);
+  async removeReaction(streamId: string, eventId: string, emoji: string): Promise<void> {
+    if (this.writer?.removeReaction) {
+      await this.writer.removeReaction(streamId, eventId, emoji);
+    } else {
+      this.chat.removeReaction(streamId, eventId, emoji);
+    }
+  }
+
+  /** Route a send through the app writer if provided, otherwise the Herald
+   *  WebSocket. Both paths resolve to the same reconcile shape. */
+  private async dispatchSend(
+    localId: string,
+    streamId: string,
+    body: string,
+    opts?: { meta?: unknown; parentId?: string },
+  ): Promise<MessageAck> {
+    if (this.writer?.send) {
+      return this.writer.send({
+        localId,
+        streamId,
+        body,
+        meta: opts?.meta,
+        parentId: opts?.parentId,
+        senderId: this.userId,
+      });
+    }
+    return this.client.publish(streamId, body, {
+      meta: opts?.meta,
+      parentId: opts?.parentId,
+    });
   }
 
   startTyping(streamId: string): void {
@@ -608,7 +647,14 @@ export class ChatCore {
       const current = this.cursors.getMyCursor(streamId);
       if (latestSeq > current) {
         this.cursors.updateMyCursor(streamId, latestSeq);
-        this.chat.updateCursor(streamId, latestSeq);
+        if (this.writer?.updateCursor) {
+          // Fire-and-forget: cursor updates are best-effort and we don't
+          // block the UI on them. App writers that need to surface errors
+          // should handle them internally.
+          void this.writer.updateCursor(streamId, latestSeq);
+        } else {
+          this.chat.updateCursor(streamId, latestSeq);
+        }
       }
     }
   }

@@ -116,6 +116,56 @@ export type ChatEvent =
 export type Middleware = (event: ChatEvent, next: () => void) => void;
 
 // ---------------------------------------------------------------------------
+// Writer seam — persist-first integration
+// ---------------------------------------------------------------------------
+
+/** Draft passed to `writer.send`. The app's API should treat `localId` as
+ *  an idempotency key — if the client retries, the same localId arrives,
+ *  and the server should dedupe to avoid double-publishing. */
+export interface MessageDraft {
+  localId: string;
+  streamId: string;
+  body: string;
+  meta?: unknown;
+  parentId?: string;
+  senderId: string;
+}
+
+/** Canonical message returned by `writer.send`. `id`, `seq`, and `sent_at`
+ *  are required so the optimistic entry can be reconciled with the server's
+ *  authoritative identifiers. `body` and `meta` are optional — if the app
+ *  server canonicalized the input (sanitized, expanded attachment URLs,
+ *  resolved mentions), return the canonical values here and the UI will
+ *  replace the optimistic version; otherwise the optimistic values persist. */
+export interface MessageAck {
+  id: string;
+  seq: number;
+  sent_at: number;
+  body?: string;
+  meta?: unknown;
+}
+
+/** Persist-first write path. Each slot is optional: when provided, the
+ *  corresponding ChatCore method routes the write through the app's API
+ *  (app DB commits, then app server fans out via Herald); when omitted,
+ *  ChatCore falls back to the default Herald WebSocket path.
+ *
+ *  Intended shape:
+ *  - `send/edit/delete`: app API persists to DB, then the app backend
+ *    calls Herald's HTTP API to inject the resulting event for fanout.
+ *  - `addReaction/removeReaction/updateCursor`: app API commits to DB,
+ *    then Herald fanout is triggered (typically by calling the chat-sdk
+ *    WS frame — those HTTP endpoints don't exist yet). */
+export interface ChatWriter {
+  send?: (draft: MessageDraft) => Promise<MessageAck>;
+  edit?: (streamId: string, eventId: string, body: string) => Promise<void>;
+  delete?: (streamId: string, eventId: string) => Promise<void>;
+  addReaction?: (streamId: string, eventId: string, emoji: string) => Promise<void>;
+  removeReaction?: (streamId: string, eventId: string, emoji: string) => Promise<void>;
+  updateCursor?: (streamId: string, seq: number) => Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
 // ChatCore options
 // ---------------------------------------------------------------------------
 
@@ -135,6 +185,11 @@ export interface ChatCoreOptions {
   loadMoreLimit?: number;
   /** Optional middleware chain. Runs before/after store mutations — see {@link Middleware}. */
   middleware?: Middleware[];
+  /** Persist-first write path. When a slot is provided, that mutation is
+   *  routed through the app's API (which commits to the app DB and then
+   *  fans out via Herald) instead of publishing directly over the Herald
+   *  WebSocket. Any slot left empty falls back to the Herald WS path. */
+  writer?: ChatWriter;
 }
 
 export type { PresenceStatus } from "herald-presence-sdk";

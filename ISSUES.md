@@ -308,6 +308,48 @@ Work items derived from market analysis and current codebase state. Each item mu
   - [x] Chat unit tests (core, sdk, react) can run in parallel after their respective builds
   - [x] Contract tests can run as a separate parallel job (only needs the release binary + SDK builds)
 
+- [ ] **N-7: HTTP endpoints for reactions and cursor updates** `session:reactions-cursors-http`
+  Reactions (`reaction.add` / `reaction.remove`) and cursor updates are WebSocket-only today. The ChatCore `writer` seam (persist-first) supports these ops via client-side slots, but the clean integration shape — app backend commits to DB, then calls Herald HTTP to fanout — requires server-to-server HTTP endpoints that don't exist. Without them, persist-first for reactions/cursors still has to route the Herald fanout through the sender's own WebSocket, which is fine for user-driven actions but breaks down for bot/backend-originated reactions or any flow where the sender isn't holding a live WS connection. Adding these completes the persist-first story across all six mutation ops.
+
+  **Server-side handlers**
+  - [ ] `POST /streams/{id}/events/{event_id}/reactions` — body `{ user_id, emoji }`, wraps existing `store::reactions::add` + fanout
+  - [ ] `DELETE /streams/{id}/events/{event_id}/reactions/{emoji}?user_id=...` — wraps `store::reactions::remove` + fanout
+  - [ ] `POST /streams/{id}/cursors` — body `{ user_id, seq }`, wraps existing cursor persist + fanout. Symmetric with the already-existing `GET /streams/{id}/cursors`
+  - [ ] All three enforce stream membership the same way as their WS counterparts (`handle_reaction` in `ws_handler.rs:297-375` is the reference)
+  - [ ] All three emit the same audit events as the WS path (`audit()` call with matching `op` string)
+
+  **OpenAPI + codegen**
+  - [ ] `utoipa` annotations on all three handlers with request/response schemas
+  - [ ] Regenerate `openapi.yaml` / `openapi.json` (`cargo test --features openapi --lib -- openapi::tests::generate_spec_files`)
+  - [ ] Add mappings to `codegen/config.ts`:
+    - `POST /streams/{id}/events/{event_id}/reactions` → `events.addReaction`
+    - `DELETE /streams/{id}/events/{event_id}/reactions/{emoji}` → `events.removeReaction`
+    - `POST /streams/{id}/cursors` → `presence.setCursor` (matches the existing `presence.getCursors` namespace)
+  - [ ] Run `codegen/generate.ts` to regenerate all six admin SDKs (TypeScript, Go, Python, Ruby, PHP, C#)
+
+  **Contract tests**
+  - [ ] Add reaction add/remove fixtures to `contract-tests/spec/spec.json`
+  - [ ] Add cursor update fixture
+  - [ ] Verify all six admin SDKs pass
+
+  **Integration tests**
+  - [ ] Test: `POST /streams/:id/events/:eid/reactions` from HTTP, verify `reaction.changed` fans out to WS subscribers (including sender on another connection)
+  - [ ] Test: `DELETE` the same reaction, verify `reaction.changed` with `action: "remove"`
+  - [ ] Test: `POST /streams/:id/cursors`, verify `cursor.moved` fanout and cursor store updated
+  - [ ] Test: HTTP and WS paths produce identical audit entries
+  - [ ] Test: persist-first flow — app API POSTs a reaction via admin SDK, subscriber receives `reaction.changed` via WS (verifying the full server-side persist-first loop works end-to-end)
+
+  **Docs update**
+  - [ ] Update `herald-chat-core/README.md` "Persist-first Writes" section — remove the reactions/cursors caveat, show the cleaner pattern where the app backend uses the admin SDK's `events.addReaction` / `presence.setCursor` to trigger Herald fanout
+  - [ ] Update `ARCHITECTURE.md` §8 "Write Path: Persist-First vs Optimistic-First" — remove the footnote that server-to-server persist-first for reactions/cursors isn't available
+
+  **Validation**
+  - [ ] `cargo build`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` clean
+  - [ ] `cargo build --no-default-features`, `cargo clippy --no-default-features -- -D warnings` clean
+  - [ ] `cargo test --workspace` passing
+  - [ ] Live integration tests passing
+  - [ ] Contract tests passing for all six admin SDKs
+
 ---
 
 ## COMPLETED

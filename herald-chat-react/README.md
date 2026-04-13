@@ -41,6 +41,26 @@ function App() {
 }
 ```
 
+### Persist-first writes (recommended)
+
+Pass a `writer` to route sends/edits/deletes through your own API so your database is the commit point, not Herald's WebSocket ack. The full pattern (with media uploads, idempotency keys, canonical ack shape, and the reactions/cursor caveat) is documented in [`@skeptik-io/herald-chat`'s README](https://www.npmjs.com/package/@skeptik-io/herald-chat). The provider forwards the prop verbatim:
+
+```tsx
+import type { ChatWriter } from '@skeptik-io/herald-chat';
+
+const writer: ChatWriter = {
+  send:   async (draft)           => api.post('/messages', draft, { idempotencyKey: draft.localId }),
+  edit:   async (sid, eid, body)  => api.patch(`/messages/${eid}`, { body }),
+  delete: async (sid, eid)        => api.delete(`/messages/${eid}`),
+};
+
+<HeraldChatProvider client={...} chat={...} userId="alice" writer={writer}>
+  <Chat />
+</HeraldChatProvider>;
+```
+
+Slots are independent — omit any write op you want to keep on the Herald WebSocket default. Sender UIs stay optimistic either way; the difference is *where* the optimistic entry gets reconciled against (Herald ack vs app API response).
+
 ## Hooks
 
 All hooks are null-safe — they return stable defaults (`[]`, `0`, `undefined`) when called outside a `HeraldChatProvider`. This lets you render components before the provider mounts (e.g., while the WebSocket connects) without conditional logic. Write actions (`send`, `edit`, `deleteEvent`) reject with an error if called before the provider is available.

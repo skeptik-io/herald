@@ -2,7 +2,7 @@ import { useRef, useEffect, type ReactNode } from "react";
 import { ChatCore, type ChatCoreOptions } from "herald-chat";
 import type { HeraldClient } from "herald-sdk";
 import type { HeraldChatClient } from "herald-chat-sdk";
-import type { LivenessConfig, Middleware } from "herald-chat";
+import type { ChatWriter, LivenessConfig, Middleware } from "herald-chat";
 import { ChatCoreContext } from "./context.js";
 
 export interface HeraldChatProviderProps {
@@ -13,6 +13,8 @@ export interface HeraldChatProviderProps {
   scrollIdleMs?: number;
   loadMoreLimit?: number;
   middleware?: Middleware[];
+  /** Persist-first write path. See ChatWriter in @skeptik-io/herald-chat. */
+  writer?: ChatWriter;
   children: ReactNode;
 }
 
@@ -24,12 +26,13 @@ export function HeraldChatProvider({
   scrollIdleMs,
   loadMoreLimit,
   middleware,
+  writer,
   children,
 }: HeraldChatProviderProps) {
   const coreRef = useRef<ChatCore | null>(null);
 
   if (coreRef.current === null) {
-    coreRef.current = new ChatCore({ client, chat, userId, liveness, scrollIdleMs, loadMoreLimit, middleware });
+    coreRef.current = new ChatCore({ client, chat, userId, liveness, scrollIdleMs, loadMoreLimit, middleware, writer });
   }
 
   const mountedRef = useRef(false);

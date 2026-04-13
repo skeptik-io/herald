@@ -67,6 +67,80 @@ const unsub = core.subscribe('messages:general', () => {
 });
 ```
 
+## Persist-first Writes (recommended)
+
+By default, `ChatCore.send()` publishes the message directly to Herald over the WebSocket and waits for its ack. That's fine for demos but it makes Herald's ack the commit point — if the WS publish fails (rate limit, connection blip, E2EE error, auth drift), the sender sees an optimistic message that never lands in your app database and disappears on the next refresh. This is the classic failure mode for media messages: the attachment uploads, the WS publish fails silently mid-flight, your webhook never fires, the row never exists in your DB.
+
+The fix is to make the app DB the commit point and treat Herald as the fanout pipe — the pattern Slack, Discord, Matrix, and WhatsApp all use. `ChatCore` supports this via an optional `writer`:
+
+```typescript
+import { ChatCore, type ChatWriter } from '@skeptik-io/herald-chat';
+
+const writer: ChatWriter = {
+  async send(draft) {
+    // draft = { localId, streamId, body, meta, parentId, senderId }
+    //
+    // 1. Upload any attachments first (app-managed storage). Media lives in
+    //    your CDN/bucket, not Herald — Herald only carries references.
+    if ((draft.meta as any)?.attachments) {
+      (draft.meta as any).attachments = await uploadAll((draft.meta as any).attachments);
+    }
+
+    // 2. Commit to your own API. Use localId as the idempotency key so
+    //    retries from the SDK don't double-publish. Your backend then
+    //    writes to the DB and calls Herald's HTTP admin API
+    //    (POST /streams/:id/events) to inject the event for fanout.
+    const msg = await fetch('/api/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': draft.localId,
+      },
+      body: JSON.stringify(draft),
+    }).then((r) => r.json());
+
+    // 3. Return the canonical MessageAck. id/seq/sent_at come from your
+    //    DB (or from Herald's response to your inject call). Optional
+    //    body/meta let you propagate server-side canonicalization
+    //    (sanitization, expanded attachment URLs, resolved mentions)
+    //    into the sender's UI — the optimistic entry is replaced.
+    return {
+      id: msg.id,
+      seq: msg.seq,
+      sent_at: msg.sent_at,
+      body: msg.body,
+      meta: msg.meta,
+    };
+  },
+
+  async edit(streamId, eventId, body) {
+    await fetch(`/api/messages/${eventId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+  },
+
+  async delete(streamId, eventId) {
+    await fetch(`/api/messages/${eventId}`, { method: 'DELETE' });
+  },
+
+  // Reactions and cursors are optional. Herald doesn't expose HTTP
+  // endpoints for them today, so a persist-first writer still has to
+  // trigger Herald fanout somewhere. The simplest shape: your API
+  // commits to the app DB, and then your backend calls back out via
+  // a server-side Herald client, OR you skip the writer for these and
+  // let the default WS path handle fanout (reactions/cursors are
+  // ephemeral UX signals — losing one for 7 days is rarely a big deal).
+};
+
+const core = new ChatCore({ client, chat, userId: 'alice', writer });
+```
+
+Each writer slot is independent — provide only the ones you want to own. Anything omitted falls back to the Herald WebSocket default, so you can adopt incrementally (start with `send`, keep everything else on the default).
+
+On a cold load or after a long absence, hydrate history from your own DB via `seedHistory()` / `loadMoreWith(fetcher)`. Both paths converge on identical state as long as your app DB mirrors every Herald event (via the webhook) in addition to writes that originate in your API.
+
 ## Stream Modes
 
 **Full state** (`joinStream` / `leaveStream`): Initializes all stores (MessageStore, CursorStore, MemberStore, TypingStore, ScrollState). Full chat functionality.

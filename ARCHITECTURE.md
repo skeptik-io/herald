@@ -968,6 +968,53 @@ The webhook delivers event bodies as-is (opaque). The app persists events in its
 - Full-text search (Postgres FTS, Elasticsearch, etc.)
 - Business analytics
 
+### Write Path: Persist-First vs Optimistic-First
+
+Herald supports two shapes for getting a new event into the system, and the choice has significant durability consequences. This is the single most important integration decision an app makes.
+
+#### Optimistic-first (the default, demo-friendly)
+
+```
+Browser ─ event.publish ──▶ Herald ─ event.ack ──▶ Browser (reconciles UI)
+                              │
+                              └─ webhook (async) ──▶ App backend ──▶ App DB
+```
+
+The browser's WebSocket publish is the commit point. Herald persists to its WAL buffer, acks the sender, fans out to other subscribers, and (eventually) fires the webhook so the app DB mirrors the event.
+
+**Failure mode.** If the WS publish fails anywhere — rate limit, connection blip mid-flight, E2EE error, auth drift, Herald restart in an unlucky window — the sender's optimistic UI shows a message that Herald never acknowledged, no webhook ever fires, the app DB never sees it, and the row is gone on the next refresh. Webhooks can't close this gap because webhooks only fire after a successful publish.
+
+This path is fine for demos and for products where "lose a message during a network blip" is acceptable. It is **not** fine for products that treat chat history as durable state.
+
+#### Persist-first (recommended)
+
+```
+Browser ─ HTTP POST /api/messages ──▶ App backend ─┬──▶ App DB (commit)
+                                                    │
+                                                    └──▶ Herald HTTP POST /streams/:id/events
+                                                                    │
+                                                                    └─ fanout ──▶ other subscribers
+```
+
+The app backend's database write is the commit point. Once the row is in the app DB, Herald is called to inject the event for fanout. If Herald is unavailable, the data is still safe — the app can retry the fanout asynchronously. The sender's UI reconciles against the app API response, not Herald's ack, so the canonical state the sender sees is the one actually in the database.
+
+This is how Slack (`chat.postMessage`), Discord (`POST /channels/:id/messages`), Matrix (`PUT /rooms/:id/send/:type/:txn_id`), and WhatsApp/Signal all work. The WebSocket / gateway / RTM layer is receive-only from the client's perspective for canonical message state.
+
+**The `writer` seam in `@skeptik-io/herald-chat`** makes this ergonomic on the client: apps provide a `ChatWriter` object with per-op slots (`send`, `edit`, `delete`, `addReaction`, `removeReaction`, `updateCursor`) and `ChatCore` routes each mutation through the app's API instead of over the WS. Slots are independent — adopt incrementally. The optimistic UI behavior is unchanged; only the commit point moves.
+
+#### When each is appropriate
+
+| Concern | Optimistic-first | Persist-first |
+|---------|-----------------|---------------|
+| Sender durability | Lost on WS-side failure | Safe once app API returns |
+| Media attachment orphans | Possible (publish fails after upload) | Not possible (upload+commit atomic in app API) |
+| Server-side canonicalization (sanitize, resolve mentions, expand URLs) | Client sees raw draft | Client sees canonical output via MessageAck body/meta |
+| App DB drift from webhook retry exhaustion | Possible | Not possible (app DB is authoritative) |
+| Demo or non-durable product | Fine | Overkill |
+| Anything users would be upset to lose | **Do not use this** | **Use this** |
+
+Herald itself does not care which path you pick — both result in the same WAL entry and the same fanout. The choice is entirely about where the commit point lives and what happens on failure.
+
 ---
 
 ## 9. Stream Lifecycle

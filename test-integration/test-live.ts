@@ -170,6 +170,42 @@ function waitForEvent<T>(client: HeraldClient, event: string, timeoutMs = 5000):
   });
 }
 
+/**
+ * Wait for an event that matches `predicate`. Use when the client may
+ * receive other events of the same type before the one under test —
+ * e.g. the server's cached last-event delivered on subscribe, or an
+ * earlier event in the same test sequence. Returns the first matching
+ * event; ignores non-matches.
+ */
+function waitForEventMatching<T>(
+  client: HeraldClient,
+  event: string,
+  predicate: (data: T) => boolean,
+  timeoutMs = 5000,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for matching ${event}`)), timeoutMs);
+    const handler = ((data: T) => {
+      if (predicate(data)) {
+        clearTimeout(timer);
+        resolve(data);
+      }
+    }) as any;
+    client.on(event as any, handler);
+  });
+}
+
+/** Parse an event's body as a chat envelope; return `null` on non-envelope. */
+function envelopeKind(evt: any): string | null {
+  try {
+    const body = evt?.body;
+    if (typeof body !== "string" || body[0] !== "{") return null;
+    return JSON.parse(body).kind ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 async function run(): Promise<void> {
@@ -314,7 +350,7 @@ async function run(): Promise<void> {
       const originalBody = JSON.stringify({ kind: "message", text: "original body" });
       const ack = await alice.publish("general", originalBody);
 
-      const editEvt = waitForEvent<any>(bob, "event");
+      const editEvt = waitForEventMatching<any>(bob, "event", (e) => envelopeKind(e) === "edit");
       const editBody = JSON.stringify({ kind: "edit", targetId: ack.id, text: "edited body" });
       await alice.publish("general", editBody);
       const received = await editEvt;
@@ -339,7 +375,7 @@ async function run(): Promise<void> {
       const body = JSON.stringify({ kind: "message", text: "delete me" });
       const ack = await alice.publish("general", body);
 
-      const deleteEvt = waitForEvent<any>(bob, "event");
+      const deleteEvt = waitForEventMatching<any>(bob, "event", (e) => envelopeKind(e) === "delete");
       const deleteBody = JSON.stringify({ kind: "delete", targetId: ack.id });
       await alice.publish("general", deleteBody);
       const received = await deleteEvt;
@@ -363,7 +399,7 @@ async function run(): Promise<void> {
       const msgBody = JSON.stringify({ kind: "message", text: "react to this" });
       const ack = await alice.publish("general", msgBody);
 
-      const addEvt = waitForEvent<any>(bob, "event");
+      const addEvt = waitForEventMatching<any>(bob, "event", (e) => envelopeKind(e) === "reaction");
       const addBody = JSON.stringify({ kind: "reaction", targetId: ack.id, op: "add", emoji: "\u{1F525}" });
       await alice.publish("general", addBody);
       const received = await addEvt;
@@ -413,7 +449,9 @@ async function run(): Promise<void> {
       await alice.subscribe(["general"]);
       await bob.subscribe(["general"]);
 
-      const cursorEvt = waitForEvent<any>(bob, "event");
+      // Filter by envelope.kind so the server's cached last-event from a
+      // prior test (typically a lingering reaction) doesn't satisfy the wait.
+      const cursorEvt = waitForEventMatching<any>(bob, "event", (e) => envelopeKind(e) === "cursor");
       const cursorBody = JSON.stringify({ kind: "cursor", seq: 5 });
       await alice.publish("general", cursorBody);
       const received = await cursorEvt;
@@ -873,12 +911,14 @@ async function run(): Promise<void> {
       const msgBody = JSON.stringify({ kind: "message", text: "react then unreact" });
       const ack = await alice.publish("general", msgBody);
 
-      const addEvt = waitForEvent<any>(bob, "event");
+      const addEvt = waitForEventMatching<any>(bob, "event",
+        (e) => { const env = envelopeKind(e) === "reaction" ? JSON.parse(e.body) : null; return env?.op === "add"; });
       await alice.publish("general", JSON.stringify({ kind: "reaction", targetId: ack.id, op: "add", emoji: "\u{1F44D}" }));
       const addedEnv = JSON.parse((await addEvt).body);
       assert(addedEnv.op === "add", `add op: ${addedEnv.op}`);
 
-      const removeEvt = waitForEvent<any>(bob, "event");
+      const removeEvt = waitForEventMatching<any>(bob, "event",
+        (e) => { const env = envelopeKind(e) === "reaction" ? JSON.parse(e.body) : null; return env?.op === "remove"; });
       await alice.publish("general", JSON.stringify({ kind: "reaction", targetId: ack.id, op: "remove", emoji: "\u{1F44D}" }));
       const removedEnv = JSON.parse((await removeEvt).body);
       assert(removedEnv.op === "remove", `remove op: ${removedEnv.op}`);

@@ -550,7 +550,7 @@ func TestContract(t *testing.T) {
 
 	for _, group := range spec.Groups {
 		for _, tc := range group.Cases {
-			t.Run(tc.ID, func(t *testing.T) {
+			ok := t.Run(tc.ID, func(t *testing.T) {
 				result := r.execute(ctx, t, tc)
 
 				if err, ok := result.(error); ok {
@@ -570,6 +570,11 @@ func TestContract(t *testing.T) {
 					t.Errorf("%s", e)
 				}
 			})
+			if ok {
+				r.passed++
+			} else {
+				r.failed++
+			}
 		}
 	}
 

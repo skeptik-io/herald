@@ -78,33 +78,6 @@ pub struct PurgeResponse {
 // Reaction schemas
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, ToSchema)]
-pub struct ReactionSummary {
-    pub emoji: String,
-    pub count: usize,
-    pub users: Vec<String>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct ReactionListResponse {
-    pub reactions: Vec<ReactionSummary>,
-}
-
-// ---------------------------------------------------------------------------
-// Cursor schemas
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, ToSchema)]
-pub struct CursorView {
-    pub user_id: String,
-    pub seq: u64,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct CursorListResponse {
-    pub cursors: Vec<CursorView>,
-}
-
 // ---------------------------------------------------------------------------
 // Presence schemas
 // ---------------------------------------------------------------------------
@@ -391,7 +364,6 @@ pub struct AuditCountResponse {
         (name = "members", description = "Stream membership management"),
         (name = "events", description = "Event publishing and retrieval"),
         (name = "presence", description = "User presence queries"),
-        (name = "cursors", description = "Read cursor tracking"),
         (name = "blocks", description = "User blocking"),
         (name = "admin", description = "Admin API — tenant and system management"),
         (name = "self-service", description = "Tenant self-service operations"),
@@ -407,8 +379,6 @@ pub struct AuditCountResponse {
         crate::http::members::remove_member, crate::http::members::update_member,
         crate::http::events::inject_event, crate::http::events::list_events,
         crate::http::events::trigger_ephemeral, crate::http::events::purge_user_events,
-        crate::engines::chat::http_events::edit_event, crate::engines::chat::http_events::delete_event,
-        crate::engines::chat::http_events::get_reactions, crate::engines::chat::http_events::list_cursors,
         crate::engines::presence::http::user_presence, crate::engines::presence::http::stream_presence,
         crate::engines::presence::http::batch_presence, crate::engines::presence::http::admin_set_presence,
         crate::engines::chat::http_blocks::block_user, crate::engines::chat::http_blocks::unblock_user,
@@ -436,13 +406,12 @@ pub struct AuditCountResponse {
         crate::http::streams::CreateStreamRequest, crate::http::streams::UpdateStreamRequest,
         crate::http::events::InjectEventRequest, crate::http::events::TriggerEphemeralRequest,
         crate::http::members::AddMemberRequest, crate::http::members::UpdateMemberRequest,
-        crate::engines::chat::http_events::EditEventRequest, crate::engines::chat::http_blocks::BlockRequest,
+        crate::engines::chat::http_blocks::BlockRequest,
         crate::engines::presence::http::AdminSetPresenceRequest,
         crate::http::admin::CreateTenantRequest, crate::http::admin::UpdateTenantRequest,
         crate::http::admin::CreateTokenRequest, crate::http::self_service::CreateTokenRequest,
         ErrorResponse, StreamListResponse, MemberListResponse,
         EventView, EventListResponse, EventPublishResponse, PurgeResponse,
-        ReactionSummary, ReactionListResponse, CursorView, CursorListResponse,
         UserPresenceResponse, StreamPresenceMember, StreamPresenceResponse,
         BatchPresenceUser, BatchPresenceResponse, BlockListResponse,
         HealthResponse, LivenessResponse, ReadinessResponse,

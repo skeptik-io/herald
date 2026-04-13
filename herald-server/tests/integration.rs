@@ -751,7 +751,11 @@ async fn test_member_remove() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_ws_presence_cursor_typing() {
+async fn test_ws_presence_and_typing() {
+    // Cursor coverage was removed from this test when the dedicated
+    // cursor.update / cursor.moved frames were retired in favor of
+    // envelope-on-publish. Cursor-as-envelope coverage lives in
+    // herald-chat-core/test/chat-core.test.ts.
     let server = TestServer::start().await;
     let (_id, key, secret, token) = server.create_tenant("pct").await;
     server.create_stream(&token, "room").await;
@@ -789,25 +793,6 @@ async fn test_ws_presence_cursor_typing() {
     let r = ws_recv_type(&mut ws_b, "presence.changed").await;
     assert_eq!(r["payload"]["user_id"], "alice");
     assert_eq!(r["payload"]["presence"], "dnd");
-
-    // Send a message so we have a seq for cursor
-    ws_send(
-        &mut ws_a,
-        json!({"type":"event.publish","ref":"m1","payload":{"stream":"room","body":"msg"}}),
-    )
-    .await;
-    let ack = ws_recv_type(&mut ws_a, "event.ack").await;
-    ws_recv_type(&mut ws_a, "event.new").await;
-    ws_recv_type(&mut ws_b, "event.new").await;
-
-    // Cursor
-    ws_send(
-        &mut ws_a,
-        json!({"type":"cursor.update","payload":{"stream":"room","seq":ack["payload"]["seq"]}}),
-    )
-    .await;
-    let r = ws_recv_type(&mut ws_b, "cursor.moved").await;
-    assert_eq!(r["payload"]["user_id"], "alice");
 
     // Typing
     ws_send(
@@ -3093,112 +3078,17 @@ async fn test_graceful_shutdown_notifies_clients() {
 // Event deletion tests
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn test_event_deletion_http() {
-    let server = TestServer::start().await;
-    let (_id, _key, _secret, token) = server.create_tenant("acme").await;
-    server.create_stream(&token, "chat").await;
-    server.add_member(&token, "chat", "alice").await;
+// test_event_deletion_http was removed: the dedicated DELETE
+// /streams/{id}/events/{event_id} endpoint is gone. Delete is now an
+// envelope on the standard event.publish path — apps should publish a
+// `{kind:"delete",targetId:"..."}` envelope (or call the generic
+// POST /streams/{id}/events with that body).
 
-    // Send a message
-    let resp = server
-        .http_client()
-        .post(server.http_url("/streams/chat/events"))
-        .bearer_auth(&token)
-        .json(&json!({"sender": "alice", "body": "to be deleted"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let body: Value = resp.json().await.unwrap();
-    let msg_id = body["id"].as_str().unwrap().to_string();
-
-    // Delete the message
-    let resp = server
-        .http_client()
-        .delete(server.http_url(&format!("/streams/chat/events/{msg_id}")))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-
-    // Verify message body is empty in history
-    let resp = server
-        .http_client()
-        .get(server.http_url("/streams/chat/events"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    let messages = body["events"].as_array().unwrap();
-    let deleted_msg = messages.iter().find(|m| m["id"] == msg_id).unwrap();
-    assert_eq!(deleted_msg["body"], "");
-    assert_eq!(deleted_msg["meta"]["deleted"], true);
-}
-
-#[tokio::test]
-async fn test_event_deletion_ws() {
-    let server = TestServer::start().await;
-    let (_id, key, secret, token) = server.create_tenant("acme").await;
-    server.create_stream(&token, "chat").await;
-    server.add_member(&token, "chat", "alice").await;
-    server.add_member(&token, "chat", "bob").await;
-
-    // Connect bob
-    let mut ws_bob = server
-        .ws_connect_auth(&key, &secret, "bob", &["chat"])
-        .await;
-    ws_wait_auth_ok(&mut ws_bob).await;
-    ws_send(
-        &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
-    )
-    .await;
-    ws_recv_type(&mut ws_bob, "subscribed").await;
-
-    // Connect alice and send a message
-    let mut ws_alice = server
-        .ws_connect_auth(&key, &secret, "alice", &["chat"])
-        .await;
-    ws_wait_auth_ok(&mut ws_alice).await;
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
-    )
-    .await;
-    ws_recv_type(&mut ws_alice, "subscribed").await;
-
-    // Drain presence messages
-    while let Ok(Some(Ok(Message::Text(_)))) =
-        tokio::time::timeout(Duration::from_millis(200), ws_bob.next()).await
-    {}
-
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "hello"}}),
-    )
-    .await;
-    let ack = ws_recv_type(&mut ws_alice, "event.ack").await;
-    let msg_id = ack["payload"]["id"].as_str().unwrap().to_string();
-
-    // Bob receives the message
-    let _new_msg = ws_recv_type(&mut ws_bob, "event.new").await;
-
-    // Alice deletes the message
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "event.delete", "payload": {"stream": "chat", "id": &msg_id}}),
-    )
-    .await;
-    let _delete_ack = ws_recv_type(&mut ws_alice, "event.ack").await;
-
-    // Bob should receive message.deleted
-    let deleted = ws_recv_type(&mut ws_bob, "event.deleted").await;
-    assert_eq!(deleted["payload"]["id"], msg_id);
-    assert_eq!(deleted["payload"]["stream"], "chat");
-}
+// test_event_deletion_ws was removed: the dedicated event.delete WS frame
+// is gone. Delete is now an envelope on the standard event.publish path —
+// see herald-chat-core/test/chat-core.test.ts ("envelope: delete envelope
+// tombstones target message") and the live integration tests for end-to-
+// end coverage.
 
 // ---------------------------------------------------------------------------
 // Stream archival tests
@@ -4030,41 +3920,10 @@ async fn test_double_auth_rejected() {
     assert_eq!(msg["payload"]["code"], "BAD_REQUEST");
 }
 
-#[tokio::test]
-async fn test_ws_delete_event_non_member_blocked() {
-    let server = TestServer::start().await;
-    let (_id, key, secret, token) = server.create_tenant("acme").await;
-    server.create_stream(&token, "chat").await;
-    server.add_member(&token, "chat", "alice").await;
-    // Bob is NOT a member
-
-    // Alice sends a message via HTTP
-    let resp = server
-        .http_client()
-        .post(server.http_url("/streams/chat/events"))
-        .bearer_auth(&token)
-        .json(&json!({"sender": "alice", "body": "alice's message"}))
-        .send()
-        .await
-        .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    let msg_id = body["id"].as_str().unwrap().to_string();
-
-    // Bob tries to delete alice's message but is not a member
-    let mut ws = server
-        .ws_connect_auth(&key, &secret, "bob", &["chat"])
-        .await;
-
-    ws_wait_auth_ok(&mut ws).await;
-
-    ws_send(
-        &mut ws,
-        json!({"type": "event.delete", "payload": {"stream": "chat", "id": &msg_id}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws, "error").await;
-    assert_eq!(msg["payload"]["code"], "NOT_SUBSCRIBED");
-}
+// Note: the dedicated event.delete WS handler was removed (chat-state
+// mutations now ride event.publish via envelopes). The non-member
+// authorization path is exercised by test_ws_send_to_archived_stream
+// (publish on archived) and the publish authz checks elsewhere.
 
 #[tokio::test]
 async fn test_ws_send_to_archived_stream() {
@@ -5525,119 +5384,13 @@ async fn test_unauthorized_connections_dont_count_toward_quota() {
 // Event editing & thread/reply tests
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn test_event_edit_ws() {
-    let server = TestServer::start().await;
-    let (_id, key, secret, token) = server.create_tenant("acme").await;
-    server.create_stream(&token, "chat").await;
-    server.add_member(&token, "chat", "alice").await;
-    server.add_member(&token, "chat", "bob").await;
-
-    let mut ws_alice = server
-        .ws_connect_auth(&key, &secret, "alice", &["chat"])
-        .await;
-
-    ws_wait_auth_ok(&mut ws_alice).await;
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
-    )
-    .await;
-    ws_recv_type(&mut ws_alice, "subscribed").await;
-
-    let mut ws_bob = server
-        .ws_connect_auth(&key, &secret, "bob", &["chat"])
-        .await;
-
-    ws_wait_auth_ok(&mut ws_bob).await;
-    ws_send(
-        &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
-    )
-    .await;
-    ws_recv_type(&mut ws_bob, "subscribed").await;
-
-    // Drain
-    while let Ok(Some(Ok(Message::Text(_)))) =
-        tokio::time::timeout(Duration::from_millis(300), ws_bob.next()).await
-    {}
-
-    // Alice sends
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "event.publish", "payload": {"stream": "chat", "body": "original"}}),
-    )
-    .await;
-    let ack = ws_recv_type(&mut ws_alice, "event.ack").await;
-    let msg_id = ack["payload"]["id"].as_str().unwrap().to_string();
-    let _new = ws_recv_type(&mut ws_bob, "event.new").await;
-
-    // Alice edits
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "event.edit", "payload": {"stream": "chat", "id": &msg_id, "body": "edited"}}),
-    )
-    .await;
-    let _edit_ack = ws_recv_type(&mut ws_alice, "event.ack").await;
-
-    // Bob receives edit
-    let edited = ws_recv_type(&mut ws_bob, "event.edited").await;
-    assert_eq!(edited["payload"]["id"], msg_id);
-    assert_eq!(edited["payload"]["body"], "edited");
-    assert!(edited["payload"]["edited_at"].is_number());
-
-    // Verify in history
-    let resp = server
-        .http_client()
-        .get(server.http_url("/streams/chat/events"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    let msg = &body["events"].as_array().unwrap()[0];
-    assert_eq!(msg["body"], "edited");
-    assert!(msg["edited_at"].is_number());
-}
-
-#[tokio::test]
-async fn test_event_edit_http() {
-    let server = TestServer::start().await;
-    let (_id, _key, _secret, token) = server.create_tenant("acme").await;
-    server.create_stream(&token, "chat").await;
-    server.add_member(&token, "chat", "alice").await;
-
-    let resp = server
-        .http_client()
-        .post(server.http_url("/streams/chat/events"))
-        .bearer_auth(&token)
-        .json(&json!({"sender": "alice", "body": "original"}))
-        .send()
-        .await
-        .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    let msg_id = body["id"].as_str().unwrap();
-
-    let resp = server
-        .http_client()
-        .patch(server.http_url(&format!("/streams/chat/events/{msg_id}")))
-        .bearer_auth(&token)
-        .json(&json!({"body": "updated via http"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let resp = server
-        .http_client()
-        .get(server.http_url("/streams/chat/events"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["events"][0]["body"], "updated via http");
-}
+// Note: dedicated event.edit / event.delete / cursor.update / reaction.add /
+// reaction.remove WS frames and their server-side handlers were removed.
+// Chat-state mutations (edits, deletes, reactions, cursor advances) now
+// ride the standard event.publish path as typed envelopes — see the
+// envelope dispatcher tests in herald-chat-core/test/chat-core.test.ts
+// and the live integration tests in test-integration/test-live.ts for
+// end-to-end coverage of the new path.
 
 #[tokio::test]
 async fn test_thread_reply() {
@@ -5752,96 +5505,9 @@ async fn test_thread_reply_ws() {
     assert_eq!(reply_msg["payload"]["body"], "reply");
 }
 
-// ---------------------------------------------------------------------------
-// Reactions
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_reaction_add_remove_ws() {
-    let server = TestServer::start().await;
-    let (_id, key, secret, token) = server.create_tenant("acme").await;
-    server.create_stream(&token, "chat").await;
-    server.add_member(&token, "chat", "alice").await;
-    server.add_member(&token, "chat", "bob").await;
-
-    // Send a message
-    let resp = server
-        .http_client()
-        .post(server.http_url("/streams/chat/events"))
-        .bearer_auth(&token)
-        .json(&json!({"sender": "alice", "body": "react to this"}))
-        .send()
-        .await
-        .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    let msg_id = body["id"].as_str().unwrap().to_string();
-
-    // Bob subscribes
-    let mut ws_bob = server
-        .ws_connect_auth(&key, &secret, "bob", &["chat"])
-        .await;
-
-    ws_wait_auth_ok(&mut ws_bob).await;
-    ws_send(
-        &mut ws_bob,
-        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
-    )
-    .await;
-    ws_recv_type(&mut ws_bob, "subscribed").await;
-    // Drain any backfill
-    while let Ok(Some(Ok(Message::Text(_)))) =
-        tokio::time::timeout(Duration::from_millis(300), ws_bob.next()).await
-    {}
-
-    // Alice subscribes and adds reaction
-    let mut ws_alice = server
-        .ws_connect_auth(&key, &secret, "alice", &["chat"])
-        .await;
-
-    ws_wait_auth_ok(&mut ws_alice).await;
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "subscribe", "payload": {"streams": ["chat"]}}),
-    )
-    .await;
-    ws_recv_type(&mut ws_alice, "subscribed").await;
-
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "reaction.add", "payload": {"stream": "chat", "event_id": &msg_id, "emoji": "thumbsup"}}),
-    )
-    .await;
-
-    // Bob receives reaction.changed
-    let msg = ws_recv_type(&mut ws_bob, "reaction.changed").await;
-    assert_eq!(msg["payload"]["emoji"], "thumbsup");
-    assert_eq!(msg["payload"]["user_id"], "alice");
-    assert_eq!(msg["payload"]["action"], "add");
-
-    // Get reactions via HTTP
-    let resp = server
-        .http_client()
-        .get(server.http_url(&format!("/streams/chat/events/{msg_id}/reactions")))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = resp.json().await.unwrap();
-    let reactions = body["reactions"].as_array().unwrap();
-    assert_eq!(reactions.len(), 1);
-    assert_eq!(reactions[0]["emoji"], "thumbsup");
-    assert_eq!(reactions[0]["count"], 1);
-
-    // Alice removes reaction
-    ws_send(
-        &mut ws_alice,
-        json!({"type": "reaction.remove", "payload": {"stream": "chat", "event_id": &msg_id, "emoji": "thumbsup"}}),
-    )
-    .await;
-    let msg = ws_recv_type(&mut ws_bob, "reaction.changed").await;
-    assert_eq!(msg["payload"]["action"], "remove");
-}
+// Reactions are now envelope-on-publish. Test coverage lives in
+// herald-chat-core/test/chat-core.test.ts (unit) and
+// test-integration/test-live.ts (live SDK end-to-end).
 
 // ---------------------------------------------------------------------------
 // Attachment validation

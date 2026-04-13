@@ -296,9 +296,14 @@ async function run(): Promise<void> {
 
     // ── Chat SDK: edit, delete, reactions, cursors, presence, typing ──
 
-    await test("chat: edit event", async () => {
+    // Edit / delete / reactions / cursor now ride the publish path as typed
+    // envelopes. Bob observes them as normal event.new frames and the chat-
+    // core dispatcher on receiving clients folds them into state. Here we
+    // exercise the raw SDK by publishing envelopes directly so these tests
+    // do not depend on herald-chat-core's writer plumbing.
+
+    await test("chat envelope: edit", async () => {
       const alice = makeClient("alice", ["general"]);
-      const aliceChat = new HeraldChatClient(alice);
       const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
@@ -306,22 +311,24 @@ async function run(): Promise<void> {
       await alice.subscribe(["general"]);
       await bob.subscribe(["general"]);
 
-      const ack = await alice.publish("general", "original body");
-      const editedPromise = waitForEvent<any>(bob, "event.edited");
-      const editAck = await aliceChat.editEvent("general", ack.id, "edited body");
-      assert(editAck.id === ack.id, "edit ack id matches");
+      const originalBody = JSON.stringify({ kind: "message", text: "original body" });
+      const ack = await alice.publish("general", originalBody);
 
-      const edited = await editedPromise;
-      assert(edited.body === "edited body", `edited body: ${edited.body}`);
-      assert(edited.id === ack.id, "edited event id");
+      const editEvt = waitForEvent<any>(bob, "event");
+      const editBody = JSON.stringify({ kind: "edit", targetId: ack.id, text: "edited body" });
+      await alice.publish("general", editBody);
+      const received = await editEvt;
+      const envelope = JSON.parse(received.body);
+      assert(envelope.kind === "edit", `expected edit envelope, got ${envelope.kind}`);
+      assert(envelope.targetId === ack.id, "edit targetId matches original");
+      assert(envelope.text === "edited body", `text: ${envelope.text}`);
 
       alice.disconnect();
       bob.disconnect();
     });
 
-    await test("chat: delete event", async () => {
+    await test("chat envelope: delete", async () => {
       const alice = makeClient("alice", ["general"]);
-      const aliceChat = new HeraldChatClient(alice);
       const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
@@ -329,19 +336,23 @@ async function run(): Promise<void> {
       await alice.subscribe(["general"]);
       await bob.subscribe(["general"]);
 
-      const ack = await alice.publish("general", "delete me");
-      const deletedPromise = waitForEvent<any>(bob, "event.deleted");
-      await aliceChat.deleteEvent("general", ack.id);
-      const deleted = await deletedPromise;
-      assert(deleted.id === ack.id, "deleted event id");
+      const body = JSON.stringify({ kind: "message", text: "delete me" });
+      const ack = await alice.publish("general", body);
+
+      const deleteEvt = waitForEvent<any>(bob, "event");
+      const deleteBody = JSON.stringify({ kind: "delete", targetId: ack.id });
+      await alice.publish("general", deleteBody);
+      const received = await deleteEvt;
+      const envelope = JSON.parse(received.body);
+      assert(envelope.kind === "delete", `expected delete envelope, got ${envelope.kind}`);
+      assert(envelope.targetId === ack.id, "delete targetId matches original");
 
       alice.disconnect();
       bob.disconnect();
     });
 
-    await test("chat: reactions round-trip", async () => {
+    await test("chat envelope: reaction add/remove", async () => {
       const alice = makeClient("alice", ["general"]);
-      const aliceChat = new HeraldChatClient(alice);
       const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
@@ -349,14 +360,19 @@ async function run(): Promise<void> {
       await alice.subscribe(["general"]);
       await bob.subscribe(["general"]);
 
-      const ack = await alice.publish("general", "react to this");
-      const reactionPromise = waitForEvent<any>(bob, "reaction.changed");
-      aliceChat.addReaction("general", ack.id, "\u{1F525}");
-      const reaction = await reactionPromise;
-      assert(reaction.event_id === ack.id, `event_id: ${reaction.event_id}`);
-      assert(reaction.emoji === "\u{1F525}", `emoji: ${reaction.emoji}`);
-      assert(reaction.user_id === "alice", `user_id: ${reaction.user_id}`);
-      assert(reaction.action === "add", `action: ${reaction.action}`);
+      const msgBody = JSON.stringify({ kind: "message", text: "react to this" });
+      const ack = await alice.publish("general", msgBody);
+
+      const addEvt = waitForEvent<any>(bob, "event");
+      const addBody = JSON.stringify({ kind: "reaction", targetId: ack.id, op: "add", emoji: "\u{1F525}" });
+      await alice.publish("general", addBody);
+      const received = await addEvt;
+      const envelope = JSON.parse(received.body);
+      assert(envelope.kind === "reaction", `expected reaction envelope, got ${envelope.kind}`);
+      assert(envelope.op === "add", `op: ${envelope.op}`);
+      assert(envelope.emoji === "\u{1F525}", `emoji: ${envelope.emoji}`);
+      assert(envelope.targetId === ack.id, "reaction targetId matches message");
+      assert(received.sender === "alice", `sender: ${received.sender}`);
 
       alice.disconnect();
       bob.disconnect();
@@ -388,9 +404,8 @@ async function run(): Promise<void> {
       bob.disconnect();
     });
 
-    await test("chat: cursor update round-trip", async () => {
+    await test("chat envelope: cursor advance", async () => {
       const alice = makeClient("alice", ["general"]);
-      const aliceChat = new HeraldChatClient(alice);
       const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
@@ -398,12 +413,14 @@ async function run(): Promise<void> {
       await alice.subscribe(["general"]);
       await bob.subscribe(["general"]);
 
-      const cursorPromise = waitForEvent<any>(bob, "cursor");
-      aliceChat.updateCursor("general", 5);
-      const cursor = await cursorPromise;
-      assert(cursor.user_id === "alice", `user_id: ${cursor.user_id}`);
-      assert(cursor.seq === 5, `seq: ${cursor.seq}`);
-      assert(cursor.stream === "general", `stream: ${cursor.stream}`);
+      const cursorEvt = waitForEvent<any>(bob, "event");
+      const cursorBody = JSON.stringify({ kind: "cursor", seq: 5 });
+      await alice.publish("general", cursorBody);
+      const received = await cursorEvt;
+      const envelope = JSON.parse(received.body);
+      assert(envelope.kind === "cursor", `expected cursor envelope, got ${envelope.kind}`);
+      assert(envelope.seq === 5, `seq: ${envelope.seq}`);
+      assert(received.sender === "alice", `sender: ${received.sender}`);
 
       alice.disconnect();
       bob.disconnect();
@@ -844,9 +861,8 @@ async function run(): Promise<void> {
 
     // ── Reaction remove ─────────────────────────────────────────
 
-    await test("chat: reaction remove round-trip", async () => {
+    await test("chat envelope: reaction add then remove", async () => {
       const alice = makeClient("alice", ["general"]);
-      const aliceChat = new HeraldChatClient(alice);
       const bob = makeClient("bob", ["general"]);
 
       await alice.connect();
@@ -854,54 +870,29 @@ async function run(): Promise<void> {
       await alice.subscribe(["general"]);
       await bob.subscribe(["general"]);
 
-      // Publish event and add a reaction
-      const ack = await alice.publish("general", "react then unreact");
-      const addPromise = waitForEvent<any>(bob, "reaction.changed");
-      aliceChat.addReaction("general", ack.id, "\u{1F44D}");
-      const added = await addPromise;
-      assert(added.action === "add", `add action: ${added.action}`);
-      assert(added.emoji === "\u{1F44D}", `add emoji: ${added.emoji}`);
+      const msgBody = JSON.stringify({ kind: "message", text: "react then unreact" });
+      const ack = await alice.publish("general", msgBody);
 
-      // Now remove the reaction
-      const removePromise = waitForEvent<any>(bob, "reaction.changed");
-      aliceChat.removeReaction("general", ack.id, "\u{1F44D}");
-      const removed = await removePromise;
-      assert(removed.event_id === ack.id, `remove event_id: ${removed.event_id}`);
-      assert(removed.emoji === "\u{1F44D}", `remove emoji: ${removed.emoji}`);
-      assert(removed.user_id === "alice", `remove user_id: ${removed.user_id}`);
-      assert(removed.action === "remove", `remove action: ${removed.action}`);
+      const addEvt = waitForEvent<any>(bob, "event");
+      await alice.publish("general", JSON.stringify({ kind: "reaction", targetId: ack.id, op: "add", emoji: "\u{1F44D}" }));
+      const addedEnv = JSON.parse((await addEvt).body);
+      assert(addedEnv.op === "add", `add op: ${addedEnv.op}`);
+
+      const removeEvt = waitForEvent<any>(bob, "event");
+      await alice.publish("general", JSON.stringify({ kind: "reaction", targetId: ack.id, op: "remove", emoji: "\u{1F44D}" }));
+      const removedEnv = JSON.parse((await removeEvt).body);
+      assert(removedEnv.op === "remove", `remove op: ${removedEnv.op}`);
+      assert(removedEnv.targetId === ack.id, `remove targetId: ${removedEnv.targetId}`);
 
       alice.disconnect();
       bob.disconnect();
     });
 
-    // ── Error cases ──────────────────────────────────────────────
-
-    await test("chat: edit someone else's event succeeds without Sentry (fail-open)", async () => {
-      // Without Sentry configured, authorize() returns Ok (fail-open).
-      // Bob CAN edit Alice's message. This test documents that behavior.
-      const alice = makeClient("alice", ["general"]);
-      const bob = makeClient("bob", ["general"]);
-      const bobChat = new HeraldChatClient(bob);
-
-      await alice.connect();
-      await bob.connect();
-      await alice.subscribe(["general"]);
-      await bob.subscribe(["general"]);
-
-      const ack = await alice.publish("general", "alice's message");
-
-      // Bob edits alice's message — should succeed (Sentry not configured = fail-open)
-      const editedPromise = waitForEvent<any>(alice, "event.edited");
-      const editAck = await bobChat.editEvent("general", ack.id, "bob edited this");
-      assert(editAck.id === ack.id, "edit ack id");
-
-      const edited = await editedPromise;
-      assert(edited.body === "bob edited this", `edited body: ${edited.body}`);
-
-      alice.disconnect();
-      bob.disconnect();
-    });
+    // Note: an "edit someone else's event" test has been removed because
+    // authorization is no longer enforced server-side for chat-state
+    // mutations — the server treats edit envelopes as opaque publishes.
+    // Apps that need to enforce ownership should do so in their webhook
+    // consumer when persisting to the canonical app database.
 
     // ── At-least-once delivery ──────────────────────────────────────
 

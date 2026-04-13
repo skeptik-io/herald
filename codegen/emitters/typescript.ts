@@ -40,12 +40,6 @@ export interface Event {
   edited_at?: number;
 }
 
-export interface ReactionSummary {
-  emoji: string;
-  count: number;
-  users: string[];
-}
-
 export interface BlockList {
   blocked: string[];
 }
@@ -64,11 +58,6 @@ export interface UserPresence {
 export interface MemberPresenceEntry {
   user_id: string;
   status: string;
-}
-
-export interface Cursor {
-  user_id: string;
-  seq: number;
 }
 
 export interface HealthResponse {
@@ -367,7 +356,7 @@ export class MemberNamespace {
 
 function emitEventsNamespace(_ns: Namespace): string {
   return `${HEADER}import type { HttpTransport } from "../transport.js";
-import type { EventList, EventPublishResult, ReactionSummary } from "../types.js";
+import type { EventList, EventPublishResult } from "../types.js";
 
 export class EventNamespace {
   constructor(private transport: HttpTransport) {}
@@ -402,29 +391,6 @@ export class EventNamespace {
     const qs = params.toString();
     const path = \`/streams/\${encodeURIComponent(streamId)}/events\${qs ? \`?\${qs}\` : ""}\`;
     return this.transport.request<EventList>("GET", path);
-  }
-
-  async delete(streamId: string, eventId: string): Promise<void> {
-    await this.transport.request(
-      "DELETE",
-      \`/streams/\${encodeURIComponent(streamId)}/events/\${encodeURIComponent(eventId)}\`,
-    );
-  }
-
-  async edit(streamId: string, eventId: string, body: string): Promise<void> {
-    await this.transport.request(
-      "PATCH",
-      \`/streams/\${encodeURIComponent(streamId)}/events/\${encodeURIComponent(eventId)}\`,
-      { body },
-    );
-  }
-
-  async getReactions(streamId: string, eventId: string): Promise<ReactionSummary[]> {
-    const res = await this.transport.request<{ reactions: ReactionSummary[] }>(
-      "GET",
-      \`/streams/\${encodeURIComponent(streamId)}/events/\${encodeURIComponent(eventId)}/reactions\`,
-    );
-    return res.reactions;
   }
 
   async trigger(streamId: string, event: string, data?: unknown, excludeConnection?: number): Promise<void> {
@@ -562,7 +528,7 @@ export class AuditNamespace {
 
 function emitPresenceNamespace(_ns: Namespace): string {
   return `${HEADER}import type { HttpTransport } from "../transport.js";
-import type { Cursor, MemberPresenceEntry, UserPresence } from "../types.js";
+import type { MemberPresenceEntry, UserPresence } from "../types.js";
 
 export class PresenceNamespace {
   constructor(private transport: HttpTransport) {}
@@ -597,14 +563,6 @@ export class PresenceNamespace {
       \`/presence/\${encodeURIComponent(userId)}\`,
       options,
     );
-  }
-
-  async getCursors(streamId: string): Promise<Cursor[]> {
-    const resp = await this.transport.request<{ cursors: Cursor[] }>(
-      "GET",
-      \`/streams/\${encodeURIComponent(streamId)}/cursors\`,
-    );
-    return resp.cursors;
   }
 }
 `;
@@ -786,10 +744,8 @@ export type {
   EventList,
   UserPresence,
   MemberPresenceEntry,
-  Cursor,
   HealthResponse,
   EventPublishResult,
-  ReactionSummary,
   BlockList,
   AuditEvent,
   AuditQueryResponse,

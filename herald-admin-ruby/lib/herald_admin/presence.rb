@@ -19,11 +19,6 @@ module HeraldAdmin
       data["members"].map { |m| MemberPresenceEntry.new(user_id: m["user_id"], status: m["status"]) }
     end
 
-    def get_cursors(stream_id)
-      data = @t.request("GET", "/streams/#{ERB::Util.url_encode(stream_id)}/cursors")
-      data["cursors"].map { |c| Cursor.new(user_id: c["user_id"], seq: c["seq"]) }
-    end
-
     def get_bulk(user_ids)
       ids = user_ids.map { |id| ERB::Util.url_encode(id) }.join(",")
       data = @t.request("GET", "/presence?user_ids=#{ids}")

@@ -5,7 +5,6 @@ pub mod last_seen;
 pub mod members;
 pub mod presence_overrides;
 pub mod purge;
-pub mod reactions;
 pub mod sequences;
 pub mod streams;
 pub mod tenants;
@@ -17,8 +16,11 @@ pub const NS_API_TOKENS: &str = "herald.api_tokens";
 pub const NS_STREAMS: &str = "herald.streams";
 pub const NS_MEMBERS: &str = "herald.members";
 pub const NS_EVENTS: &str = "herald.events";
+/// Per-(tenant, stream, user) ack-mode delivery cursor. Tracks the highest
+/// seq the server confirmed delivered so reconnect catchup replays from
+/// the right offset. NOT the user-facing read cursor — that lives in the
+/// event stream as a `cursor` envelope.
 pub const NS_CURSORS: &str = "herald.cursors";
-pub const NS_REACTIONS: &str = "herald.reactions";
 pub const NS_BLOCKS: &str = "herald.blocks";
 pub const NS_SEQUENCES: &str = "herald.sequences";
 pub const NS_TENANT_KEYS: &str = "herald.tenant_keys";
@@ -53,7 +55,6 @@ pub async fn init_namespaces<S: Store>(store: &S) -> Result<(), shroudb_store::S
         NS_MEMBERS,
         NS_EVENTS,
         NS_CURSORS,
-        NS_REACTIONS,
         NS_BLOCKS,
         NS_SEQUENCES,
         NS_TENANT_KEYS,

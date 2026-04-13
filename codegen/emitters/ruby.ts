@@ -32,7 +32,6 @@ module HeraldAdmin
   EventPublishResult = Struct.new(:id, :seq, :sent_at, keyword_init: true)
   UserPresence = Struct.new(:user_id, :status, :connections, keyword_init: true)
   MemberPresenceEntry = Struct.new(:user_id, :status, keyword_init: true)
-  Cursor = Struct.new(:user_id, :seq, keyword_init: true)
   HealthResponse = Struct.new(:status, :connections, :streams, :uptime_secs, keyword_init: true)
   AuditEvent = Struct.new(:id, :timestamp, :operation, :resource_type, :resource_id, :actor, :result, :tenant_id, :diff, :metadata, keyword_init: true)
   AuditQueryResult = Struct.new(:events, :matched, keyword_init: true)
@@ -214,22 +213,6 @@ module HeraldAdmin
       EventList.new(events: events, has_more: data["has_more"] || false)
     end
 
-    # @chat Chat-specific operation — event deletion.
-    def delete(stream_id, event_id)
-      @t.request("DELETE", "/streams/\#{esc(stream_id)}/events/\#{esc(event_id)}")
-    end
-
-    # @chat Chat-specific operation — event editing.
-    def edit(stream_id, event_id, body)
-      @t.request("PATCH", "/streams/\#{esc(stream_id)}/events/\#{esc(event_id)}", { body: body })
-    end
-
-    # @chat Chat-specific operation — reaction queries.
-    def get_reactions(stream_id, event_id)
-      data = @t.request("GET", "/streams/\#{esc(stream_id)}/events/\#{esc(event_id)}/reactions")
-      data["reactions"]
-    end
-
     def trigger(stream_id, event, data: nil, exclude_connection: nil)
       body = { event: event }
       body[:data] = data if data
@@ -261,11 +244,6 @@ module HeraldAdmin
     def get_stream(stream_id)
       data = @t.request("GET", "/streams/\#{ERB::Util.url_encode(stream_id)}/presence")
       data["members"].map { |m| MemberPresenceEntry.new(user_id: m["user_id"], status: m["status"]) }
-    end
-
-    def get_cursors(stream_id)
-      data = @t.request("GET", "/streams/\#{ERB::Util.url_encode(stream_id)}/cursors")
-      data["cursors"].map { |c| Cursor.new(user_id: c["user_id"], seq: c["seq"]) }
     end
 
     def get_bulk(user_ids)

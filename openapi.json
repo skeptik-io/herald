@@ -1980,45 +1980,6 @@
         ]
       }
     },
-    "/streams/{id}/cursors": {
-      "get": {
-        "tags": [
-          "cursors"
-        ],
-        "operationId": "list_cursors",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Stream ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Read cursors for stream",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CursorListResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "basic_auth": []
-          },
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
     "/streams/{id}/events": {
       "get": {
         "tags": [
@@ -2215,174 +2176,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "basic_auth": []
-          },
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/streams/{id}/events/{event_id}": {
-      "delete": {
-        "tags": [
-          "events"
-        ],
-        "operationId": "delete_event",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Stream ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "event_id",
-            "in": "path",
-            "description": "Event ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Event deleted"
-          },
-          "404": {
-            "description": "Event not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "basic_auth": []
-          },
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "patch": {
-        "tags": [
-          "events"
-        ],
-        "operationId": "edit_event",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Stream ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "event_id",
-            "in": "path",
-            "description": "Event ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EditEventRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Event edited"
-          },
-          "400": {
-            "description": "Validation error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Event not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "basic_auth": []
-          },
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/streams/{id}/events/{event_id}/reactions": {
-      "get": {
-        "tags": [
-          "events"
-        ],
-        "operationId": "get_reactions",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Stream ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "event_id",
-            "in": "path",
-            "description": "Event ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Reactions for event",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReactionListResponse"
                 }
               }
             }
@@ -3028,48 +2821,6 @@
           }
         }
       },
-      "CursorListResponse": {
-        "type": "object",
-        "required": [
-          "cursors"
-        ],
-        "properties": {
-          "cursors": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CursorView"
-            }
-          }
-        }
-      },
-      "CursorView": {
-        "type": "object",
-        "required": [
-          "user_id",
-          "seq"
-        ],
-        "properties": {
-          "seq": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "user_id": {
-            "type": "string"
-          }
-        }
-      },
-      "EditEventRequest": {
-        "type": "object",
-        "required": [
-          "body"
-        ],
-        "properties": {
-          "body": {
-            "type": "string"
-          }
-        }
-      },
       "ErrorCode": {
         "type": "string",
         "enum": [
@@ -3413,43 +3164,6 @@
           "deleted": {
             "type": "integer",
             "minimum": 0
-          }
-        }
-      },
-      "ReactionListResponse": {
-        "type": "object",
-        "required": [
-          "reactions"
-        ],
-        "properties": {
-          "reactions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ReactionSummary"
-            }
-          }
-        }
-      },
-      "ReactionSummary": {
-        "type": "object",
-        "required": [
-          "emoji",
-          "count",
-          "users"
-        ],
-        "properties": {
-          "count": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "emoji": {
-            "type": "string"
-          },
-          "users": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         }
       },
@@ -4051,10 +3765,6 @@
     {
       "name": "presence",
       "description": "User presence queries"
-    },
-    {
-      "name": "cursors",
-      "description": "Read cursor tracking"
     },
     {
       "name": "blocks",

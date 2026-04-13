@@ -28,12 +28,6 @@ export interface Event {
   edited_at?: number;
 }
 
-export interface ReactionSummary {
-  emoji: string;
-  count: number;
-  users: string[];
-}
-
 export interface BlockList {
   blocked: string[];
 }
@@ -52,11 +46,6 @@ export interface UserPresence {
 export interface MemberPresenceEntry {
   user_id: string;
   status: string;
-}
-
-export interface Cursor {
-  user_id: string;
-  seq: number;
 }
 
 export interface HealthResponse {

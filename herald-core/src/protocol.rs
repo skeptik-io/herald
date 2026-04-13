@@ -52,16 +52,6 @@ pub enum ClientMessage {
         meta: Option<Value>,
         parent_id: Option<String>,
     },
-    EventEdit {
-        ref_: Option<String>,
-        stream: String,
-        id: String,
-        body: String,
-    },
-    CursorUpdate {
-        stream: String,
-        seq: Sequence,
-    },
     PresenceSet {
         ref_: Option<String>,
         status: PresenceStatus,
@@ -81,11 +71,6 @@ pub enum ClientMessage {
         after: Option<Sequence>,
         limit: Option<u32>,
     },
-    EventDelete {
-        ref_: Option<String>,
-        stream: String,
-        id: String,
-    },
     Ping {
         ref_: Option<String>,
     },
@@ -94,18 +79,6 @@ pub enum ClientMessage {
         stream: String,
         event: String,
         data: Option<Value>,
-    },
-    ReactionAdd {
-        ref_: Option<String>,
-        stream: String,
-        event_id: String,
-        emoji: String,
-    },
-    ReactionRemove {
-        ref_: Option<String>,
-        stream: String,
-        event_id: String,
-        emoji: String,
     },
     /// Client acknowledges processing of events up to `seq` on `stream`.
     /// Used for at-least-once delivery: the server replays from last acked
@@ -124,17 +97,12 @@ impl ClientMessage {
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
             Self::EventPublish { .. } => "event.publish",
-            Self::EventEdit { .. } => "event.edit",
-            Self::EventDelete { .. } => "event.delete",
             Self::EventsFetch { .. } => "events.fetch",
             Self::EventTrigger { .. } => "event.trigger",
-            Self::CursorUpdate { .. } => "cursor.update",
             Self::PresenceSet { .. } => "presence.set",
             Self::TypingStart { .. } => "typing.start",
             Self::TypingStop { .. } => "typing.stop",
             Self::Ping { .. } => "ping",
-            Self::ReactionAdd { .. } => "reaction.add",
-            Self::ReactionRemove { .. } => "reaction.remove",
             Self::EventAckDelivery { .. } => "event.ack",
         }
     }
@@ -178,16 +146,6 @@ impl ClientMessage {
                     .and_then(|v| v.as_str())
                     .map(String::from),
             }),
-            "event.edit" => Ok(Self::EventEdit {
-                ref_: raw.ref_,
-                stream: str_field(p, "stream")?,
-                id: str_field(p, "id")?,
-                body: str_field(p, "body")?,
-            }),
-            "cursor.update" => Ok(Self::CursorUpdate {
-                stream: str_field(p, "stream")?,
-                seq: u64_field(p, "seq")?,
-            }),
             "presence.set" => {
                 let s = str_field(p, "status")?;
                 let status = PresenceStatus::from_str_loose(&s)
@@ -218,29 +176,12 @@ impl ClientMessage {
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok()),
             }),
-            "event.delete" => Ok(Self::EventDelete {
-                ref_: raw.ref_,
-                stream: str_field(p, "stream")?,
-                id: str_field(p, "id")?,
-            }),
             "ping" => Ok(Self::Ping { ref_: raw.ref_ }),
             "event.trigger" => Ok(Self::EventTrigger {
                 ref_: raw.ref_,
                 stream: str_field(p, "stream")?,
                 event: str_field(p, "event")?,
                 data: p.get("data").cloned(),
-            }),
-            "reaction.add" => Ok(Self::ReactionAdd {
-                ref_: raw.ref_,
-                stream: str_field(p, "stream")?,
-                event_id: str_field(p, "event_id")?,
-                emoji: str_field(p, "emoji")?,
-            }),
-            "reaction.remove" => Ok(Self::ReactionRemove {
-                ref_: raw.ref_,
-                stream: str_field(p, "stream")?,
-                event_id: str_field(p, "event_id")?,
-                emoji: str_field(p, "emoji")?,
             }),
             "event.ack" => {
                 // Distinguish from server's event.ack (publish ack) by checking
@@ -299,14 +240,8 @@ pub enum ServerMessage {
         ref_: Option<String>,
         payload: EventsBatchPayload,
     },
-    #[serde(rename = "event.edited")]
-    EventEdited { payload: EventEditedPayload },
-    #[serde(rename = "event.deleted")]
-    EventDeleted { payload: EventDeletedPayload },
     #[serde(rename = "presence.changed")]
     PresenceChanged { payload: PresenceChangedPayload },
-    #[serde(rename = "cursor.moved")]
-    CursorMoved { payload: CursorMovedPayload },
     #[serde(rename = "member.joined")]
     MemberJoined { payload: MemberPayload },
     #[serde(rename = "member.left")]
@@ -331,8 +266,6 @@ pub enum ServerMessage {
     },
     #[serde(rename = "event.delivered")]
     EventDelivered { payload: EventDeliveredPayload },
-    #[serde(rename = "reaction.changed")]
-    ReactionChanged { payload: ReactionChangedPayload },
     #[serde(rename = "error")]
     Error {
         #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -427,22 +360,6 @@ pub struct EventsBatchPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventEditedPayload {
-    pub stream: String,
-    pub id: String,
-    pub seq: Sequence,
-    pub body: String,
-    pub edited_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventDeletedPayload {
-    pub stream: String,
-    pub id: String,
-    pub seq: Sequence,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceChangedPayload {
     pub user_id: String,
     pub presence: PresenceStatus,
@@ -453,13 +370,6 @@ pub struct PresenceChangedPayload {
     /// Present only when `presence` is `offline`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CursorMovedPayload {
-    pub stream: String,
-    pub user_id: String,
-    pub seq: Sequence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,15 +425,6 @@ pub struct WatchlistPayload {
 pub struct StreamSubscriberCountPayload {
     pub stream: String,
     pub count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReactionChangedPayload {
-    pub stream: String,
-    pub event_id: String,
-    pub emoji: String,
-    pub user_id: String,
-    pub action: String,
 }
 
 // ---------------------------------------------------------------------------

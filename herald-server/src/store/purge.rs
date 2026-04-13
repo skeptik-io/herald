@@ -1,12 +1,9 @@
-//! GDPR data deletion — purge all data for a tenant or all events/reactions/cursors for a user.
+//! GDPR data deletion — purge all data for a tenant or all events for a user.
 
 use shroudb_store::Store;
 use tracing::{info, warn};
 
-use super::{
-    NS_API_TOKENS, NS_BLOCKS, NS_CURSORS, NS_EVENTS, NS_MEMBERS, NS_REACTIONS, NS_STREAMS,
-    NS_TENANTS,
-};
+use super::{NS_API_TOKENS, NS_BLOCKS, NS_CURSORS, NS_EVENTS, NS_MEMBERS, NS_STREAMS, NS_TENANTS};
 
 /// Delete all keys with a given prefix in a namespace. Returns count of keys deleted.
 async fn delete_prefix<S: Store>(store: &S, ns: &str, prefix: &[u8]) -> Result<u64, anyhow::Error> {
@@ -31,8 +28,9 @@ async fn delete_prefix<S: Store>(store: &S, ns: &str, prefix: &[u8]) -> Result<u
 
 /// Purge ALL data for a tenant across all namespaces.
 ///
-/// Deletes: tenant record, API tokens, streams, members, events, cursors,
-/// reactions, and blocks. Returns total keys deleted.
+/// Deletes: tenant record, API tokens, streams, members, events, and blocks.
+/// Returns total keys deleted. (Reactions and cursors are no longer
+/// persisted server-side — they ride the event stream as envelopes.)
 pub async fn purge_tenant<S: Store>(store: &S, tenant_id: &str) -> Result<u64, anyhow::Error> {
     let prefix = format!("{tenant_id}/").into_bytes();
     let mut total = 0u64;
@@ -43,10 +41,8 @@ pub async fn purge_tenant<S: Store>(store: &S, tenant_id: &str) -> Result<u64, a
     total += delete_prefix(store, NS_STREAMS, &prefix).await?;
     // Members
     total += delete_prefix(store, NS_MEMBERS, &prefix).await?;
-    // Cursors
+    // Ack-mode delivery cursors
     total += delete_prefix(store, NS_CURSORS, &prefix).await?;
-    // Reactions
-    total += delete_prefix(store, NS_REACTIONS, &prefix).await?;
     // Blocks
     total += delete_prefix(store, NS_BLOCKS, &prefix).await?;
 
@@ -98,8 +94,10 @@ async fn delete_tenant_tokens<S: Store>(store: &S, tenant_id: &str) -> Result<u6
     Ok(deleted)
 }
 
-/// Purge all events by a specific user within a stream, plus their cursors,
-/// reactions, and blocks. Returns total keys deleted.
+/// Purge all events by a specific user within a stream, plus their blocks
+/// and member record. Returns total keys deleted. (Reactions and cursors
+/// are no longer persisted server-side — they live in the event stream as
+/// envelopes and are removed when their carrier event is purged above.)
 pub async fn purge_user_data<S: Store>(
     store: &S,
     tenant_id: &str,
@@ -137,44 +135,6 @@ pub async fn purge_user_data<S: Store>(
             break;
         }
         cursor = page.cursor;
-    }
-
-    // Cursor for this user in this stream
-    let cursor_key = format!("{tenant_id}/{stream_id}/{user_id}").into_bytes();
-    match store.delete(NS_CURSORS, &cursor_key).await {
-        Ok(_) => total += 1,
-        Err(shroudb_store::StoreError::NotFound) => {}
-        Err(e) => warn!("purge: failed to delete cursor: {e}"),
-    }
-
-    // Reactions by this user in this stream (prefix: {tenant}/{stream}/)
-    // Need to scan all reactions in the stream and filter by user_id segment
-    let reaction_prefix = format!("{tenant_id}/{stream_id}/").into_bytes();
-    let user_suffix = format!("/{user_id}");
-    let mut rcursor = None;
-    loop {
-        let page = store
-            .list(
-                NS_REACTIONS,
-                Some(&reaction_prefix),
-                rcursor.as_deref(),
-                500,
-            )
-            .await?;
-        for key in &page.keys {
-            // Key format: {tenant}/{stream}/{event_id}/{emoji}/{user_id}
-            let key_str = String::from_utf8_lossy(key);
-            if key_str.ends_with(&user_suffix) {
-                match store.delete(NS_REACTIONS, key).await {
-                    Ok(_) => total += 1,
-                    Err(e) => warn!(?key, "purge: failed to delete reaction: {e}"),
-                }
-            }
-        }
-        if page.cursor.is_none() {
-            break;
-        }
-        rcursor = page.cursor;
     }
 
     // Blocks involving this user (as blocker or blocked)

@@ -44,42 +44,6 @@ pub async fn handle_message(
         } => {
             handle_publish(state, ctx, tx, ref_, stream, body, meta, parent_id).await;
         }
-        ClientMessage::EventEdit {
-            ref_,
-            stream,
-            id,
-            body,
-        } => {
-            #[cfg(feature = "chat")]
-            {
-                crate::engines::chat::ws_handler::handle_edit(
-                    state, ctx, tx, ref_, stream, id, body,
-                )
-                .await;
-            }
-            #[cfg(not(feature = "chat"))]
-            {
-                let _ = (stream, id, body);
-                let _ = tx
-                    .send(ServerMessage::error(
-                        ref_,
-                        ErrorCode::BadRequest,
-                        "event editing requires the chat engine",
-                    ))
-                    .await;
-            }
-        }
-        ClientMessage::CursorUpdate { stream, seq } => {
-            #[cfg(feature = "chat")]
-            {
-                crate::engines::chat::ws_handler::handle_cursor_update(state, ctx, stream, seq)
-                    .await;
-            }
-            #[cfg(not(feature = "chat"))]
-            {
-                let _ = (stream, seq);
-            }
-        }
         ClientMessage::PresenceSet {
             ref_,
             status,
@@ -133,24 +97,6 @@ pub async fn handle_message(
         } => {
             handle_fetch(state, ctx, tx, ref_, stream, before, after, limit).await;
         }
-        ClientMessage::EventDelete { ref_, stream, id } => {
-            #[cfg(feature = "chat")]
-            {
-                crate::engines::chat::ws_handler::handle_delete(state, ctx, tx, ref_, stream, id)
-                    .await;
-            }
-            #[cfg(not(feature = "chat"))]
-            {
-                let _ = (stream, id);
-                let _ = tx
-                    .send(ServerMessage::error(
-                        ref_,
-                        ErrorCode::BadRequest,
-                        "event deletion requires the chat engine",
-                    ))
-                    .await;
-            }
-        }
         ClientMessage::EventTrigger {
             ref_,
             stream,
@@ -158,56 +104,6 @@ pub async fn handle_message(
             data,
         } => {
             handle_ephemeral_trigger(state, ctx, tx, ref_, stream, event, data).await;
-        }
-        ClientMessage::ReactionAdd {
-            ref_,
-            stream,
-            event_id,
-            emoji,
-        } => {
-            #[cfg(feature = "chat")]
-            {
-                crate::engines::chat::ws_handler::handle_reaction(
-                    state, ctx, tx, ref_, stream, event_id, emoji, true,
-                )
-                .await;
-            }
-            #[cfg(not(feature = "chat"))]
-            {
-                let _ = (stream, event_id, emoji);
-                let _ = tx
-                    .send(ServerMessage::error(
-                        ref_,
-                        ErrorCode::BadRequest,
-                        "reactions require the chat engine",
-                    ))
-                    .await;
-            }
-        }
-        ClientMessage::ReactionRemove {
-            ref_,
-            stream,
-            event_id,
-            emoji,
-        } => {
-            #[cfg(feature = "chat")]
-            {
-                crate::engines::chat::ws_handler::handle_reaction(
-                    state, ctx, tx, ref_, stream, event_id, emoji, false,
-                )
-                .await;
-            }
-            #[cfg(not(feature = "chat"))]
-            {
-                let _ = (stream, event_id, emoji);
-                let _ = tx
-                    .send(ServerMessage::error(
-                        ref_,
-                        ErrorCode::BadRequest,
-                        "reactions require the chat engine",
-                    ))
-                    .await;
-            }
         }
         ClientMessage::EventAckDelivery { stream, seq } => {
             handle_event_ack_delivery(state, ctx, stream, seq).await;
@@ -295,6 +191,11 @@ async fn handle_subscribe(
             }
         }
 
+        // SubscribedPayload.cursor is the ack-mode delivery high-water-mark
+        // (used by reconnecting ack-mode clients to know where to resume).
+        // It is NOT the user-facing read cursor — that lives in the event
+        // stream as `cursor` envelopes and is reconstructed client-side.
+        // For non-ack-mode connections this defaults to 0 (no replay needed).
         let cursor = store::cursors::get(&*state.db, tid, &stream_id, &ctx.user_id)
             .await
             .unwrap_or(0);

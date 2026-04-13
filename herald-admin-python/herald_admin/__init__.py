@@ -5,14 +5,14 @@ from .errors import HeraldError
 from .types import (
     AuditEvent, AuditQueryResult,
     Stream, Member, Event, EventList, EventPublishResult,
-    UserPresence, MemberPresenceEntry, Cursor, HealthResponse,
+    UserPresence, MemberPresenceEntry, HealthResponse,
 )
 
 __all__ = [
     "HeraldAdmin", "HeraldAdminOptions", "HeraldError",
     "AuditEvent", "AuditQueryResult",
     "Stream", "Member", "Event", "EventList", "EventPublishResult",
-    "UserPresence", "MemberPresenceEntry", "Cursor", "HealthResponse",
+    "UserPresence", "MemberPresenceEntry", "HealthResponse",
 ]
 
 # E2EE is available when the 'cryptography' package is installed.

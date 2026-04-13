@@ -10,7 +10,7 @@ from .errors import HeraldError
 from .transport import HttpTransport
 from .types import (
     AuditEvent, AuditQueryResult,
-    Cursor, HealthResponse, Member, MemberPresenceEntry, Event,
+    HealthResponse, Member, MemberPresenceEntry, Event,
     EventList, EventPublishResult, Stream, UserPresence,
 )
 
@@ -110,19 +110,6 @@ class EventNamespace:
         events = [Event(id=m["id"], stream=m.get("stream", stream_id), seq=m["seq"], sender=m["sender"], body=m["body"], sent_at=m["sent_at"], meta=m.get("meta"), parent_id=m.get("parent_id"), edited_at=m.get("edited_at")) for m in data["events"]]
         return EventList(events=events, has_more=data.get("has_more", False))
 
-    def delete(self, stream_id: str, event_id: str) -> None:
-        """Chat-specific operation — event deletion."""
-        self._t.request("DELETE", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}")
-
-    def edit(self, stream_id: str, event_id: str, body: str) -> None:
-        """Chat-specific operation — event editing."""
-        self._t.request("PATCH", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}", {"body": body})
-
-    def get_reactions(self, stream_id: str, event_id: str) -> list[dict]:
-        """Chat-specific operation — reaction queries."""
-        data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/events/{quote(event_id, safe='')}/reactions")
-        return data["reactions"]
-
     def trigger(self, stream_id: str, event: str, data: Any = None, exclude_connection: int | None = None) -> None:
         body: dict[str, Any] = {"event": event}
         if data is not None:
@@ -145,10 +132,6 @@ class PresenceNamespace:
     def get_stream(self, stream_id: str) -> list[MemberPresenceEntry]:
         data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/presence")
         return [MemberPresenceEntry(user_id=m["user_id"], status=m["status"]) for m in data["members"]]
-
-    def get_cursors(self, stream_id: str) -> list[Cursor]:
-        data = self._t.request("GET", f"/streams/{quote(stream_id, safe='')}/cursors")
-        return [Cursor(user_id=c["user_id"], seq=c["seq"]) for c in data["cursors"]]
 
     def get_bulk(self, user_ids: list[str]) -> list[dict]:
         ids = ",".join(user_ids)

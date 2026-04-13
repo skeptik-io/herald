@@ -33,13 +33,6 @@ type Event struct {
 	SentAt   int64  `json:"sent_at"`
 }
 
-// ReactionSummary represents aggregated reactions on an event.
-type ReactionSummary struct {
-	Emoji string   `json:"emoji"`
-	Count int      `json:"count"`
-	Users []string `json:"users"`
-}
-
 // EventList is a paginated list of events.
 type EventList struct {
 	Events  []Event `json:"events"`
@@ -64,12 +57,6 @@ type UserPresence struct {
 type MemberPresenceEntry struct {
 	UserID string `json:"user_id"`
 	Status string `json:"status"`
-}
-
-// Cursor is a user's read position in a stream.
-type Cursor struct {
-	UserID string `json:"user_id"`
-	Seq    uint64 `json:"seq"`
 }
 
 // HealthResponse is the response from the health endpoint.

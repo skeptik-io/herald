@@ -1,3 +1,14 @@
+//! At-least-once delivery cursor store.
+//!
+//! Tracks the highest event sequence the server has confirmed delivered to
+//! each (tenant, stream, user). Used solely by ack-mode connections so that
+//! reconnect catchup replays from the right offset, even across instances
+//! in clustered mode.
+//!
+//! This is not the user-facing read cursor — that lives as a `cursor`
+//! envelope in the event stream and is reconstructed client-side via
+//! replay or app-DB hydration.
+
 use std::sync::LazyLock;
 
 use dashmap::DashMap;
@@ -10,10 +21,6 @@ use super::NS_CURSORS;
 
 fn cursor_key(tenant_id: &str, stream_id: &str, user_id: &str) -> Vec<u8> {
     format!("{tenant_id}/{stream_id}/{user_id}").into_bytes()
-}
-
-fn stream_prefix(tenant_id: &str, stream_id: &str) -> Vec<u8> {
-    format!("{tenant_id}/{stream_id}/").into_bytes()
 }
 
 /// Per-key lock to prevent read-modify-write races on cursor MAX semantics.
@@ -74,33 +81,6 @@ pub async fn get<S: Store>(
     }
 }
 
-pub async fn list_by_stream<S: Store>(
-    store: &S,
-    tenant_id: &str,
-    stream_id: &str,
-) -> Result<Vec<Cursor>, anyhow::Error> {
-    let prefix = stream_prefix(tenant_id, stream_id);
-    let mut cursors = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = store
-            .list(NS_CURSORS, Some(&prefix), cursor.as_deref(), 100)
-            .await?;
-        for key in &page.keys {
-            if let Ok(entry) = store.get(NS_CURSORS, key, None).await {
-                if let Ok(c) = serde_json::from_slice::<Cursor>(&entry.value) {
-                    cursors.push(c);
-                }
-            }
-        }
-        if page.cursor.is_none() {
-            break;
-        }
-        cursor = page.cursor;
-    }
-    Ok(cursors)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,24 +112,6 @@ mod tests {
         upsert(&*store, "t1", "r1", "u1", 20, 3000).await.unwrap();
         let seq = get(&*store, "t1", "r1", "u1").await.unwrap();
         assert_eq!(seq, 20);
-    }
-
-    #[tokio::test]
-    async fn test_cursor_list_by_stream() {
-        let store = crate::store::test_store().await;
-        for i in 0..3 {
-            upsert(&*store, "t1", "r1", &format!("u{i}"), i + 1, 1000)
-                .await
-                .unwrap();
-        }
-        // Different stream
-        upsert(&*store, "t1", "r2", "u0", 1, 1000).await.unwrap();
-
-        let cursors = list_by_stream(&*store, "t1", "r1").await.unwrap();
-        assert_eq!(cursors.len(), 3);
-
-        let cursors = list_by_stream(&*store, "t1", "r2").await.unwrap();
-        assert_eq!(cursors.len(), 1);
     }
 
     #[tokio::test]

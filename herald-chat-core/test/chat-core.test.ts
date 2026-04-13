@@ -796,22 +796,100 @@ await test("deleteEvent propagates client error", async () => {
   core.destroy();
 });
 
-await test("addReaction delegates to client", async () => {
+await test("addReaction publishes envelope and applies optimistic", async () => {
   const { client, chatClient, core } = makeCore();
   core.attach();
-  core.addReaction("s1", "e1", "🔥");
-  assert(chatClient.reactionCalls.length === 1, "1 call");
-  assert(chatClient.reactionCalls[0].type === "add", "add");
-  assert(chatClient.reactionCalls[0].emoji === "🔥", "emoji");
+  await core.joinStream("s1");
+
+  // Seed a target message
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  await core.addReaction("s1", "e1", "🔥");
+
+  // Optimistic mutation visible immediately
+  const msgs = core.getMessages("s1");
+  assert(msgs[0].reactions.get("🔥")?.has("me") === true, "optimistic reaction applied");
+
+  // Envelope was published, not the legacy chat.addReaction frame
+  assert(chatClient.reactionCalls.length === 0, "legacy chat.addReaction NOT called");
+  // First publish was the seeded message via emit, not via publish; check the new one
+  const reactionPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"reaction"'));
+  assert(reactionPublish !== undefined, "reaction envelope published");
+  const env = JSON.parse(reactionPublish!.body);
+  assert(env.kind === "reaction", "kind");
+  assert(env.targetId === "e1", "targetId");
+  assert(env.op === "add", "op");
+  assert(env.emoji === "🔥", "emoji");
   core.destroy();
 });
 
-await test("removeReaction delegates to client", async () => {
+await test("removeReaction publishes envelope and applies optimistic", async () => {
   const { client, chatClient, core } = makeCore();
   core.attach();
-  core.removeReaction("s1", "e1", "🔥");
-  assert(chatClient.reactionCalls.length === 1, "1 call");
-  assert(chatClient.reactionCalls[0].type === "remove", "remove");
+  await core.joinStream("s1");
+
+  // Seed message + an existing reaction from "me"
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+  client.emit("reaction.changed", { stream: "s1", event_id: "e1", emoji: "🔥", user_id: "me", action: "add" });
+
+  await core.removeReaction("s1", "e1", "🔥");
+
+  // Optimistic removal: empty reactions for that emoji means the emoji entry is gone
+  assert(core.getMessages("s1")[0].reactions.get("🔥") === undefined, "optimistic remove applied");
+
+  assert(chatClient.reactionCalls.length === 0, "legacy chat.removeReaction NOT called");
+  const reactionPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"reaction"'));
+  const env = JSON.parse(reactionPublish!.body);
+  assert(env.op === "remove", "op");
+  core.destroy();
+});
+
+await test("addReaction rolls back optimistic on publish failure", async () => {
+  const { client, chatClient, core } = makeCore({ publishError: new Error("boom") });
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  let threw = false;
+  try { await core.addReaction("s1", "e1", "🔥"); } catch { threw = true; }
+  assert(threw, "addReaction threw");
+
+  // Optimistic was rolled back — no reaction on the message
+  assert(core.getMessages("s1")[0].reactions.get("🔥") === undefined, "optimistic rolled back");
+  core.destroy();
+});
+
+await test("removeReaction rolls back optimistic on publish failure", async () => {
+  const { client, chatClient, core } = makeCore({ publishError: new Error("boom") });
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+  client.emit("reaction.changed", { stream: "s1", event_id: "e1", emoji: "🔥", user_id: "me", action: "add" });
+
+  let threw = false;
+  try { await core.removeReaction("s1", "e1", "🔥"); } catch { threw = true; }
+  assert(threw, "removeReaction threw");
+
+  // Rollback: reaction restored
+  assert(core.getMessages("s1")[0].reactions.get("🔥")?.has("me") === true, "reaction restored");
+  core.destroy();
+});
+
+await test("addReaction echo is idempotent (server fanout = no-op)", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  await core.addReaction("s1", "e1", "🔥");
+  // Simulate the server's envelope echo
+  const env = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "rx1", seq: 2, sender: "me", body: env, sent_at: 2 });
+
+  // Still exactly one user in the set (Set dedupe)
+  assert(core.getMessages("s1")[0].reactions.get("🔥")?.size === 1, "no double-count from echo");
   core.destroy();
 });
 

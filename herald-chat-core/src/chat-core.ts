@@ -12,6 +12,7 @@ import { TypingStore } from "./stores/typing-store.js";
 import { LivenessController, browserEnvironment } from "./liveness/liveness.js";
 import { ScrollState } from "./scroll/scroll-state.js";
 import {
+  encodeEnvelope,
   parseEnvelope,
   type ChatEnvelope,
   type ReactionEnvelope,
@@ -281,18 +282,45 @@ export class ChatCore {
   }
 
   async addReaction(streamId: string, eventId: string, emoji: string): Promise<void> {
-    if (this.writer?.addReaction) {
-      await this.writer.addReaction(streamId, eventId, emoji);
-    } else {
-      this.chat.addReaction(streamId, eventId, emoji);
+    // Optimistic: apply locally so the UI updates immediately. The server's
+    // echo (envelope or writer-driven fanout) will re-apply idempotently
+    // (Set add for the same user is a no-op).
+    this.messages.applyReaction({
+      stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "add",
+    });
+    try {
+      if (this.writer?.addReaction) {
+        await this.writer.addReaction(streamId, eventId, emoji);
+      } else {
+        const env = encodeEnvelope({ kind: "reaction", targetId: eventId, op: "add", emoji });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      // Rollback: inverse op restores the pre-optimistic state. Idempotent
+      // if the user already had no such reaction (rare race).
+      this.messages.applyReaction({
+        stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "remove",
+      });
+      throw err;
     }
   }
 
   async removeReaction(streamId: string, eventId: string, emoji: string): Promise<void> {
-    if (this.writer?.removeReaction) {
-      await this.writer.removeReaction(streamId, eventId, emoji);
-    } else {
-      this.chat.removeReaction(streamId, eventId, emoji);
+    this.messages.applyReaction({
+      stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "remove",
+    });
+    try {
+      if (this.writer?.removeReaction) {
+        await this.writer.removeReaction(streamId, eventId, emoji);
+      } else {
+        const env = encodeEnvelope({ kind: "reaction", targetId: eventId, op: "remove", emoji });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      this.messages.applyReaction({
+        stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "add",
+      });
+      throw err;
     }
   }
 

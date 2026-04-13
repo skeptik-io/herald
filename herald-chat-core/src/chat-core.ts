@@ -11,6 +11,14 @@ import { MemberStore } from "./stores/member-store.js";
 import { TypingStore } from "./stores/typing-store.js";
 import { LivenessController, browserEnvironment } from "./liveness/liveness.js";
 import { ScrollState } from "./scroll/scroll-state.js";
+import {
+  parseEnvelope,
+  type ChatEnvelope,
+  type ReactionEnvelope,
+  type EditEnvelope,
+  type DeleteEnvelope,
+  type CursorEnvelope,
+} from "./envelope.js";
 
 type Handler<T> = (data: T) => void;
 
@@ -458,14 +466,31 @@ export class ChatCore {
   // ── Internal event handlers ──────────────────────────────────────
 
   private handleEvent(event: EventNew): void {
+    const envelope = parseEnvelope(event.body);
+
+    // Non-message envelopes ride the same publish path but are folded into
+    // chat state via their own dispatchers (reactions/edits/deletes/cursors
+    // are not "messages" and must not be appended to the message list).
+    if (envelope && envelope.kind !== "message") {
+      this.dispatchEnvelope(envelope, event);
+      return;
+    }
+
+    // Plain message: either a message envelope (unwrap text) or a raw body
+    // (treat as message text — backward compat with non-enveloped publishers
+    // and external HTTP injectors that don't know about chat envelopes).
+    const messageEvent: EventNew = envelope
+      ? { ...event, body: envelope.text }
+      : event;
+
     const listen = this.listenOnly.has(event.stream);
-    this.runMiddleware({ type: "event", data: event }, () => {
+    this.runMiddleware({ type: "event", data: messageEvent }, () => {
       this.notifier.notify(`event:${event.stream}`);
       // Bump latestSeq for both full-state and listen-only (unread counts)
       this.cursors.bumpLatestSeq(event.stream, event.seq);
       if (listen) return;
 
-      const inserted = this.messages.appendEvent(event);
+      const inserted = this.messages.appendEvent(messageEvent);
       if (!inserted) return;
 
       const scroll = this.scrollStates.get(event.stream);
@@ -476,6 +501,90 @@ export class ChatCore {
           scroll.incrementPending();
         }
       }
+    });
+  }
+
+  /** Dispatch a non-message chat envelope to the appropriate handler. */
+  private dispatchEnvelope(envelope: ChatEnvelope, event: EventNew): void {
+    switch (envelope.kind) {
+      case "reaction":
+        this.handleEnvelopeReaction(envelope, event);
+        break;
+      case "edit":
+        this.handleEnvelopeEdit(envelope, event);
+        break;
+      case "delete":
+        this.handleEnvelopeDelete(envelope, event);
+        break;
+      case "cursor":
+        this.handleEnvelopeCursor(envelope, event);
+        break;
+    }
+  }
+
+  /** Apply an enveloped reaction. Synthesizes a `ReactionChanged` so existing
+   *  middleware that subscribes to `"reaction.changed"` keeps working. */
+  private handleEnvelopeReaction(env: ReactionEnvelope, event: EventNew): void {
+    const synthesized: ReactionChanged = {
+      stream: event.stream,
+      event_id: env.targetId,
+      emoji: env.emoji,
+      user_id: event.sender,
+      action: env.op,
+    };
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "reaction.changed", data: synthesized }, () => {
+      this.notifier.notify(`event:${event.stream}`);
+      if (!listen) this.messages.applyReaction(synthesized);
+    });
+  }
+
+  /** Apply an enveloped edit. The envelope's `targetId` is the original
+   *  event being edited; the enveloped event's own `seq`/`sent_at` carry
+   *  the edit's ordering and timestamp. */
+  private handleEnvelopeEdit(env: EditEnvelope, event: EventNew): void {
+    const synthesized: EventEdited = {
+      stream: event.stream,
+      id: env.targetId,
+      seq: event.seq,
+      body: env.text,
+      edited_at: event.sent_at,
+    };
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "event.edited", data: synthesized }, () => {
+      this.notifier.notify(`event:${event.stream}`);
+      if (!listen) this.messages.applyEdit(synthesized);
+    });
+  }
+
+  private handleEnvelopeDelete(env: DeleteEnvelope, event: EventNew): void {
+    const synthesized: EventDeleted = {
+      stream: event.stream,
+      id: env.targetId,
+      seq: event.seq,
+    };
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "event.deleted", data: synthesized }, () => {
+      this.notifier.notify(`event:${event.stream}`);
+      if (!listen) this.messages.applyDelete(synthesized);
+    });
+  }
+
+  /** Apply an enveloped cursor advance. Mirrors `handleCursor` semantics:
+   *  ignore own cursor, ignore listen-only streams, MAX-only advancement,
+   *  and flip my own messages to "read" when a remote user passes them. */
+  private handleEnvelopeCursor(env: CursorEnvelope, event: EventNew): void {
+    const synthesized: CursorMoved = {
+      stream: event.stream,
+      user_id: event.sender,
+      seq: env.seq,
+    };
+    this.runMiddleware({ type: "cursor", data: synthesized }, () => {
+      if (event.sender === this.userId) return;
+      if (this.listenOnly.has(event.stream)) return;
+      const advanced = this.cursors.updateRemoteCursor(event.stream, event.sender, env.seq);
+      if (!advanced) return;
+      this.messages.markRead(event.stream, env.seq, this.userId);
     });
   }
 

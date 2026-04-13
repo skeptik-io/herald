@@ -358,6 +358,185 @@ await test("reaction for unknown event is harmless", async () => {
   core.destroy();
 });
 
+// ── Envelope dispatch (pure-transport chat ops) ────────────────────
+
+await test("envelope: message envelope unwraps text into Message.body", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  const env = JSON.stringify({ kind: "message", text: "hello" });
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: env, sent_at: 1 });
+
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "1 message");
+  assert(msgs[0].body === "hello", `body should be unwrapped text, got ${msgs[0].body}`);
+  core.destroy();
+});
+
+await test("envelope: plain (non-JSON) body is treated as message text", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "raw text", sent_at: 1 });
+
+  assert(core.getMessages("s1").length === 1, "1 message");
+  assert(core.getMessages("s1")[0].body === "raw text", "raw body preserved");
+  core.destroy();
+});
+
+await test("envelope: reaction envelope mutates target message reactions", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  // Seed a message
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  // Reaction add via envelope (delivered as a normal event from "bob")
+  const env = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "bob", body: env, sent_at: 2 });
+
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "reaction did not append a message — still 1");
+  const r = msgs[0].reactions;
+  assert(r.get("🔥")?.has("bob") === true, "bob's reaction recorded");
+
+  // Reaction remove via envelope
+  const envRemove = JSON.stringify({ kind: "reaction", targetId: "e1", op: "remove", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "e3", seq: 3, sender: "bob", body: envRemove, sent_at: 3 });
+
+  assert(msgs[0].reactions.get("🔥") === undefined, "reaction removed");
+  core.destroy();
+});
+
+await test("envelope: edit envelope updates target message body and editedAt", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "orig", sent_at: 1 });
+
+  const env = JSON.stringify({ kind: "edit", targetId: "e1", text: "edited" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "alice", body: env, sent_at: 99 });
+
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "edit did not append a message");
+  assert(msgs[0].body === "edited", `body should be edited, got ${msgs[0].body}`);
+  assert(msgs[0].editedAt === 99, "editedAt set from envelope event sent_at");
+  core.destroy();
+});
+
+await test("envelope: delete envelope tombstones target message", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "secret", sent_at: 1 });
+
+  const env = JSON.stringify({ kind: "delete", targetId: "e1" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "alice", body: env, sent_at: 2 });
+
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "delete did not append a message");
+  assert(msgs[0].deleted === true, "marked deleted");
+  assert(msgs[0].body === "", "body cleared");
+  core.destroy();
+});
+
+await test("envelope: cursor envelope advances remote cursor and flips read", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  // My message
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  // Bob's cursor envelope past my message
+  const env = JSON.stringify({ kind: "cursor", seq });
+  client.emit("event", { stream: "s1", id: "c1", seq: seq + 1, sender: "bob", body: env, sent_at: 100 });
+
+  assert(core.getRemoteCursors("s1").get("bob") === seq, "bob's cursor recorded");
+  assert(core.getMessages("s1")[0].status === "read", "my message flipped to read");
+  core.destroy();
+});
+
+await test("envelope: own cursor envelope is ignored", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  const env = JSON.stringify({ kind: "cursor", seq });
+  client.emit("event", { stream: "s1", id: "c1", seq: seq + 1, sender: "me", body: env, sent_at: 100 });
+
+  assert(core.getMessages("s1")[0].status === "sent", "own cursor envelope ignored");
+  assert(core.getRemoteCursors("s1").size === 0, "no remote cursor recorded for self");
+  core.destroy();
+});
+
+await test("envelope: middleware sees synthesized typed events for non-message envelopes", async () => {
+  const seen: string[] = [];
+  const { client, core } = makeCore({}, {
+    middleware: [(event, next) => { seen.push(event.type); next(); }],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+  const reactionEnv = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "👍" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "bob", body: reactionEnv, sent_at: 2 });
+  const editEnv = JSON.stringify({ kind: "edit", targetId: "e1", text: "edited" });
+  client.emit("event", { stream: "s1", id: "e3", seq: 3, sender: "alice", body: editEnv, sent_at: 3 });
+  const deleteEnv = JSON.stringify({ kind: "delete", targetId: "e1" });
+  client.emit("event", { stream: "s1", id: "e4", seq: 4, sender: "alice", body: deleteEnv, sent_at: 4 });
+  const cursorEnv = JSON.stringify({ kind: "cursor", seq: 4 });
+  client.emit("event", { stream: "s1", id: "e5", seq: 5, sender: "bob", body: cursorEnv, sent_at: 5 });
+
+  assert(seen[0] === "event", `expected event, got ${seen[0]}`);
+  assert(seen[1] === "reaction.changed", `expected reaction.changed, got ${seen[1]}`);
+  assert(seen[2] === "event.edited", `expected event.edited, got ${seen[2]}`);
+  assert(seen[3] === "event.deleted", `expected event.deleted, got ${seen[3]}`);
+  assert(seen[4] === "cursor", `expected cursor, got ${seen[4]}`);
+  core.destroy();
+});
+
+await test("envelope: malformed JSON body is treated as plain message text", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "{not json", sent_at: 1 });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "a", body: '{"kind":"unknown","x":1}', sent_at: 2 });
+
+  // Both fall through to message handling
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 2, "both treated as messages");
+  core.destroy();
+});
+
+await test("envelope: listen-only stream notifies but does not mutate message store", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  let count = 0;
+  core.subscribe("event:inbox", () => { count++; });
+
+  // Pre-state cannot have a message because listen() doesn't store messages,
+  // so a reaction has no target — but the dispatcher should still notify.
+  const env = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "👍" });
+  client.emit("event", { stream: "inbox", id: "e2", seq: 2, sender: "bob", body: env, sent_at: 2 });
+
+  assert(count === 1, "event: slice notified for envelope on listen-only stream");
+  assert(core.getMessages("inbox").length === 0, "no messages stored");
+  core.destroy();
+});
+
 // ── Typing ─────────────────────────────────────────────────────────
 
 await test("typing events track other users", async () => {

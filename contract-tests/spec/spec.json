@@ -316,59 +316,12 @@
           }
         },
         {
-          "id": "event_edit",
-          "operation": "events.edit",
-          "input": {
-            "stream_id": "ct-stream-1",
-            "event_id": "$event_id",
-            "body": "Hello contract tests (edited)"
-          },
-          "expect": { "void": true }
-        },
-        {
-          "id": "event_list_after_edit",
-          "operation": "events.list",
-          "input": {
-            "stream_id": "ct-stream-1",
-            "after": "$event_seq_minus_1"
-          },
-          "expect": {
-            "first_event_values": {
-              "body": "Hello contract tests (edited)"
-            },
-            "first_event_fields": {
-              "edited_at": "number"
-            }
-          }
-        },
-        {
-          "id": "event_get_reactions",
-          "operation": "events.getReactions",
-          "input": {
-            "stream_id": "ct-stream-1",
-            "event_id": "$event_id"
-          },
-          "expect": {
-            "type": "array",
-            "length": 0
-          }
-        },
-        {
           "id": "event_trigger",
           "operation": "events.trigger",
           "input": {
             "stream_id": "ct-stream-1",
             "event": "typing.start",
             "data": { "user": "ct-user-a" }
-          },
-          "expect": { "void": true }
-        },
-        {
-          "id": "event_delete",
-          "operation": "events.delete",
-          "input": {
-            "stream_id": "ct-stream-1",
-            "event_id": "$reply_id"
           },
           "expect": { "void": true }
         }
@@ -419,14 +372,6 @@
               "status": "string",
               "connections": "number"
             }
-          }
-        },
-        {
-          "id": "presence_get_cursors",
-          "operation": "presence.getCursors",
-          "input": { "stream_id": "ct-stream-1" },
-          "expect": {
-            "type": "array"
           }
         }
       ]
@@ -550,10 +495,6 @@
         "payload": { "stream": "string" }
       },
       {
-        "type": "cursor.update",
-        "payload": { "stream": "string", "seq": "number" }
-      },
-      {
         "type": "watchlist.set",
         "payload": { "user_ids": ["string"] }
       }
@@ -576,28 +517,12 @@
         "payload": { "id": "string", "seq": "number", "sent_at": "number" }
       },
       {
-        "type": "event.deleted",
-        "payload": { "stream": "string", "id": "string" }
-      },
-      {
-        "type": "event.edited",
-        "payload": { "stream": "string", "id": "string", "body": "string", "edited_at": "number" }
-      },
-      {
         "type": "events.batch",
         "payload": { "stream": "string", "events": "Event[]", "has_more": "boolean" }
       },
       {
-        "type": "reaction.changed",
-        "payload": { "stream": "string", "event_id": "string", "emoji": "string", "count": "number", "users": ["string"] }
-      },
-      {
         "type": "presence",
         "payload": { "user_id": "string", "status": "string" }
-      },
-      {
-        "type": "cursor",
-        "payload": { "stream": "string", "user_id": "string", "seq": "number" }
       },
       {
         "type": "typing",

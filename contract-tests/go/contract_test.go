@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	herald "github.com/nicklucas/herald-admin-go"
+	herald "github.com/skeptik-io/herald-admin-go"
 )
 
 // Spec types matching spec.json structure.
@@ -259,29 +259,6 @@ func (r *runner) execute(ctx context.Context, t *testing.T, tc TestCase) interfa
 		}
 		return map[string]interface{}{"events": events, "has_more": el.HasMore}
 
-	case "events.edit":
-		if err := r.client.Events.Edit(ctx, getString(input, "stream_id"), getString(input, "event_id"), getString(input, "body")); err != nil {
-			return err
-		}
-		return nil
-
-	case "events.delete":
-		if err := r.client.Events.Delete(ctx, getString(input, "stream_id"), getString(input, "event_id")); err != nil {
-			return err
-		}
-		return nil
-
-	case "events.getReactions":
-		reactions, err := r.client.Events.GetReactions(ctx, getString(input, "stream_id"), getString(input, "event_id"))
-		if err != nil {
-			return err
-		}
-		arr := make([]interface{}, len(reactions))
-		for i, rx := range reactions {
-			arr[i] = map[string]interface{}{"emoji": rx.Emoji, "count": float64(rx.Count), "users": rx.Users}
-		}
-		return arr
-
 	case "events.trigger":
 		if err := r.client.Events.Trigger(ctx, getString(input, "stream_id"), getString(input, "event"), input["data"], nil); err != nil {
 			return err
@@ -303,17 +280,6 @@ func (r *runner) execute(ctx context.Context, t *testing.T, tc TestCase) interfa
 		arr := make([]interface{}, len(members))
 		for i, m := range members {
 			arr[i] = map[string]interface{}{"user_id": m.UserID, "status": m.Status}
-		}
-		return arr
-
-	case "presence.getCursors":
-		cursors, err := r.client.Presence.GetCursors(ctx, getString(input, "stream_id"))
-		if err != nil {
-			return err
-		}
-		arr := make([]interface{}, len(cursors))
-		for i, c := range cursors {
-			arr[i] = map[string]interface{}{"user_id": c.UserID, "seq": float64(c.Seq)}
 		}
 		return arr
 
@@ -584,7 +550,7 @@ func TestContract(t *testing.T) {
 
 	for _, group := range spec.Groups {
 		for _, tc := range group.Cases {
-			t.Run(tc.ID, func(t *testing.T) {
+			ok := t.Run(tc.ID, func(t *testing.T) {
 				result := r.execute(ctx, t, tc)
 
 				if err, ok := result.(error); ok {
@@ -604,6 +570,11 @@ func TestContract(t *testing.T) {
 					t.Errorf("%s", e)
 				}
 			})
+			if ok {
+				r.passed++
+			} else {
+				r.failed++
+			}
 		}
 	}
 

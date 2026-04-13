@@ -43,7 +43,6 @@ history = client.events.list('general', limit: 50)
 # Presence
 presence = client.presence.get_user('alice')
 stream_presence = client.presence.get_stream('general')
-cursors = client.presence.get_cursors('general')
 
 # Health
 health = client.health

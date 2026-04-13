@@ -1,5 +1,5 @@
-import type { EventNew, EventEdited, EventDeleted, EventAck, ReactionChanged } from "herald-sdk";
-import type { Message } from "../types.js";
+import type { EventNew, EventAck } from "herald-sdk";
+import type { Message, EventEdited, EventDeleted, ReactionChanged } from "../types.js";
 import { Notifier } from "../notifier.js";
 
 export class MessageStore {
@@ -186,12 +186,66 @@ export class MessageStore {
     this.bumpVersion(edit.stream);
   }
 
+  /** Apply an edit speculatively before the server confirms. Returns the
+   *  previous body+editedAt so a caller can revert on publish failure, or
+   *  `null` when the target message isn't in the store (no-op). */
+  applyEditOptimistic(
+    streamId: string,
+    eventId: string,
+    newBody: string,
+  ): { previousBody: string; previousEditedAt?: number } | null {
+    const msg = this.byId.get(eventId);
+    if (!msg || msg.deleted) return null;
+    const previousBody = msg.body;
+    const previousEditedAt = msg.editedAt;
+    msg.body = newBody;
+    msg.editedAt = Date.now();
+    this.bumpVersion(streamId);
+    return { previousBody, previousEditedAt };
+  }
+
+  /** Restore a message's body+editedAt to a previously-captured snapshot.
+   *  Used to roll back a failed optimistic edit. */
+  revertEdit(streamId: string, eventId: string, body: string, editedAt?: number): void {
+    const msg = this.byId.get(eventId);
+    if (!msg) return;
+    msg.body = body;
+    msg.editedAt = editedAt;
+    this.bumpVersion(streamId);
+  }
+
   applyDelete(del: EventDeleted): void {
     const msg = this.byId.get(del.id);
     if (!msg) return;
     msg.deleted = true;
     msg.body = "";
     this.bumpVersion(del.stream);
+  }
+
+  /** Apply a delete speculatively. Returns the previous body+deleted state
+   *  so a caller can revert on publish failure, or `null` when the target
+   *  isn't in the store. */
+  applyDeleteOptimistic(
+    streamId: string,
+    eventId: string,
+  ): { previousBody: string; previousDeleted: boolean } | null {
+    const msg = this.byId.get(eventId);
+    if (!msg) return null;
+    const previousBody = msg.body;
+    const previousDeleted = msg.deleted;
+    msg.deleted = true;
+    msg.body = "";
+    this.bumpVersion(streamId);
+    return { previousBody, previousDeleted };
+  }
+
+  /** Restore a message after a failed optimistic delete. */
+  revertDelete(streamId: string, eventId: string, body: string, deleted: boolean): void {
+    const msg = this.byId.get(eventId);
+    if (!msg) return;
+    msg.body = body;
+    msg.deleted = deleted;
+    this.bumpVersion(streamId);
   }
 
   applyReaction(reaction: ReactionChanged): void {

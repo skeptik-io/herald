@@ -160,6 +160,35 @@ function makeCore(clientOpts?: MockClientOptions, coreOpts?: Partial<ChatCoreOpt
   return { client, chatClient, core };
 }
 
+/** Emit a cursor envelope as a remote user. Simulates a peer advancing
+ *  their read cursor via the pure-transport envelope path. */
+let _cursorEmitSeq = 1000;
+function emitCursor(client: MockClient, stream: string, user_id: string, seq: number): void {
+  const env = JSON.stringify({ kind: "cursor", seq });
+  client.emit("event", {
+    stream,
+    id: `cursor-${_cursorEmitSeq}`,
+    seq: _cursorEmitSeq++,
+    sender: user_id,
+    body: env,
+    sent_at: Date.now(),
+  });
+}
+
+/** Extract published cursor envelopes from a MockClient's publishCalls. */
+function cursorPublishes(client: MockClient): Array<{ stream: string; seq: number }> {
+  const out: Array<{ stream: string; seq: number }> = [];
+  for (const call of client.publishCalls) {
+    if (typeof call.body !== "string") continue;
+    if (!call.body.startsWith("{") || !call.body.includes('"cursor"')) continue;
+    try {
+      const env = JSON.parse(call.body);
+      if (env.kind === "cursor") out.push({ stream: call.stream, seq: env.seq });
+    } catch { /* not an envelope */ }
+  }
+  return out;
+}
+
 // ── Lifecycle ──────────────────────────────────────────────────────
 
 await test("attach registers event listeners", async () => {
@@ -292,69 +321,187 @@ await test("event.new updates unread and bumps latestSeq", async () => {
   core.destroy();
 });
 
-await test("event.edited updates message body", async () => {
-  const { client, chatClient, core } = makeCore();
+// Edit / delete / reaction handling now flows through the envelope
+// dispatcher (see the "envelope:" block below). Legacy tests that emitted
+// dedicated "event.edited" / "event.deleted" / "reaction.changed" frames
+// were removed — those server-to-client events no longer exist.
+
+// ── Envelope dispatch (pure-transport chat ops) ────────────────────
+
+await test("envelope: message envelope unwraps text into Message.body", async () => {
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
 
-  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "orig", sent_at: 1 });
-  client.emit("event.edited", { stream: "s1", id: "e1", seq: 1, body: "edited", edited_at: 99 });
+  const env = JSON.stringify({ kind: "message", text: "hello" });
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: env, sent_at: 1 });
 
-  assert(core.getMessages("s1")[0].body === "edited", "body edited");
-  assert(core.getMessages("s1")[0].editedAt === 99, "editedAt set");
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "1 message");
+  assert(msgs[0].body === "hello", `body should be unwrapped text, got ${msgs[0].body}`);
   core.destroy();
 });
 
-await test("event.deleted marks message as deleted", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("envelope: plain (non-JSON) body is treated as message text", async () => {
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
 
-  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "content", sent_at: 1 });
-  client.emit("event.deleted", { stream: "s1", id: "e1", seq: 1 });
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "raw text", sent_at: 1 });
 
-  assert(core.getMessages("s1")[0].deleted === true, "deleted");
-  assert(core.getMessages("s1")[0].body === "", "body cleared");
+  assert(core.getMessages("s1").length === 1, "1 message");
+  assert(core.getMessages("s1")[0].body === "raw text", "raw body preserved");
   core.destroy();
 });
 
-await test("edit/delete for unknown event id is harmless", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("envelope: reaction envelope mutates target message reactions", async () => {
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
 
-  client.emit("event.edited", { stream: "s1", id: "nope", seq: 1, body: "x", edited_at: 1 });
-  client.emit("event.deleted", { stream: "s1", id: "nope", seq: 1 });
-  // no throw
+  // Seed a message
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  // Reaction add via envelope (delivered as a normal event from "bob")
+  const env = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "bob", body: env, sent_at: 2 });
+
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "reaction did not append a message — still 1");
+  const r = msgs[0].reactions;
+  assert(r.get("🔥")?.has("bob") === true, "bob's reaction recorded");
+
+  // Reaction remove via envelope
+  const envRemove = JSON.stringify({ kind: "reaction", targetId: "e1", op: "remove", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "e3", seq: 3, sender: "bob", body: envRemove, sent_at: 3 });
+
+  assert(msgs[0].reactions.get("🔥") === undefined, "reaction removed");
   core.destroy();
 });
 
-// ── Reactions ──────────────────────────────────────────────────────
-
-await test("reaction.changed adds and removes reactions on messages", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("envelope: edit envelope updates target message body and editedAt", async () => {
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
 
-  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "x", sent_at: 1 });
-  client.emit("reaction.changed", { stream: "s1", event_id: "e1", emoji: "🔥", user_id: "bob", action: "add" });
-  client.emit("reaction.changed", { stream: "s1", event_id: "e1", emoji: "🔥", user_id: "alice", action: "add" });
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "orig", sent_at: 1 });
 
-  let r = core.getMessages("s1")[0].reactions;
-  assert(r.get("🔥")!.size === 2, "2 users");
+  const env = JSON.stringify({ kind: "edit", targetId: "e1", text: "edited" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "alice", body: env, sent_at: 99 });
 
-  client.emit("reaction.changed", { stream: "s1", event_id: "e1", emoji: "🔥", user_id: "bob", action: "remove" });
-  r = core.getMessages("s1")[0].reactions;
-  assert(r.get("🔥")!.size === 1, "1 user after remove");
-  assert(!r.get("🔥")!.has("bob"), "bob removed");
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "edit did not append a message");
+  assert(msgs[0].body === "edited", `body should be edited, got ${msgs[0].body}`);
+  assert(msgs[0].editedAt === 99, "editedAt set from envelope event sent_at");
   core.destroy();
 });
 
-await test("reaction for unknown event is harmless", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("envelope: delete envelope tombstones target message", async () => {
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
-  client.emit("reaction.changed", { stream: "s1", event_id: "nope", emoji: "x", user_id: "u", action: "add" });
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "secret", sent_at: 1 });
+
+  const env = JSON.stringify({ kind: "delete", targetId: "e1" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "alice", body: env, sent_at: 2 });
+
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 1, "delete did not append a message");
+  assert(msgs[0].deleted === true, "marked deleted");
+  assert(msgs[0].body === "", "body cleared");
+  core.destroy();
+});
+
+await test("envelope: cursor envelope advances remote cursor and flips read", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  // My message
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  // Bob's cursor envelope past my message
+  const env = JSON.stringify({ kind: "cursor", seq });
+  client.emit("event", { stream: "s1", id: "c1", seq: seq + 1, sender: "bob", body: env, sent_at: 100 });
+
+  assert(core.getRemoteCursors("s1").get("bob") === seq, "bob's cursor recorded");
+  assert(core.getMessages("s1")[0].status === "read", "my message flipped to read");
+  core.destroy();
+});
+
+await test("envelope: own cursor envelope is ignored", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  await core.send("s1", "hello");
+  const seq = core.getMessages("s1")[0].seq;
+
+  const env = JSON.stringify({ kind: "cursor", seq });
+  client.emit("event", { stream: "s1", id: "c1", seq: seq + 1, sender: "me", body: env, sent_at: 100 });
+
+  assert(core.getMessages("s1")[0].status === "sent", "own cursor envelope ignored");
+  assert(core.getRemoteCursors("s1").size === 0, "no remote cursor recorded for self");
+  core.destroy();
+});
+
+await test("envelope: middleware sees synthesized typed events for non-message envelopes", async () => {
+  const seen: string[] = [];
+  const { client, core } = makeCore({}, {
+    middleware: [(event, next) => { seen.push(event.type); next(); }],
+  });
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+  const reactionEnv = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "👍" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "bob", body: reactionEnv, sent_at: 2 });
+  const editEnv = JSON.stringify({ kind: "edit", targetId: "e1", text: "edited" });
+  client.emit("event", { stream: "s1", id: "e3", seq: 3, sender: "alice", body: editEnv, sent_at: 3 });
+  const deleteEnv = JSON.stringify({ kind: "delete", targetId: "e1" });
+  client.emit("event", { stream: "s1", id: "e4", seq: 4, sender: "alice", body: deleteEnv, sent_at: 4 });
+  const cursorEnv = JSON.stringify({ kind: "cursor", seq: 4 });
+  client.emit("event", { stream: "s1", id: "e5", seq: 5, sender: "bob", body: cursorEnv, sent_at: 5 });
+
+  assert(seen[0] === "event", `expected event, got ${seen[0]}`);
+  assert(seen[1] === "reaction.changed", `expected reaction.changed, got ${seen[1]}`);
+  assert(seen[2] === "event.edited", `expected event.edited, got ${seen[2]}`);
+  assert(seen[3] === "event.deleted", `expected event.deleted, got ${seen[3]}`);
+  assert(seen[4] === "cursor", `expected cursor, got ${seen[4]}`);
+  core.destroy();
+});
+
+await test("envelope: malformed JSON body is treated as plain message text", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "{not json", sent_at: 1 });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "a", body: '{"kind":"unknown","x":1}', sent_at: 2 });
+
+  // Both fall through to message handling
+  const msgs = core.getMessages("s1");
+  assert(msgs.length === 2, "both treated as messages");
+  core.destroy();
+});
+
+await test("envelope: listen-only stream notifies but does not mutate message store", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.listen("inbox");
+
+  let count = 0;
+  core.subscribe("event:inbox", () => { count++; });
+
+  // Pre-state cannot have a message because listen() doesn't store messages,
+  // so a reaction has no target — but the dispatcher should still notify.
+  const env = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "👍" });
+  client.emit("event", { stream: "inbox", id: "e2", seq: 2, sender: "bob", body: env, sent_at: 2 });
+
+  assert(count === 1, "event: slice notified for envelope on listen-only stream");
+  assert(core.getMessages("inbox").length === 0, "no messages stored");
   core.destroy();
 });
 
@@ -582,57 +729,177 @@ await test("multiple concurrent sends produce correct order after reconcile", as
   core.destroy();
 });
 
-// ── Actions delegate to client ─────────────────────────────────────
+// ── Edit / delete via envelope publish ─────────────────────────────
 
-await test("edit delegates to client.editEvent", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("edit publishes envelope and applies optimistic", async () => {
+  const { client, core } = makeCore();
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "orig", sent_at: 1 });
+
   await core.edit("s1", "e1", "new body");
-  // Just verifies it doesn't throw; client mock accepts it
+
+  // Optimistic visible immediately
+  assert(core.getMessages("s1")[0].body === "new body", "optimistic body applied");
+  assert(typeof core.getMessages("s1")[0].editedAt === "number", "editedAt set");
+
+  // Envelope published, not legacy chat.editEvent
+  const editPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"edit"'));
+  assert(editPublish !== undefined, "edit envelope published");
+  const env = JSON.parse(editPublish!.body);
+  assert(env.kind === "edit" && env.targetId === "e1" && env.text === "new body", "envelope shape");
   core.destroy();
 });
 
-await test("edit propagates client error", async () => {
-  const { core } = makeCore({ editError: new Error("forbidden") });
+await test("edit rolls back on publish failure", async () => {
+  const { client, core } = makeCore({ publishError: new Error("forbidden") });
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "orig", sent_at: 1 });
+
   let threw = false;
   try { await core.edit("s1", "e1", "x"); } catch { threw = true; }
-  assert(threw, "should throw");
+  assert(threw, "edit threw");
+  // Rolled back
+  assert(core.getMessages("s1")[0].body === "orig", "body reverted");
+  assert(core.getMessages("s1")[0].editedAt === undefined, "editedAt reverted");
   core.destroy();
 });
 
-await test("deleteEvent delegates to client", async () => {
-  const { client, chatClient, core } = makeCore();
+await test("deleteEvent publishes envelope and applies optimistic", async () => {
+  const { client, core } = makeCore();
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "secret", sent_at: 1 });
+
   await core.deleteEvent("s1", "e1");
+
+  assert(core.getMessages("s1")[0].deleted === true, "optimistic delete applied");
+  assert(core.getMessages("s1")[0].body === "", "body cleared");
+
+  const delPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"delete"'));
+  assert(delPublish !== undefined, "delete envelope published");
+  const env = JSON.parse(delPublish!.body);
+  assert(env.kind === "delete" && env.targetId === "e1", "envelope shape");
   core.destroy();
 });
 
-await test("deleteEvent propagates client error", async () => {
-  const { core } = makeCore({ deleteError: new Error("forbidden") });
+await test("deleteEvent rolls back on publish failure", async () => {
+  const { client, core } = makeCore({ publishError: new Error("forbidden") });
   core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "secret", sent_at: 1 });
+
   let threw = false;
   try { await core.deleteEvent("s1", "e1"); } catch { threw = true; }
-  assert(threw, "should throw");
+  assert(threw, "delete threw");
+  assert(core.getMessages("s1")[0].deleted === false, "delete reverted");
+  assert(core.getMessages("s1")[0].body === "secret", "body restored");
   core.destroy();
 });
 
-await test("addReaction delegates to client", async () => {
+await test("addReaction publishes envelope and applies optimistic", async () => {
   const { client, chatClient, core } = makeCore();
   core.attach();
-  core.addReaction("s1", "e1", "🔥");
-  assert(chatClient.reactionCalls.length === 1, "1 call");
-  assert(chatClient.reactionCalls[0].type === "add", "add");
-  assert(chatClient.reactionCalls[0].emoji === "🔥", "emoji");
+  await core.joinStream("s1");
+
+  // Seed a target message
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  await core.addReaction("s1", "e1", "🔥");
+
+  // Optimistic mutation visible immediately
+  const msgs = core.getMessages("s1");
+  assert(msgs[0].reactions.get("🔥")?.has("me") === true, "optimistic reaction applied");
+
+  // Envelope was published, not the legacy chat.addReaction frame
+  assert(chatClient.reactionCalls.length === 0, "legacy chat.addReaction NOT called");
+  // First publish was the seeded message via emit, not via publish; check the new one
+  const reactionPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"reaction"'));
+  assert(reactionPublish !== undefined, "reaction envelope published");
+  const env = JSON.parse(reactionPublish!.body);
+  assert(env.kind === "reaction", "kind");
+  assert(env.targetId === "e1", "targetId");
+  assert(env.op === "add", "op");
+  assert(env.emoji === "🔥", "emoji");
   core.destroy();
 });
 
-await test("removeReaction delegates to client", async () => {
+await test("removeReaction publishes envelope and applies optimistic", async () => {
   const { client, chatClient, core } = makeCore();
   core.attach();
-  core.removeReaction("s1", "e1", "🔥");
-  assert(chatClient.reactionCalls.length === 1, "1 call");
-  assert(chatClient.reactionCalls[0].type === "remove", "remove");
+  await core.joinStream("s1");
+
+  // Seed message + an existing reaction from "me" (via envelope)
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+  const seedEnv = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "rx-seed", seq: 2, sender: "me", body: seedEnv, sent_at: 2 });
+
+  await core.removeReaction("s1", "e1", "🔥");
+
+  // Optimistic removal: empty reactions for that emoji means the emoji entry is gone
+  assert(core.getMessages("s1")[0].reactions.get("🔥") === undefined, "optimistic remove applied");
+
+  assert(chatClient.reactionCalls.length === 0, "legacy chat.removeReaction NOT called");
+  const reactionPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"reaction"'));
+  const env = JSON.parse(reactionPublish!.body);
+  assert(env.op === "remove", "op");
+  core.destroy();
+});
+
+await test("addReaction rolls back optimistic on publish failure", async () => {
+  const { client, chatClient, core } = makeCore({ publishError: new Error("boom") });
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  let threw = false;
+  try { await core.addReaction("s1", "e1", "🔥"); } catch { threw = true; }
+  assert(threw, "addReaction threw");
+
+  // Optimistic was rolled back — no reaction on the message
+  assert(core.getMessages("s1")[0].reactions.get("🔥") === undefined, "optimistic rolled back");
+  core.destroy();
+});
+
+await test("removeReaction rolls back optimistic on publish failure", async () => {
+  // Seed the reaction with a non-erroring core, then swap in an erroring client
+  // isn't ergonomic — instead seed via direct store mutation through the SDK
+  // and then have publishError fire when removeReaction tries to publish.
+  const { client, chatClient, core } = makeCore({ publishError: new Error("boom") });
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+  // Seed "me" reaction via an envelope emission (receive path, no publish)
+  const seedEnv = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "rx-seed", seq: 2, sender: "me", body: seedEnv, sent_at: 2 });
+
+  let threw = false;
+  try { await core.removeReaction("s1", "e1", "🔥"); } catch { threw = true; }
+  assert(threw, "removeReaction threw");
+
+  // Rollback: reaction restored
+  assert(core.getMessages("s1")[0].reactions.get("🔥")?.has("me") === true, "reaction restored");
+  core.destroy();
+});
+
+await test("addReaction echo is idempotent (server fanout = no-op)", async () => {
+  const { client, core } = makeCore();
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "hi", sent_at: 1 });
+
+  await core.addReaction("s1", "e1", "🔥");
+  // Simulate the server's envelope echo
+  const env = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "rx1", seq: 2, sender: "me", body: env, sent_at: 2 });
+
+  // Still exactly one user in the set (Set dedupe)
+  assert(core.getMessages("s1")[0].reactions.get("🔥")?.size === 1, "no double-count from echo");
   core.destroy();
 });
 
@@ -649,7 +916,7 @@ await test("startTyping and stopTyping delegate to client", async () => {
 // ── Scroll coordination ────────────────────────────────────────────
 
 await test("at live edge auto-marks read on new events", async () => {
-  const { client, chatClient, core } = makeCore();
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
   core.setAtLiveEdge("s1", true);
@@ -657,8 +924,9 @@ await test("at live edge auto-marks read on new events", async () => {
   client.emit("event", { stream: "s1", id: "e1", seq: 5, sender: "a", body: "x", sent_at: 1 });
 
   assert(core.getUnreadCount("s1") === 0, "0 unread");
-  assert(chatClient.cursorCalls.length === 1, "cursor sent");
-  assert(chatClient.cursorCalls[0].seq === 5, "cursor at seq 5");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, "cursor envelope published");
+  assert(cp[0].seq === 5, "cursor at seq 5");
   core.destroy();
 });
 
@@ -678,7 +946,7 @@ await test("not at live edge increments pending count", async () => {
 });
 
 await test("returning to live edge resets pending and marks read", async () => {
-  const { client, chatClient, core } = makeCore();
+  const { client, core } = makeCore();
   core.attach();
   await core.joinStream("s1");
   core.setAtLiveEdge("s1", false);
@@ -688,8 +956,9 @@ await test("returning to live edge resets pending and marks read", async () => {
   core.setAtLiveEdge("s1", true);
 
   assert(core.getScrollState("s1").pendingCount === 0, "pending reset");
-  assert(chatClient.cursorCalls.length === 1, "cursor sent on edge return");
-  assert(chatClient.cursorCalls[0].seq === 3, "cursor at latest seq");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, "cursor envelope published on edge return");
+  assert(cp[0].seq === 3, "cursor at latest seq");
   core.destroy();
 });
 
@@ -858,7 +1127,7 @@ await test("getLivenessState returns active when no liveness configured", async 
 // ── scrollIdleMs debounce ──────────────────────────────────────────
 
 await test("scrollIdleMs debounce: cursor not sent immediately", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 100 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 100 });
   core.attach();
   await core.joinStream("s1");
 
@@ -866,47 +1135,48 @@ await test("scrollIdleMs debounce: cursor not sent immediately", async () => {
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
 
   // Cursor should NOT have been sent yet (debounce pending)
-  assert(chatClient.cursorCalls.length === 0, "no cursor sent yet");
+  assert(cursorPublishes(client).length === 0, "no cursor envelope yet");
 
   core.destroy();
 });
 
 await test("scrollIdleMs debounce: cursor sent after delay", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 50 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 50 });
   core.attach();
   await core.joinStream("s1");
 
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
-  assert(chatClient.cursorCalls.length === 0, "not sent immediately");
+  assert(cursorPublishes(client).length === 0, "not sent immediately");
 
   // Wait for debounce
   await new Promise((r) => setTimeout(r, 80));
-  assert(chatClient.cursorCalls.length === 1, "cursor sent after delay");
-  assert(chatClient.cursorCalls[0].seq === 1, "correct seq");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, "cursor envelope sent after delay");
+  assert(cp[0].seq === 1, "correct seq");
 
   core.destroy();
 });
 
 await test("scrollIdleMs debounce: scroll away cancels pending cursor", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 100 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 100 });
   core.attach();
   await core.joinStream("s1");
 
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
-  assert(chatClient.cursorCalls.length === 0, "not sent yet");
+  assert(cursorPublishes(client).length === 0, "not sent yet");
 
   // Scroll away from live edge — should cancel the pending timer
   core.setAtLiveEdge("s1", false);
 
   // Wait longer than the debounce
   await new Promise((r) => setTimeout(r, 150));
-  assert(chatClient.cursorCalls.length === 0, "cursor never sent after scroll-away");
+  assert(cursorPublishes(client).length === 0, "cursor never sent after scroll-away");
 
   core.destroy();
 });
 
 await test("scrollIdleMs debounce: rapid events coalesce into one cursor update", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 50 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 50 });
   core.attach();
   await core.joinStream("s1");
 
@@ -917,20 +1187,20 @@ await test("scrollIdleMs debounce: rapid events coalesce into one cursor update"
 
   // Wait for debounce
   await new Promise((r) => setTimeout(r, 80));
-  // Should send only one cursor update for the latest seq
-  assert(chatClient.cursorCalls.length === 1, `expected 1 cursor call, got ${chatClient.cursorCalls.length}`);
-  assert(chatClient.cursorCalls[0].seq === 5, "cursor sent for latest seq");
+  const cp = cursorPublishes(client);
+  assert(cp.length === 1, `expected 1 cursor envelope, got ${cp.length}`);
+  assert(cp[0].seq === 5, "cursor sent for latest seq");
 
   core.destroy();
 });
 
 await test("scrollIdleMs: 0 fires cursor immediately (no debounce)", async () => {
-  const { client, chatClient, core } = makeCore(undefined, { scrollIdleMs: 0 });
+  const { client, core } = makeCore(undefined, { scrollIdleMs: 0 });
   core.attach();
   await core.joinStream("s1");
 
   client.emit("event", { id: "e1", seq: 1, stream: "s1", sender: "bob", body: "hi", sent_at: 1, meta: null });
-  assert(chatClient.cursorCalls.length === 1, "cursor sent immediately");
+  assert(cursorPublishes(client).length === 1, "cursor envelope sent immediately");
 
   core.destroy();
 });
@@ -1184,21 +1454,27 @@ await test("middleware: receives correct ChatEvent type for each handler", async
   core.attach();
   await core.joinStream("s1");
 
+  // event + all four envelope-dispatched synthesized shapes
   client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "a", body: "x", sent_at: 1 });
-  client.emit("event.edited", { stream: "s1", id: "e1", seq: 1, body: "edited", edited_at: 2 });
-  client.emit("event.deleted", { stream: "s1", id: "e1", seq: 1 });
-  client.emit("reaction.changed", { stream: "s1", event_id: "e1", emoji: "🔥", user_id: "a", action: "add" });
+  const editEnv = JSON.stringify({ kind: "edit", targetId: "e1", text: "edited" });
+  client.emit("event", { stream: "s1", id: "e2", seq: 2, sender: "a", body: editEnv, sent_at: 2 });
+  const delEnv = JSON.stringify({ kind: "delete", targetId: "e1" });
+  client.emit("event", { stream: "s1", id: "e3", seq: 3, sender: "a", body: delEnv, sent_at: 3 });
+  const reactEnv = JSON.stringify({ kind: "reaction", targetId: "e1", op: "add", emoji: "🔥" });
+  client.emit("event", { stream: "s1", id: "e4", seq: 4, sender: "a", body: reactEnv, sent_at: 4 });
+  const cursorEnv = JSON.stringify({ kind: "cursor", seq: 1 });
+  client.emit("event", { stream: "s1", id: "e5", seq: 5, sender: "alice", body: cursorEnv, sent_at: 5 });
+  // Natively-delivered events
   client.emit("typing", { stream: "s1", user_id: "alice", active: true });
   client.emit("member.joined", { stream: "s1", user_id: "bob", role: "member" });
   client.emit("member.left", { stream: "s1", user_id: "bob", role: "member" });
-  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 1 });
   client.emit("presence", { user_id: "alice", presence: "away" });
   client.emit("event.received", { stream: "s1", event: "custom", sender: "alice" });
   client.emit("event.delivered", { stream: "s1", user_id: "bob", seq: 1 });
 
   const expected = [
-    "event", "event.edited", "event.deleted", "reaction.changed",
-    "typing", "member.joined", "member.left", "cursor", "presence", "ephemeral", "event.delivered",
+    "event", "event.edited", "event.deleted", "reaction.changed", "cursor",
+    "typing", "member.joined", "member.left", "presence", "ephemeral", "event.delivered",
   ];
   assert(types.length === expected.length, `got ${types.length} events, expected ${expected.length}`);
   for (let i = 0; i < expected.length; i++) {
@@ -1287,8 +1563,8 @@ await test("delivered → read: cursor advances past delivered message", async (
   client.emit("event.delivered", { stream: "s1", user_id: "bob", seq });
   assert(core.getMessages("s1")[0].status === "delivered", "now delivered");
 
-  // Then: read (cursor advance)
-  client.emit("cursor", { stream: "s1", user_id: "bob", seq });
+  // Then: read (cursor advance via envelope)
+  emitCursor(client, "s1", "bob", seq);
   assert(core.getMessages("s1")[0].status === "read", "now read");
   core.destroy();
 });
@@ -1321,7 +1597,7 @@ await test("remote cursor flips self-sent message to read", async () => {
   assert(msgs[0].status === "sent", "initially sent");
 
   // Remote user advances cursor past our message's seq
-  client.emit("cursor", { stream: "s1", user_id: "bob", seq: msgs[0].seq });
+  emitCursor(client, "s1", "bob", msgs[0].seq);
 
   const after = core.getMessages("s1");
   assert(after[0].status === "read", `expected read, got ${after[0].status}`);
@@ -1337,7 +1613,7 @@ await test("own cursor does not trigger read status change", async () => {
   const seq = core.getMessages("s1")[0].seq;
 
   // Own cursor — should not flip to read
-  client.emit("cursor", { stream: "s1", user_id: "me", seq });
+  emitCursor(client, "s1", "me", seq);
 
   assert(core.getMessages("s1")[0].status === "sent", "still sent — own cursor ignored");
   core.destroy();
@@ -1352,7 +1628,7 @@ await test("cursor behind message seq does not trigger read", async () => {
   const seq = core.getMessages("s1")[0].seq;
 
   // Remote cursor at seq - 1 — should not flip
-  client.emit("cursor", { stream: "s1", user_id: "bob", seq: seq - 1 });
+  emitCursor(client, "s1", "bob", seq - 1);
 
   assert(core.getMessages("s1")[0].status === "sent", "still sent — cursor behind");
   core.destroy();
@@ -1367,7 +1643,7 @@ await test("remote cursor does not flip other users' messages to read", async ()
   client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "alice", body: "from alice", sent_at: 1 });
 
   // Remote cursor past it
-  client.emit("cursor", { stream: "s1", user_id: "bob", seq: 5 });
+  emitCursor(client, "s1", "bob", 5);
 
   assert(core.getMessages("s1")[0].status === "sent", "other user's message stays sent");
   core.destroy();
@@ -1378,8 +1654,8 @@ await test("getRemoteCursors returns remote cursor positions", async () => {
   core.attach();
   await core.joinStream("s1");
 
-  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 5 });
-  client.emit("cursor", { stream: "s1", user_id: "bob", seq: 10 });
+  emitCursor(client, "s1", "alice", 5);
+  emitCursor(client, "s1", "bob", 10);
 
   const cursors = core.getRemoteCursors("s1");
   assert(cursors.get("alice") === 5, "alice at 5");
@@ -1392,8 +1668,8 @@ await test("remote cursor MAX semantics — does not go backward", async () => {
   core.attach();
   await core.joinStream("s1");
 
-  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 10 });
-  client.emit("cursor", { stream: "s1", user_id: "alice", seq: 5 });
+  emitCursor(client, "s1", "alice", 10);
+  emitCursor(client, "s1", "alice", 5);
 
   assert(core.getRemoteCursors("s1").get("alice") === 10, "stays at 10");
   core.destroy();
@@ -1540,7 +1816,7 @@ await test("listen-only cursor events are skipped", async () => {
   core.attach();
   await core.listen("inbox");
 
-  client.emit("cursor", { stream: "inbox", user_id: "alice", seq: 5 });
+  emitCursor(client, "inbox", "alice", 5);
   assert(core.getRemoteCursors("inbox").size === 0, "no remote cursors for listen-only");
   core.destroy();
 });
@@ -1696,15 +1972,19 @@ await test("writer.edit: routes through app, bypasses chat.editEvent", async () 
   core.destroy();
 });
 
-await test("writer.edit: omitted slot falls back to Herald chat.editEvent", async () => {
-  // editError configured; without a writer.edit, ChatCore should surface it
-  // from chat.editEvent (proving it went through the Herald path).
-  const { core } = makeCore({ editError: new Error("chat editEvent called") });
+await test("writer.edit: omitted slot falls back to Herald publish path", async () => {
+  // publishError configured; without a writer.edit, ChatCore should surface
+  // the publish error from the envelope path.
+  const { client, core } = makeCore({ publishError: new Error("publish failed") });
+  core.attach();
+  await core.joinStream("s1");
+  client.emit("event", { stream: "s1", id: "e1", seq: 1, sender: "me", body: "before", sent_at: 1 });
+
   let threw = false;
   try { await core.edit("s1", "e1", "x"); } catch (e) {
-    threw = (e as Error).message === "chat editEvent called";
+    threw = (e as Error).message === "publish failed";
   }
-  assert(threw, "edit fell through to chat.editEvent when writer.edit absent");
+  assert(threw, "edit fell through to envelope publish when writer.edit absent");
   core.destroy();
 });
 
@@ -1793,15 +2073,15 @@ await test("writer.updateCursor: routes through app, bypasses chat.updateCursor"
 
   assert(cursorCalls.length >= 1, `writer.updateCursor called (got ${cursorCalls.length})`);
   assert(chatClient.cursorCalls.length === 0, "chat.updateCursor NOT called");
+  assert(cursorPublishes(client).length === 0, "no cursor envelope published when writer slot is set");
   core.destroy();
 });
 
 await test("writer: partial writer only overrides provided slots", async () => {
   // Writer provides send only; edit/delete/reaction/cursor should still
-  // use the Herald defaults. Verifying edit falls through by configuring
-  // editError on the chat mock — if writer.edit had been called, no throw.
+  // use the Herald defaults (publish envelope on client.publish).
   const client = new MockClient();
-  const chatClient = new MockChatClient({ editError: new Error("chat edit called") });
+  const chatClient = new MockChatClient();
   const sendCalls: Array<{ localId: string }> = [];
   const writer = {
     send: async (d: { localId: string }) => {
@@ -1820,11 +2100,14 @@ await test("writer: partial writer only overrides provided slots", async () => {
   await core.send("s1", "hello");
   assert(sendCalls.length === 1, "writer.send used");
 
-  let editThrew = false;
-  try { await core.edit("s1", "e1", "x"); } catch (e) {
-    editThrew = (e as Error).message === "chat edit called";
-  }
-  assert(editThrew, "edit fell through to chat path");
+  // Seed a target so applyEditOptimistic has a message to mutate.
+  client.emit("event", { stream: "s1", id: "e1", seq: 99, sender: "me", body: "before", sent_at: 1 });
+  await core.edit("s1", "e1", "after");
+
+  // edit fell through to the Herald publish path (envelope), not to writer.edit
+  const editPublish = client.publishCalls.find((c) =>
+    typeof c.body === "string" && c.body.includes('"edit"'));
+  assert(editPublish !== undefined, "edit envelope published when writer.edit absent");
   core.destroy();
 });
 

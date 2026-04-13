@@ -110,11 +110,9 @@ jobs:
             'members.add': ('post', '/streams/{id}/members'), 'members.list': ('get', '/streams/{id}/members'),
             'members.update': ('patch', '/streams/{id}/members/{user_id}'), 'members.remove': ('delete', '/streams/{id}/members/{user_id}'),
             'events.publish': ('post', '/streams/{id}/events'), 'events.list': ('get', '/streams/{id}/events'),
-            'events.edit': ('patch', '/streams/{id}/events/{event_id}'), 'events.delete': ('delete', '/streams/{id}/events/{event_id}'),
-            'events.getReactions': ('get', '/streams/{id}/events/{event_id}/reactions'), 'events.trigger': ('post', '/streams/{id}/trigger'),
+            'events.trigger': ('post', '/streams/{id}/trigger'),
             'presence.getUser': ('get', '/presence/{user_id}'), 'presence.getStream': ('get', '/streams/{id}/presence'),
             'presence.getBulk': ('get', '/presence'), 'presence.setOverride': ('post', '/presence/{user_id}'),
-            'presence.getCursors': ('get', '/streams/{id}/cursors'),
             'blocks.block': ('post', '/blocks'), 'blocks.unblock': ('delete', '/blocks'), 'blocks.list': ('get', '/blocks/{user_id}'),
           }
           ops = set()

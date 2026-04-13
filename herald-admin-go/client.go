@@ -229,33 +229,6 @@ func (ns *EventNamespace) Publish(ctx context.Context, streamID, sender, body st
 	return &result, nil
 }
 
-// Delete is a chat-specific operation — event deletion.
-func (ns *EventNamespace) Delete(ctx context.Context, streamID, eventID string) error {
-	_, err := ns.t.request(ctx, "DELETE", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID), nil)
-	return err
-}
-
-// Edit is a chat-specific operation — event editing.
-func (ns *EventNamespace) Edit(ctx context.Context, streamID, eventID, body string) error {
-	_, err := ns.t.request(ctx, "PATCH", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID), map[string]string{"body": body})
-	return err
-}
-
-// GetReactions is a chat-specific operation — reaction queries.
-func (ns *EventNamespace) GetReactions(ctx context.Context, streamID, eventID string) ([]ReactionSummary, error) {
-	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(streamID)+"/events/"+url.PathEscape(eventID)+"/reactions", nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		Reactions []ReactionSummary `json:"reactions"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Reactions, nil
-}
-
 func (ns *EventNamespace) Trigger(ctx context.Context, streamID, event string, data any, excludeConnection *uint64) error {
 	body := map[string]any{"event": event}
 	if data != nil {
@@ -335,20 +308,6 @@ func (ns *PresenceNamespace) GetStream(ctx context.Context, streamID string) ([]
 		return nil, err
 	}
 	return resp.Members, nil
-}
-
-func (ns *PresenceNamespace) GetCursors(ctx context.Context, streamID string) ([]Cursor, error) {
-	data, err := ns.t.request(ctx, "GET", "/streams/"+url.PathEscape(streamID)+"/cursors", nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		Cursors []Cursor `json:"cursors"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Cursors, nil
 }
 
 func (ns *PresenceNamespace) GetBulk(ctx context.Context, userIDs []string) ([]UserPresence, error) {

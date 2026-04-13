@@ -22,12 +22,6 @@ class PresenceNamespace
         return $data['members'];
     }
 
-    public function getCursors(string $streamId): array
-    {
-        $data = $this->t->request('GET', '/streams/' . rawurlencode($streamId) . '/cursors');
-        return $data['cursors'];
-    }
-
     public function getBulk(array $userIds): array
     {
         $ids = implode(',', array_map('urlencode', $userIds));

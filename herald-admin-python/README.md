@@ -34,7 +34,6 @@ history = admin.events.list("general", limit=50)
 # Presence
 presence = admin.presence.get_user("alice")
 stream_presence = admin.presence.get_stream("general")
-cursors = admin.presence.get_cursors("general")
 
 # Health
 health = admin.health()

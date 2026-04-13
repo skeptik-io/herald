@@ -367,6 +367,73 @@ test("duplicate add is idempotent", () => {
   assert(store.getMessages("s1")[0].reactions.get("👍")!.size === 1, "still 1 user");
 });
 
+// ── Optimistic edit/delete helpers ─────────────────────────────────
+
+test("applyEditOptimistic mutates body, sets editedAt, returns previous", () => {
+  const { store } = makeStore();
+  store.appendEvent(makeEvent({ id: "e1", seq: 1, stream: "s1", body: "orig" }));
+  const before = Date.now();
+  const prev = store.applyEditOptimistic("s1", "e1", "new");
+  assert(prev !== null, "returned previous snapshot");
+  assert(prev!.previousBody === "orig", "captured previous body");
+  assert(prev!.previousEditedAt === undefined, "no previous editedAt");
+
+  const m = store.getMessages("s1")[0];
+  assert(m.body === "new", "body mutated");
+  assert(typeof m.editedAt === "number" && m.editedAt >= before, "editedAt set to current time");
+});
+
+test("applyEditOptimistic returns null for unknown event", () => {
+  const { store } = makeStore();
+  const prev = store.applyEditOptimistic("s1", "nope", "x");
+  assert(prev === null, "null for missing target");
+});
+
+test("applyEditOptimistic returns null for already-deleted message", () => {
+  const { store } = makeStore();
+  store.appendEvent(makeEvent({ id: "e1", seq: 1, stream: "s1" }));
+  store.applyDelete({ stream: "s1", id: "e1", seq: 1 });
+  const prev = store.applyEditOptimistic("s1", "e1", "x");
+  assert(prev === null, "null for deleted target");
+});
+
+test("revertEdit restores body and editedAt", () => {
+  const { store } = makeStore();
+  store.appendEvent(makeEvent({ id: "e1", seq: 1, stream: "s1", body: "orig", edited_at: 42 }));
+  const prev = store.applyEditOptimistic("s1", "e1", "new")!;
+  store.revertEdit("s1", "e1", prev.previousBody, prev.previousEditedAt);
+  const m = store.getMessages("s1")[0];
+  assert(m.body === "orig", "body restored");
+  assert(m.editedAt === 42, "editedAt restored");
+});
+
+test("applyDeleteOptimistic tombstones, returns previous body+deleted state", () => {
+  const { store } = makeStore();
+  store.appendEvent(makeEvent({ id: "e1", seq: 1, stream: "s1", body: "secret" }));
+  const prev = store.applyDeleteOptimistic("s1", "e1");
+  assert(prev !== null && prev!.previousBody === "secret" && prev!.previousDeleted === false, "previous captured");
+
+  const m = store.getMessages("s1")[0];
+  assert(m.deleted === true, "deleted");
+  assert(m.body === "", "body cleared");
+});
+
+test("applyDeleteOptimistic returns null for unknown event", () => {
+  const { store } = makeStore();
+  const prev = store.applyDeleteOptimistic("s1", "nope");
+  assert(prev === null, "null for missing target");
+});
+
+test("revertDelete restores body and deleted flag", () => {
+  const { store } = makeStore();
+  store.appendEvent(makeEvent({ id: "e1", seq: 1, stream: "s1", body: "secret" }));
+  const prev = store.applyDeleteOptimistic("s1", "e1")!;
+  store.revertDelete("s1", "e1", prev.previousBody, prev.previousDeleted);
+  const m = store.getMessages("s1")[0];
+  assert(m.deleted === false, "delete reverted");
+  assert(m.body === "secret", "body restored");
+});
+
 // ── Notifications ──────────────────────────────────────────────────
 
 test("each mutation fires notification for the stream", () => {

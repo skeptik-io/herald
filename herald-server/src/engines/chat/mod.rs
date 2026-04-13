@@ -8,7 +8,6 @@ use crate::engine::{EngineConnContext, HeraldEngine, TimerTask};
 use crate::state::AppState;
 
 pub mod http_blocks;
-pub mod http_events;
 pub mod ws_handler;
 
 pub struct ChatEngine;
@@ -32,15 +31,6 @@ impl HeraldEngine for ChatEngine {
 
     fn tenant_routes(&self, _state: Arc<AppState>) -> Option<Router<Arc<AppState>>> {
         let router = Router::new()
-            .route(
-                "/streams/{id}/events/{event_id}",
-                delete(http_events::delete_event).patch(http_events::edit_event),
-            )
-            .route(
-                "/streams/{id}/events/{event_id}/reactions",
-                get(http_events::get_reactions),
-            )
-            .route("/streams/{id}/cursors", get(http_events::list_cursors))
             .route("/blocks", post(http_blocks::block_user))
             .route("/blocks", delete(http_blocks::unblock_user))
             .route("/blocks/{user_id}", get(http_blocks::list_blocked));
@@ -111,7 +101,7 @@ impl HeraldEngine for ChatEngine {
     }
 
     fn namespaces(&self) -> Vec<&'static str> {
-        vec!["herald.reactions", "herald.blocks", "herald.cursors"]
+        vec!["herald.blocks"]
     }
 
     fn timers(&self) -> Vec<TimerTask> {

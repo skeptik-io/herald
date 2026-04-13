@@ -67,22 +67,6 @@ export interface EventNew {
   edited_at?: number;
 }
 
-export interface EventEdited {
-  stream: string;
-  id: string;
-  seq: number;
-  body: string;
-  edited_at: number;
-}
-
-export interface ReactionChanged {
-  stream: string;
-  event_id: string;
-  emoji: string;
-  user_id: string;
-  action: "add" | "remove";
-}
-
 export interface EventAck {
   id: string;
   seq: number;
@@ -100,12 +84,6 @@ export interface PresenceChanged {
   presence: string;
   /** ISO 8601 expiry for the override, if set (e.g. "Away until Monday 9am"). */
   until?: string;
-}
-
-export interface CursorMoved {
-  stream: string;
-  user_id: string;
-  seq: number;
 }
 
 export interface EventDelivered {
@@ -151,12 +129,6 @@ export interface StreamSubscriberCount {
   count: number;
 }
 
-export interface EventDeleted {
-  stream: string;
-  id: string;
-  seq: number;
-}
-
 // ---------------------------------------------------------------------------
 // Wire frame
 // ---------------------------------------------------------------------------
@@ -189,13 +161,9 @@ export interface CatchupError {
 
 export type HeraldEventMap = {
   event: EventNew;
-  "event.deleted": EventDeleted;
-  "event.edited": EventEdited;
-  "reaction.changed": ReactionChanged;
   "event.received": EventReceived;
   "event.delivered": EventDelivered;
   presence: PresenceChanged;
-  cursor: CursorMoved;
   "member.joined": MemberEvent;
   "member.left": MemberEvent;
   typing: TypingEvent;

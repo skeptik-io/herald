@@ -194,14 +194,6 @@ def execute_operation(client, op, inp) # rubocop:disable Metrics/CyclomaticCompl
                                                limit: inp["limit"], thread: inp["thread"])
     events = el.events.map { |e| struct_to_hash(e) }
     { "events" => events, "has_more" => el.has_more }
-  when "events.edit"
-    client.events.edit(inp["stream_id"], inp["event_id"], inp["body"])
-    nil
-  when "events.delete"
-    client.events.delete(inp["stream_id"], inp["event_id"])
-    nil
-  when "events.getReactions"
-    client.events.get_reactions(inp["stream_id"], inp["event_id"])
   when "events.trigger"
     client.events.trigger(inp["stream_id"], inp["event"], data: inp["data"])
     nil
@@ -211,8 +203,6 @@ def execute_operation(client, op, inp) # rubocop:disable Metrics/CyclomaticCompl
     { "user_id" => p.user_id, "status" => p.status, "connections" => p.connections }
   when "presence.getStream"
     client.presence.get_stream(inp["stream_id"]).map { |m| { "user_id" => m.user_id, "status" => m.status } }
-  when "presence.getCursors"
-    client.presence.get_cursors(inp["stream_id"]).map { |c| { "user_id" => c.user_id, "seq" => c.seq } }
   when "presence.getBulk"
     client.presence.get_bulk(inp["user_ids"])
   when "presence.setOverride"

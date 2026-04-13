@@ -14,7 +14,7 @@ services:
   # Uncomment and configure to enable encryption, search, authz, etc.
   #
   # shroudb-moat:
-  #   image: ghcr.io/nicklucas/shroudb-moat:latest
+  #   image: ghcr.io/shroudb/shroudb-moat:latest
   #   ports:
   #     - "8200:8200"
   #     - "8201:8201"

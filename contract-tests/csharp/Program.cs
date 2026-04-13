@@ -280,14 +280,6 @@ static async Task<object?> ExecuteOperation(HeraldAdmin client, string op, Dicti
             return JsonHelper.ToDict(ep!.Value);
         case "events.list":
             return await client.Events.ListAsync(S("stream_id"), NL("before"), NL("after"), NI("limit"), NS("thread"));
-        case "events.edit":
-            await client.Events.EditAsync(S("stream_id"), S("event_id"), S("body"));
-            return null;
-        case "events.delete":
-            await client.Events.DeleteAsync(S("stream_id"), S("event_id"));
-            return null;
-        case "events.getReactions":
-            return await client.Events.GetReactionsAsync(S("stream_id"), S("event_id"));
         case "events.trigger":
             await client.Events.TriggerAsync(S("stream_id"), S("event"), inp.GetValueOrDefault("data"));
             return null;
@@ -296,8 +288,6 @@ static async Task<object?> ExecuteOperation(HeraldAdmin client, string op, Dicti
             return await client.Presence.GetUserAsync(S("user_id"));
         case "presence.getStream":
             return await client.Presence.GetStreamAsync(S("stream_id"));
-        case "presence.getCursors":
-            return await client.Presence.GetCursorsAsync(S("stream_id"));
         case "presence.getBulk":
             var bulkIds = ((System.Collections.IList)inp["user_ids"]!).Cast<object>().Select(x => x.ToString()!).ToArray();
             return await client.Presence.GetBulkAsync(bulkIds);

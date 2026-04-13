@@ -63,12 +63,6 @@ class MemberPresenceEntry:
 
 
 @dataclass(frozen=True)
-class Cursor:
-    user_id: str
-    seq: int
-
-
-@dataclass(frozen=True)
 class HealthResponse:
     status: str
     connections: int = 0

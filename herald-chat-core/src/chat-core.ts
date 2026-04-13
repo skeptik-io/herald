@@ -1,6 +1,7 @@
-import type { HeraldClient, EventNew, EventEdited, EventDeleted, EventAck, EventsBatch,
-  ReactionChanged, PresenceChanged, CursorMoved, MemberEvent, TypingEvent,
+import type { HeraldClient, EventNew, EventAck, EventsBatch,
+  PresenceChanged, MemberEvent, TypingEvent,
   EventReceived, EventDelivered, SubscribedPayload } from "herald-sdk";
+import type { EventEdited, EventDeleted, ReactionChanged, CursorMoved } from "./types.js";
 import type { HeraldChatClient } from "herald-chat-sdk";
 import type { HeraldPresenceClient, PresenceStatus } from "herald-presence-sdk";
 import type { ChatCoreOptions, ChatWriter, Message, MessageAck, PendingMessage, Member, ScrollStateSnapshot, LivenessState, ChatEvent, Middleware } from "./types.js";
@@ -11,6 +12,15 @@ import { MemberStore } from "./stores/member-store.js";
 import { TypingStore } from "./stores/typing-store.js";
 import { LivenessController, browserEnvironment } from "./liveness/liveness.js";
 import { ScrollState } from "./scroll/scroll-state.js";
+import {
+  encodeEnvelope,
+  parseEnvelope,
+  type ChatEnvelope,
+  type ReactionEnvelope,
+  type EditEnvelope,
+  type DeleteEnvelope,
+  type CursorEnvelope,
+} from "./envelope.js";
 
 type Handler<T> = (data: T) => void;
 
@@ -46,11 +56,7 @@ export class ChatCore {
 
   // Bound handlers for clean detach
   private _onEvent: Handler<EventNew>;
-  private _onEdited: Handler<EventEdited>;
-  private _onDeleted: Handler<EventDeleted>;
-  private _onReaction: Handler<ReactionChanged>;
   private _onPresence: Handler<PresenceChanged>;
-  private _onCursor: Handler<CursorMoved>;
   private _onTyping: Handler<TypingEvent>;
   private _onMemberJoined: Handler<MemberEvent>;
   private _onMemberLeft: Handler<MemberEvent>;
@@ -90,11 +96,7 @@ export class ChatCore {
 
     // Bind handlers
     this._onEvent = (e) => this.handleEvent(e);
-    this._onEdited = (e) => this.handleEdited(e);
-    this._onDeleted = (e) => this.handleDeleted(e);
-    this._onReaction = (e) => this.handleReaction(e);
     this._onPresence = (e) => this.handlePresence(e);
-    this._onCursor = (e) => this.handleCursor(e);
     this._onTyping = (e) => this.handleTyping(e);
     this._onMemberJoined = (e) => this.handleMemberJoined(e);
     this._onMemberLeft = (e) => this.handleMemberLeft(e);
@@ -111,11 +113,7 @@ export class ChatCore {
     this.attached = true;
 
     this.client.on("event", this._onEvent);
-    this.client.on("event.edited", this._onEdited);
-    this.client.on("event.deleted", this._onDeleted);
-    this.client.on("reaction.changed", this._onReaction);
     this.client.on("presence", this._onPresence);
-    this.client.on("cursor", this._onCursor);
     this.client.on("typing", this._onTyping);
     this.client.on("member.joined", this._onMemberJoined);
     this.client.on("member.left", this._onMemberLeft);
@@ -133,11 +131,7 @@ export class ChatCore {
     this.attached = false;
 
     this.client.off("event", this._onEvent);
-    this.client.off("event.edited", this._onEdited);
-    this.client.off("event.deleted", this._onDeleted);
-    this.client.off("reaction.changed", this._onReaction);
     this.client.off("presence", this._onPresence);
-    this.client.off("cursor", this._onCursor);
     this.client.off("typing", this._onTyping);
     this.client.off("member.joined", this._onMemberJoined);
     this.client.off("member.left", this._onMemberLeft);
@@ -257,34 +251,82 @@ export class ChatCore {
   }
 
   async edit(streamId: string, eventId: string, body: string): Promise<void> {
-    if (this.writer?.edit) {
-      await this.writer.edit(streamId, eventId, body);
-    } else {
-      await this.chat.editEvent(streamId, eventId, body);
+    // Optimistic: mutate the local message and capture previous state for
+    // rollback. The server's echo will overwrite editedAt with the canonical
+    // sent_at on receipt, which is desirable.
+    const previous = this.messages.applyEditOptimistic(streamId, eventId, body);
+    try {
+      if (this.writer?.edit) {
+        await this.writer.edit(streamId, eventId, body);
+      } else {
+        const env = encodeEnvelope({ kind: "edit", targetId: eventId, text: body });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      if (previous) {
+        this.messages.revertEdit(streamId, eventId, previous.previousBody, previous.previousEditedAt);
+      }
+      throw err;
     }
   }
 
   async deleteEvent(streamId: string, eventId: string): Promise<void> {
-    if (this.writer?.delete) {
-      await this.writer.delete(streamId, eventId);
-    } else {
-      await this.chat.deleteEvent(streamId, eventId);
+    const previous = this.messages.applyDeleteOptimistic(streamId, eventId);
+    try {
+      if (this.writer?.delete) {
+        await this.writer.delete(streamId, eventId);
+      } else {
+        const env = encodeEnvelope({ kind: "delete", targetId: eventId });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      if (previous) {
+        this.messages.revertDelete(streamId, eventId, previous.previousBody, previous.previousDeleted);
+      }
+      throw err;
     }
   }
 
   async addReaction(streamId: string, eventId: string, emoji: string): Promise<void> {
-    if (this.writer?.addReaction) {
-      await this.writer.addReaction(streamId, eventId, emoji);
-    } else {
-      this.chat.addReaction(streamId, eventId, emoji);
+    // Optimistic: apply locally so the UI updates immediately. The server's
+    // echo (envelope or writer-driven fanout) will re-apply idempotently
+    // (Set add for the same user is a no-op).
+    this.messages.applyReaction({
+      stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "add",
+    });
+    try {
+      if (this.writer?.addReaction) {
+        await this.writer.addReaction(streamId, eventId, emoji);
+      } else {
+        const env = encodeEnvelope({ kind: "reaction", targetId: eventId, op: "add", emoji });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      // Rollback: inverse op restores the pre-optimistic state. Idempotent
+      // if the user already had no such reaction (rare race).
+      this.messages.applyReaction({
+        stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "remove",
+      });
+      throw err;
     }
   }
 
   async removeReaction(streamId: string, eventId: string, emoji: string): Promise<void> {
-    if (this.writer?.removeReaction) {
-      await this.writer.removeReaction(streamId, eventId, emoji);
-    } else {
-      this.chat.removeReaction(streamId, eventId, emoji);
+    this.messages.applyReaction({
+      stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "remove",
+    });
+    try {
+      if (this.writer?.removeReaction) {
+        await this.writer.removeReaction(streamId, eventId, emoji);
+      } else {
+        const env = encodeEnvelope({ kind: "reaction", targetId: eventId, op: "remove", emoji });
+        await this.client.publish(streamId, env);
+      }
+    } catch (err) {
+      this.messages.applyReaction({
+        stream: streamId, event_id: eventId, user_id: this.userId, emoji, action: "add",
+      });
+      throw err;
     }
   }
 
@@ -458,14 +500,31 @@ export class ChatCore {
   // ── Internal event handlers ──────────────────────────────────────
 
   private handleEvent(event: EventNew): void {
+    const envelope = parseEnvelope(event.body);
+
+    // Non-message envelopes ride the same publish path but are folded into
+    // chat state via their own dispatchers (reactions/edits/deletes/cursors
+    // are not "messages" and must not be appended to the message list).
+    if (envelope && envelope.kind !== "message") {
+      this.dispatchEnvelope(envelope, event);
+      return;
+    }
+
+    // Plain message: either a message envelope (unwrap text) or a raw body
+    // (treat as message text — backward compat with non-enveloped publishers
+    // and external HTTP injectors that don't know about chat envelopes).
+    const messageEvent: EventNew = envelope
+      ? { ...event, body: envelope.text }
+      : event;
+
     const listen = this.listenOnly.has(event.stream);
-    this.runMiddleware({ type: "event", data: event }, () => {
+    this.runMiddleware({ type: "event", data: messageEvent }, () => {
       this.notifier.notify(`event:${event.stream}`);
       // Bump latestSeq for both full-state and listen-only (unread counts)
       this.cursors.bumpLatestSeq(event.stream, event.seq);
       if (listen) return;
 
-      const inserted = this.messages.appendEvent(event);
+      const inserted = this.messages.appendEvent(messageEvent);
       if (!inserted) return;
 
       const scroll = this.scrollStates.get(event.stream);
@@ -479,27 +538,87 @@ export class ChatCore {
     });
   }
 
-  private handleEdited(edit: EventEdited): void {
-    const listen = this.listenOnly.has(edit.stream);
-    this.runMiddleware({ type: "event.edited", data: edit }, () => {
-      this.notifier.notify(`event:${edit.stream}`);
-      if (!listen) this.messages.applyEdit(edit);
+  /** Dispatch a non-message chat envelope to the appropriate handler. */
+  private dispatchEnvelope(envelope: ChatEnvelope, event: EventNew): void {
+    switch (envelope.kind) {
+      case "reaction":
+        this.handleEnvelopeReaction(envelope, event);
+        break;
+      case "edit":
+        this.handleEnvelopeEdit(envelope, event);
+        break;
+      case "delete":
+        this.handleEnvelopeDelete(envelope, event);
+        break;
+      case "cursor":
+        this.handleEnvelopeCursor(envelope, event);
+        break;
+    }
+  }
+
+  /** Apply an enveloped reaction. Synthesizes a `ReactionChanged` so existing
+   *  middleware that subscribes to `"reaction.changed"` keeps working. */
+  private handleEnvelopeReaction(env: ReactionEnvelope, event: EventNew): void {
+    const synthesized: ReactionChanged = {
+      stream: event.stream,
+      event_id: env.targetId,
+      emoji: env.emoji,
+      user_id: event.sender,
+      action: env.op,
+    };
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "reaction.changed", data: synthesized }, () => {
+      this.notifier.notify(`event:${event.stream}`);
+      if (!listen) this.messages.applyReaction(synthesized);
     });
   }
 
-  private handleDeleted(del: EventDeleted): void {
-    const listen = this.listenOnly.has(del.stream);
-    this.runMiddleware({ type: "event.deleted", data: del }, () => {
-      this.notifier.notify(`event:${del.stream}`);
-      if (!listen) this.messages.applyDelete(del);
+  /** Apply an enveloped edit. The envelope's `targetId` is the original
+   *  event being edited; the enveloped event's own `seq`/`sent_at` carry
+   *  the edit's ordering and timestamp. */
+  private handleEnvelopeEdit(env: EditEnvelope, event: EventNew): void {
+    const synthesized: EventEdited = {
+      stream: event.stream,
+      id: env.targetId,
+      seq: event.seq,
+      body: env.text,
+      edited_at: event.sent_at,
+    };
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "event.edited", data: synthesized }, () => {
+      this.notifier.notify(`event:${event.stream}`);
+      if (!listen) this.messages.applyEdit(synthesized);
     });
   }
 
-  private handleReaction(reaction: ReactionChanged): void {
-    const listen = this.listenOnly.has(reaction.stream);
-    this.runMiddleware({ type: "reaction.changed", data: reaction }, () => {
-      this.notifier.notify(`event:${reaction.stream}`);
-      if (!listen) this.messages.applyReaction(reaction);
+  private handleEnvelopeDelete(env: DeleteEnvelope, event: EventNew): void {
+    const synthesized: EventDeleted = {
+      stream: event.stream,
+      id: env.targetId,
+      seq: event.seq,
+    };
+    const listen = this.listenOnly.has(event.stream);
+    this.runMiddleware({ type: "event.deleted", data: synthesized }, () => {
+      this.notifier.notify(`event:${event.stream}`);
+      if (!listen) this.messages.applyDelete(synthesized);
+    });
+  }
+
+  /** Apply an enveloped cursor advance. Mirrors `handleCursor` semantics:
+   *  ignore own cursor, ignore listen-only streams, MAX-only advancement,
+   *  and flip my own messages to "read" when a remote user passes them. */
+  private handleEnvelopeCursor(env: CursorEnvelope, event: EventNew): void {
+    const synthesized: CursorMoved = {
+      stream: event.stream,
+      user_id: event.sender,
+      seq: env.seq,
+    };
+    this.runMiddleware({ type: "cursor", data: synthesized }, () => {
+      if (event.sender === this.userId) return;
+      if (this.listenOnly.has(event.stream)) return;
+      const advanced = this.cursors.updateRemoteCursor(event.stream, event.sender, env.seq);
+      if (!advanced) return;
+      this.messages.markRead(event.stream, env.seq, this.userId);
     });
   }
 
@@ -508,16 +627,6 @@ export class ChatCore {
       for (const streamId of this.members.streamsForUser(event.user_id)) {
         this.members.updatePresence(streamId, event.user_id, event.presence);
       }
-    });
-  }
-
-  private handleCursor(event: CursorMoved): void {
-    this.runMiddleware({ type: "cursor", data: event }, () => {
-      if (event.user_id === this.userId) return;
-      if (this.listenOnly.has(event.stream)) return;
-      const advanced = this.cursors.updateRemoteCursor(event.stream, event.user_id, event.seq);
-      if (!advanced) return;
-      this.messages.markRead(event.stream, event.seq, this.userId);
     });
   }
 
@@ -650,10 +759,16 @@ export class ChatCore {
         if (this.writer?.updateCursor) {
           // Fire-and-forget: cursor updates are best-effort and we don't
           // block the UI on them. App writers that need to surface errors
-          // should handle them internally.
-          void this.writer.updateCursor(streamId, latestSeq);
+          // should handle them internally. Swallow the rejection so the
+          // promise doesn't bubble to an unhandled rejection.
+          this.writer.updateCursor(streamId, latestSeq).catch(() => { });
         } else {
-          this.chat.updateCursor(streamId, latestSeq);
+          // Publish the cursor advance as an envelope on the standard
+          // event.publish path. Fire-and-forget — the cursor is monotonic
+          // and will be re-announced on the next user-driven advance if
+          // this publish drops.
+          const env = encodeEnvelope({ kind: "cursor", seq: latestSeq });
+          this.client.publish(streamId, env).catch(() => { });
         }
       }
     }

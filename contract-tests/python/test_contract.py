@@ -196,14 +196,6 @@ def execute_operation(client, op, inp):
             d = to_dict(e)
             events.append(d)
         return {"events": events, "has_more": el.has_more}
-    if op == "events.edit":
-        client.events.edit(inp["stream_id"], inp["event_id"], inp["body"])
-        return None
-    if op == "events.delete":
-        client.events.delete(inp["stream_id"], inp["event_id"])
-        return None
-    if op == "events.getReactions":
-        return client.events.get_reactions(inp["stream_id"], inp["event_id"])
     if op == "events.trigger":
         client.events.trigger(inp["stream_id"], inp["event"], data=inp.get("data"))
         return None
@@ -214,9 +206,6 @@ def execute_operation(client, op, inp):
     if op == "presence.getStream":
         members = client.presence.get_stream(inp["stream_id"])
         return [{"user_id": m.user_id, "status": m.status} for m in members]
-    if op == "presence.getCursors":
-        cursors = client.presence.get_cursors(inp["stream_id"])
-        return [{"user_id": c.user_id, "seq": c.seq} for c in cursors]
     if op == "presence.getBulk":
         return client.presence.get_bulk(inp["user_ids"])
     if op == "presence.setOverride":

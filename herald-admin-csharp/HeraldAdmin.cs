@@ -148,19 +148,6 @@ public class EventNamespace
         return JsonHelper.ToDict(data!.Value);
     }
 
-    public async Task DeleteAsync(string streamId, string eventId) =>
-        await _t.RequestAsync("DELETE", $"/streams/{Uri.EscapeDataString(streamId)}/events/{Uri.EscapeDataString(eventId)}");
-
-    public async Task EditAsync(string streamId, string eventId, string body) =>
-        await _t.RequestAsync("PATCH", $"/streams/{Uri.EscapeDataString(streamId)}/events/{Uri.EscapeDataString(eventId)}",
-            new Dictionary<string, object?> { ["body"] = body });
-
-    public async Task<List<Dictionary<string, object?>>> GetReactionsAsync(string streamId, string eventId)
-    {
-        var data = await _t.RequestAsync("GET", $"/streams/{Uri.EscapeDataString(streamId)}/events/{Uri.EscapeDataString(eventId)}/reactions");
-        return data!.Value.GetProperty("reactions").EnumerateArray().Select(JsonHelper.ToDict).ToList();
-    }
-
     public async Task TriggerAsync(string streamId, string @event, object? data = null)
     {
         var body = new Dictionary<string, object?> { ["event"] = @event };
@@ -184,12 +171,6 @@ public class PresenceNamespace
     {
         var data = await _t.RequestAsync("GET", $"/streams/{Uri.EscapeDataString(streamId)}/presence");
         return data!.Value.GetProperty("members").EnumerateArray().Select(JsonHelper.ToDict).ToList();
-    }
-
-    public async Task<List<Dictionary<string, object?>>> GetCursorsAsync(string streamId)
-    {
-        var data = await _t.RequestAsync("GET", $"/streams/{Uri.EscapeDataString(streamId)}/cursors");
-        return data!.Value.GetProperty("cursors").EnumerateArray().Select(JsonHelper.ToDict).ToList();
     }
 
     public async Task<List<Dictionary<string, object?>>> GetBulkAsync(string[] userIds)

@@ -31,22 +31,6 @@ class EventNamespace
         return $this->t->request('GET', '/streams/' . rawurlencode($streamId) . "/events{$qs}");
     }
 
-    public function delete(string $streamId, string $eventId): void
-    {
-        $this->t->request('DELETE', '/streams/' . rawurlencode($streamId) . '/events/' . rawurlencode($eventId));
-    }
-
-    public function edit(string $streamId, string $eventId, string $body): void
-    {
-        $this->t->request('PATCH', '/streams/' . rawurlencode($streamId) . '/events/' . rawurlencode($eventId), ['body' => $body]);
-    }
-
-    public function getReactions(string $streamId, string $eventId): array
-    {
-        $data = $this->t->request('GET', '/streams/' . rawurlencode($streamId) . '/events/' . rawurlencode($eventId) . '/reactions');
-        return $data['reactions'];
-    }
-
     public function trigger(string $streamId, string $event, mixed $data = null, ?int $excludeConnection = null): void
     {
         $body = ['event' => $event];

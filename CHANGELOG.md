@@ -2,6 +2,69 @@
 
 All notable changes to Herald are documented in this file.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Chat state mutations are now typed envelopes on `event.publish`, not
+  dedicated WS frames.** Edits, deletes, reactions, and read-cursor
+  advances ride the same `event.publish` → `event.new` path as messages,
+  distinguished by a `kind` field in the event body. The chat engine
+  on the server no longer has dedicated handlers for any of them, and
+  the corresponding WS frame types (`event.edit`, `event.delete`,
+  `reaction.add`, `reaction.remove`, `cursor.update`) and server-to-client
+  frames (`event.edited`, `event.deleted`, `reaction.changed`,
+  `cursor.moved`) have been removed. Chat-core's SDK handles the envelope
+  dispatch end-to-end — see `herald-chat-core/src/envelope.ts`.
+
+- **HTTP endpoints for chat-state mutations are removed.** The following
+  were deleted in favor of publishing a typed envelope via
+  `POST /streams/{id}/events`:
+  - `PATCH /streams/{id}/events/{event_id}` (edit)
+  - `DELETE /streams/{id}/events/{event_id}` (delete)
+  - `GET /streams/{id}/events/{event_id}/reactions` (reaction list)
+  - `GET /streams/{id}/cursors` (cursor list)
+
+- **Server no longer enforces ownership for edit/delete.** Any
+  member can publish an edit/delete envelope; apps are responsible for
+  enforcing ownership in their webhook consumer when persisting to the
+  canonical app database.
+
+- **`store::reactions` module removed.** Reactions are no longer
+  persisted in a dedicated namespace — they live in the event stream
+  as envelopes and the app DB (via webhook mirror) is canonical across
+  time.
+
+- **`SubscribedPayload.cursor`** is now the ack-mode delivery
+  high-water-mark, not the user-facing read cursor. Read cursors are
+  now reconstructed client-side from `cursor` envelopes in the event
+  stream (within the buffer window) or hydrated from the app DB.
+
+### Why
+
+Herald is a transport layer (Pusher/Ably/Centrifugo category), not a
+chat server. The previous design had dedicated server-side handlers
+and persistence for chat-specific mutations, which both contradicted
+the "delivery layer, not a database" framing and created a buggy
+parallel path (fire-and-forget frames with no ref/ack) alongside the
+working `event.publish` path. Collapsing everything to the publish
+path gives chat operations free ref/ack/optimistic/reconcile/replay
+semantics and lets the server stay focused on transport + authz.
+
+### Migration
+
+Apps using `herald-chat-core` or `herald-chat-react` receive this
+change transparently — the core's `addReaction` / `removeReaction` /
+`edit` / `deleteEvent` methods now publish envelopes under the hood
+with optimistic updates and rollback on failure. Apps using the raw
+`herald-sdk` directly should publish envelopes of the form
+`JSON.stringify({ kind: "reaction" | "edit" | "delete" | "cursor", ... })`
+instead of calling the removed frame methods on `HeraldChatClient`.
+
+Webhook consumers that switched on `event.event === "event.edited"` etc.
+should instead switch on `body.kind` inside the received `event.new`
+payload.
+
 ## [4.0.0] - 2026-04-11
 
 ### Breaking Changes

@@ -1,8 +1,16 @@
 # @skeptik-io/herald-chat-sdk
 
-WebSocket client wrapper that extends `@skeptik-io/herald-sdk` with chat-specific frame types.
+Thin WebSocket helpers for typing indicators on top of
+`@skeptik-io/herald-sdk`.
 
-> **Herald persists chat mutations for replay, not for durability.** Edits, deletes, and reactions are kept in Herald's WAL (default **7-day retention**) so a client that reconnects after a brief disconnect replays every delta it missed — including, say, a delete that happened while its wifi was down. This makes reconnects seamless without a page refresh. It does **not** make Herald a durable store: after the TTL, those mutations are gone. Mirror them into your app's database via the server-side webhook, and hydrate history from your DB on cold load / long absences.
+All other chat-state operations (send, edit, delete, reactions, cursor
+advances) ride the standard `event.publish` path as typed envelopes.
+For apps, that shape is wrapped by `herald-chat-core` — prefer that as
+the integration point. This package exists for consumers that want to
+send typing frames over a raw `HeraldClient` without pulling in the
+full chat state machine.
+
+> **Herald persists chat mutations for replay, not for durability.** Envelopes (reactions, edits, deletes, cursor advances) ride through the WAL with a default 7-day retention so a client that reconnects after a brief disconnect replays every delta it missed — including, say, a delete that happened while its wifi was down. This makes reconnects seamless without a page refresh. It does **not** make Herald a durable store: after the TTL, those mutations are gone. Mirror them into your app's database via the server-side webhook, and hydrate history from your DB on cold load / long absences.
 
 ## Install
 
@@ -26,32 +34,42 @@ const client = new HeraldClient({
 const chat = new HeraldChatClient(client);
 await client.connect();
 
-// Edit and delete events
-await chat.editEvent('general', 'event-id', 'corrected text');
-await chat.deleteEvent('general', 'event-id');
-
-// Typing
 chat.startTyping('general');
 chat.stopTyping('general');
-
-// Cursors (read receipts)
-chat.updateCursor('general', 42);
-
-// Reactions
-chat.addReaction('general', 'event-id', '🔥');
-chat.removeReaction('general', 'event-id', '🔥');
 ```
 
 ## API
 
-| Method | Frame | Response |
-|--------|-------|----------|
-| `editEvent(stream, id, body)` | `event.edit` | `Promise<EventAck>` |
-| `deleteEvent(stream, id)` | `event.delete` | `Promise<EventAck>` |
-| `updateCursor(stream, seq)` | `cursor.update` | fire-and-forget |
-| `startTyping(stream)` | `typing.start` | fire-and-forget |
-| `stopTyping(stream)` | `typing.stop` | fire-and-forget |
-| `addReaction(stream, eventId, emoji)` | `reaction.add` | fire-and-forget |
-| `removeReaction(stream, eventId, emoji)` | `reaction.remove` | fire-and-forget |
+| Method | Frame |
+|--------|-------|
+| `startTyping(stream)` | `typing.start` |
+| `stopTyping(stream)` | `typing.stop` |
 
-E2EE: `editEvent` encrypts the body automatically when `e2eeManager` is set on the underlying `HeraldClient`.
+## Chat-state operations
+
+Messages, edits, deletes, reactions, and cursor advances are published
+as enveloped events via `HeraldClient.publish`:
+
+```ts
+// Message
+await client.publish(stream, JSON.stringify({ kind: 'message', text: 'hi' }));
+
+// Reaction
+await client.publish(stream, JSON.stringify({
+  kind: 'reaction', targetId: eventId, op: 'add', emoji: '🔥',
+}));
+
+// Edit
+await client.publish(stream, JSON.stringify({
+  kind: 'edit', targetId: eventId, text: 'corrected',
+}));
+
+// Delete
+await client.publish(stream, JSON.stringify({ kind: 'delete', targetId: eventId }));
+
+// Read cursor
+await client.publish(stream, JSON.stringify({ kind: 'cursor', seq: 42 }));
+```
+
+Or use `herald-chat-core`, which wraps all of the above with optimistic
+state updates, rollback, and a subscribable store.

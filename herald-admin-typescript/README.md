@@ -44,7 +44,6 @@ const history = await admin.events.list('general', { limit: 50 });
 const presence = await admin.presence.getUser('alice');
 const bulk = await admin.presence.getBulk(['alice', 'bob', 'carol']);
 const streamPresence = await admin.presence.getStream('general');
-const cursors = await admin.presence.getCursors('general');
 await admin.presence.setOverride('alice', { status: 'dnd', until: '2026-04-14T09:00:00Z' });
 
 // Health

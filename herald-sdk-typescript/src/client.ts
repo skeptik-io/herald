@@ -80,6 +80,11 @@ export class HeraldClient {
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly ACK_DEBOUNCE_MS = 100;
 
+  // Catchup pagination — per-stream progress while draining has_more batches
+  private catchupState = new Map<string, { eventsReceived: number }>();
+  private readonly CATCHUP_MAX_ATTEMPTS = 3;
+  private readonly CATCHUP_RETRY_BASE_MS = 100;
+
   constructor(options: HeraldClientOptions) {
     this.options = options;
     if (options.e2ee) {
@@ -432,33 +437,7 @@ export class HeraldClient {
           this.pending.delete(ref);
         } else if (batch) {
           // Server-pushed catchup batch (reconnect) — emit each event
-          let highestSeq = 0;
-          for (const evt of batch.events) {
-            if (this.seenMessageIds.has(evt.id)) continue;
-            this.seenMessageIds.add(evt.id);
-            if (evt.sent_at && evt.sent_at > (this.lastSeenAt ?? 0)) {
-              this.lastSeenAt = evt.sent_at;
-            }
-            if (evt.seq > highestSeq) highestSeq = evt.seq;
-            this.emit("event", evt as unknown as EventNew);
-          }
-          // At-least-once: ack the highest seq in the batch
-          if (this.options.ackMode && highestSeq > 0) {
-            this.scheduleAck(batch.stream, highestSeq);
-          }
-          // Auto-paginate: if server has more events, fetch the next page
-          if (batch.has_more && batch.events.length > 0) {
-            const lastSeq = batch.events[batch.events.length - 1].seq;
-            this.fetch(batch.stream, { after: lastSeq }).then((next) => {
-              // Re-emit as server-pushed batch by synthesizing a frame
-              this.handleFrame({
-                type: "events.batch",
-                payload: next,
-              });
-            }).catch(() => {
-              // Pagination failure is non-fatal — client has partial catchup
-            });
-          }
+          this.processCatchupBatch(batch);
         }
         break;
       }
@@ -542,6 +521,74 @@ export class HeraldClient {
       case "pong":
         // No-op
         break;
+    }
+  }
+
+  /** Emit events from a server-pushed catchup batch and, if the server
+   *  reports more is available, kick off pagination to drain the rest.
+   *  Catchup-page fetches are retried with exponential backoff; if all
+   *  retries fail, a `catchup.error` event is emitted so the application
+   *  can decide how to recover (retry later, rehydrate from app DB, etc.)
+   *  rather than silently accepting a partial view. */
+  private processCatchupBatch(batch: EventsBatch): void {
+    let highestSeq = 0;
+    let emitted = 0;
+    for (const evt of batch.events) {
+      if (this.seenMessageIds.has(evt.id)) continue;
+      this.seenMessageIds.add(evt.id);
+      if (evt.sent_at && evt.sent_at > (this.lastSeenAt ?? 0)) {
+        this.lastSeenAt = evt.sent_at;
+      }
+      if (evt.seq > highestSeq) highestSeq = evt.seq;
+      this.emit("event", evt as unknown as EventNew);
+      emitted++;
+    }
+    if (this.options.ackMode && highestSeq > 0) {
+      this.scheduleAck(batch.stream, highestSeq);
+    }
+
+    const state = this.catchupState.get(batch.stream) ?? { eventsReceived: 0 };
+    state.eventsReceived += emitted;
+    this.catchupState.set(batch.stream, state);
+
+    if (batch.has_more && batch.events.length > 0) {
+      const lastSeq = batch.events[batch.events.length - 1].seq;
+      void this.fetchNextCatchupPage(batch.stream, lastSeq);
+    } else {
+      this.catchupState.delete(batch.stream);
+      this.emit("catchup.complete", {
+        stream: batch.stream,
+        eventsReceived: state.eventsReceived,
+      });
+    }
+  }
+
+  /** Fetch the next catchup page with bounded retries. On success, recurses
+   *  via processCatchupBatch. On exhaustion, surfaces `catchup.error` with
+   *  `resumeFrom` so the app can retry manually. */
+  private async fetchNextCatchupPage(
+    stream: string,
+    after: number,
+    attempt = 1,
+  ): Promise<void> {
+    try {
+      const next = await this.fetch(stream, { after });
+      this.processCatchupBatch(next);
+    } catch (err) {
+      if (attempt < this.CATCHUP_MAX_ATTEMPTS) {
+        const delay = this.CATCHUP_RETRY_BASE_MS * Math.pow(3, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        return this.fetchNextCatchupPage(stream, after, attempt + 1);
+      }
+      const state = this.catchupState.get(stream);
+      this.catchupState.delete(stream);
+      this.emit("catchup.error", {
+        stream,
+        error: err instanceof Error ? err : new Error(String(err)),
+        attempts: attempt,
+        eventsReceived: state?.eventsReceived ?? 0,
+        resumeFrom: after,
+      });
     }
   }
 

@@ -29,6 +29,13 @@ export interface HeraldClientOptions {
    * using timestamp-based catchup.
    */
   ackMode?: boolean;
+  /**
+   * Enable timestamp-based catch-up on reconnect. When true (default), the
+   * client sends `last_seen_at` on reconnect and the server replays missed
+   * events. Set to false when the application uses its own database as the
+   * primary message store and seeds history via `seedHistory()`.
+   */
+  catchUp?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +167,26 @@ export interface ServerFrame {
   payload?: unknown;
 }
 
+/** Fired when a server-pushed catchup batch has drained successfully. */
+export interface CatchupComplete {
+  stream: string;
+  eventsReceived: number;
+}
+
+/** Fired when catchup pagination has exhausted its retries and given up.
+ *  The client has a partial view of the catchup range — events between
+ *  `resumeFrom` and the live edge are missing until the application
+ *  either retries fetch manually, reconnects, or rehydrates from its DB. */
+export interface CatchupError {
+  stream: string;
+  error: Error;
+  attempts: number;
+  eventsReceived: number;
+  /** Seq to resume from: `await client.fetch(stream, { after: resumeFrom })`
+   *  will continue where catchup left off. */
+  resumeFrom: number;
+}
+
 export type HeraldEventMap = {
   event: EventNew;
   "event.deleted": EventDeleted;
@@ -181,6 +208,8 @@ export type HeraldEventMap = {
   disconnected: void;
   reconnecting: void;
   error: ErrorPayload;
+  "catchup.complete": CatchupComplete;
+  "catchup.error": CatchupError;
 };
 
 export type HeraldEvent = keyof HeraldEventMap;

@@ -1074,6 +1074,88 @@ async function run(): Promise<void> {
       client.disconnect();
     });
 
+    // ── Catchup drain-to-completion ──────────────────────────────
+    // Server caps each catchup EventsBatch at CATCHUP_LIMIT (200) events
+    // and sets has_more=true for the rest. The SDK must auto-paginate
+    // through the full backlog and fire catchup.complete, otherwise a
+    // reconnect after a high-volume gap silently loses events.
+    await test("catchup: drains >200 events on reconnect and fires catchup.complete", async () => {
+      await tenantAdmin.streams.create("catchup-drain", "Catchup Drain Test");
+      await tenantAdmin.members.add("catchup-drain", "alice");
+
+      // 1) Establish alice's ack cursor: connect, receive a baseline
+      //    event, let the ack flush so the server persists her position.
+      let alice = makeClient("alice", ["catchup-drain"], { ackMode: true });
+      await alice.connect();
+      await alice.subscribe(["catchup-drain"]);
+
+      const baselineReceived = new Promise<void>((resolve) => {
+        const handler = (evt: any) => {
+          if (evt.body === "baseline") { alice.off("event", handler); resolve(); }
+        };
+        alice.on("event", handler);
+        setTimeout(resolve, 3000);
+      });
+      await tenantAdmin.events.publish("catchup-drain", "bot", "baseline");
+      await baselineReceived;
+      await new Promise((r) => setTimeout(r, 400)); // ack debounce flush
+
+      alice.disconnect();
+      await new Promise((r) => setTimeout(r, 500)); // cursor persist
+
+      // 2) Publish 210 events while alice is offline — exceeds the 200
+      //    per-batch cap so drain requires at least one has_more fetch.
+      const BACKLOG = 210;
+      const expectedBodies = new Set<string>();
+      for (let i = 1; i <= BACKLOG; i++) {
+        const body = `drain-${i}`;
+        expectedBodies.add(body);
+        await tenantAdmin.events.publish("catchup-drain", "bot", body);
+      }
+
+      // 3) Reconnect. Server pushes EventsBatch with 200 + has_more=true,
+      //    SDK drains the remaining 10 automatically via fetch().
+      alice = makeClient("alice", ["catchup-drain"], { ackMode: true });
+
+      const received: string[] = [];
+      alice.on("event", (evt: any) => {
+        received.push(evt.body);
+      });
+
+      let completePayload: { stream: string; eventsReceived: number } | null = null;
+      let errorPayload: any = null;
+      const drainDone = new Promise<void>((resolve) => {
+        alice.on("catchup.complete", (p) => {
+          if (p.stream === "catchup-drain") { completePayload = p; resolve(); }
+        });
+        alice.on("catchup.error", (e) => { errorPayload = e; resolve(); });
+        setTimeout(resolve, 8000);
+      });
+
+      await alice.connect();
+      await alice.subscribe(["catchup-drain"]);
+      await drainDone;
+
+      assert(errorPayload === null, `catchup.error should not fire: ${errorPayload && errorPayload.error?.message}`);
+      assert(completePayload !== null, "catchup.complete should fire after drain");
+      assert(
+        completePayload !== null && (completePayload as { eventsReceived: number }).eventsReceived >= BACKLOG,
+        `catchup.complete eventsReceived should be >= ${BACKLOG}, got ${completePayload && (completePayload as { eventsReceived: number }).eventsReceived}`,
+      );
+      assert(
+        received.length >= BACKLOG,
+        `client should receive all ${BACKLOG} backlog events, got ${received.length}`,
+      );
+
+      // All backlog bodies must be present — no silent gap in the drain.
+      const receivedSet = new Set(received);
+      let missing = 0;
+      for (const body of expectedBodies) if (!receivedSet.has(body)) missing++;
+      assert(missing === 0, `${missing} backlog events missing from catchup drain`);
+
+      alice.disconnect();
+    });
+
   } finally {
     console.log("\nStopping server...");
     await stopServer();

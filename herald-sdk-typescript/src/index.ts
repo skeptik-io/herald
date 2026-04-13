@@ -20,6 +20,8 @@ export type {
   EventDelivered,
   WatchlistEvent,
   MemberPresence,
+  CatchupComplete,
+  CatchupError,
   HeraldEvent,
   HeraldEventMap,
 } from "./types.js";

@@ -93,22 +93,6 @@ async function executeOperation(op: string, input: Record<string, unknown>): Pro
       });
       return { events: result.events, has_more: result.has_more };
     }
-    case "events.edit":
-      return client.events.edit(
-        input.stream_id as string,
-        input.event_id as string,
-        input.body as string,
-      );
-    case "events.delete":
-      return client.events.delete(
-        input.stream_id as string,
-        input.event_id as string,
-      );
-    case "events.getReactions":
-      return client.events.getReactions(
-        input.stream_id as string,
-        input.event_id as string,
-      );
     case "events.trigger":
       return client.events.trigger(
         input.stream_id as string,
@@ -120,8 +104,6 @@ async function executeOperation(op: string, input: Record<string, unknown>): Pro
       return client.presence.getUser(input.user_id as string);
     case "presence.getStream":
       return client.presence.getStream(input.stream_id as string);
-    case "presence.getCursors":
-      return client.presence.getCursors(input.stream_id as string);
     case "presence.getBulk":
       return client.presence.getBulk(input.user_ids as string[]);
     case "presence.setOverride":
